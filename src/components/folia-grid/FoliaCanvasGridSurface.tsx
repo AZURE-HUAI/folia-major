@@ -273,7 +273,9 @@ export const FoliaCanvasGridSurface: React.FC<FoliaCanvasGridSurfaceProps> = ({
                         translate: '-50% -50%',
                         ...getCssVarStyle(overlayFrame),
                     } as React.CSSProperties}
-                    onPointerMove={updateHoverFromEvent}
+                    onPointerEnter={() => setHoveredIndex(overlayIndex)}
+                    onPointerMove={() => setHoveredIndex(overlayIndex)}
+                    onPointerLeave={() => setHoveredIndex(null)}
                 >
                     {renderOverlayCard({
                         index: overlayIndex,

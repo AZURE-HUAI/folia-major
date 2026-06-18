@@ -58,10 +58,11 @@ export interface CanvasGridSnapshotQueue {
 interface SnapshotQueueOptions {
     createCanvas?: (width: number, height: number) => HTMLCanvasElement;
     loadImage?: (src: string) => Promise<CanvasImageSource | null>;
-    now?: () => number;
+    snapshotScale?: number;
 }
 
 const SNAPSHOT_BATCH_SIZE = 3;
+const DEFAULT_SNAPSHOT_SCALE = 1.5;
 const CARD_PADDING = 12;
 const PHOTO_RADIUS = 9;
 const CARD_RADIUS = 12;
@@ -457,6 +458,7 @@ const defaultLoadImage = (src: string): Promise<CanvasImageSource | null> => (
 export const createCanvasCardSnapshotQueue = ({
     createCanvas = defaultCreateCanvas,
     loadImage = defaultLoadImage,
+    snapshotScale,
 }: SnapshotQueueOptions = {}): CanvasGridSnapshotQueue => {
     const records = new Map<string, CanvasGridItemSnapshot>();
     const pending: Array<{
@@ -467,16 +469,26 @@ export const createCanvasCardSnapshotQueue = ({
     }> = [];
     let scheduled = false;
 
+    function paintSnapshot(
+        record: CanvasGridItemSnapshot,
+        item: GridItem,
+        options: CanvasCardRenderOptions,
+        image: CanvasImageSource | null
+    ) {
+        const context = record.canvas.getContext('2d');
+        if (!context) return;
+        const scale = Math.max(record.canvas.width / Math.max(record.width, 1), 1);
+        context.setTransform?.(scale, 0, 0, scale, 0, 0);
+        drawCanvasGridCardSnapshot(context, item, options, image);
+    }
+
     const process = () => {
         scheduled = false;
         const batch = pending.splice(0, SNAPSHOT_BATCH_SIZE);
         for (const job of batch) {
             void loadImage(job.item.coverUrl || '').then((image) => {
-                const context = job.record.canvas.getContext('2d');
-                if (context) {
-                    drawCanvasGridCardSnapshot(context, job.item, job.options, image);
-                    job.record.ready = true;
-                }
+                paintSnapshot(job.record, job.item, job.options, image);
+                job.record.ready = true;
                 job.onReady();
             });
         }
@@ -497,6 +509,14 @@ export const createCanvasCardSnapshotQueue = ({
         }
     };
 
+    const resolveSnapshotScale = () => {
+        if (snapshotScale !== undefined) {
+            return Math.max(1, Math.min(2, snapshotScale));
+        }
+        const dpr = typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1;
+        return Math.max(DEFAULT_SNAPSHOT_SCALE, Math.min(2, dpr));
+    };
+
     return {
         getOrQueue: (item, options, onReady) => {
             const key = makeSnapshotKey(item, options);
@@ -504,11 +524,8 @@ export const createCanvasCardSnapshotQueue = ({
             if (existing) return existing;
 
             const { width, height } = getCanvasGridCardSize(item, options);
-            const canvas = createCanvas(width, height);
-            const context = canvas.getContext('2d');
-            if (context) {
-                drawCanvasGridCardSnapshot(context, item, options, null);
-            }
+            const scale = resolveSnapshotScale();
+            const canvas = createCanvas(width * scale, height * scale);
 
             const record: CanvasGridItemSnapshot = {
                 key,
@@ -517,6 +534,7 @@ export const createCanvasCardSnapshotQueue = ({
                 height,
                 ready: !item.coverUrl,
             };
+            paintSnapshot(record, item, options, null);
             records.set(key, record);
 
             if (item.coverUrl) {

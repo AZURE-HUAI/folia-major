@@ -148,5 +148,6 @@ describe('canvasGridRenderer', () => {
         expect(first).toBe(second);
         expect(queue.size()).toBe(1);
         expect(createCanvas).toHaveBeenCalledTimes(1);
+        expect(createCanvas).toHaveBeenCalledWith(330, 495);
     });
 });
