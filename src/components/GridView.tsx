@@ -11,6 +11,7 @@ import { colorWithAlpha } from './visualizer/colorMix';
 import { saveToCache, getFromCache, removeFromCache } from '../services/db';
 import { useFoliaHexViewport } from './folia-grid/useFoliaHexViewport';
 import FoliaCanvasGridSurface from './folia-grid/FoliaCanvasGridSurface';
+import FoliaPixiGridSurface from './folia-grid/FoliaPixiGridSurface';
 import { PolaroidCard } from './folia-grid/PolaroidCard';
 import type { GridItem, GridLayoutConfig } from './folia-grid/gridTypes';
 import {
@@ -80,7 +81,7 @@ const GRID_VIEW_NAVIGATION_PREFIX = 'folia_gridview_state';
 const GRID_VIEW_LAST_INDEX_PREFIX = 'folia_gridview_last_index';
 const GRID_VIEW_RENDER_BUFFER_FACTOR = 0.75;
 const GRID_VIEW_CARD_VISIBILITY_BUFFER = 96;
-const GRID_VIEW_SURFACE_MODE: 'canvas' | 'dom' = 'canvas';
+const GRID_VIEW_SURFACE_MODE: 'pixi' | 'canvas' | 'dom' = 'pixi';
 
 const getLowResCoverUrl = (url: string): string => getSizedCoverUrl(url, 150);
 
@@ -1050,13 +1051,13 @@ export const GridView: React.FC<GridViewProps> = ({
     }, [showSearchPanel]);
 
     useEffect(() => {
-        if (GRID_VIEW_SURFACE_MODE === 'canvas') return;
+        if (GRID_VIEW_SURFACE_MODE !== 'dom') return;
         updateRenderedIndexesForViewport(dragX.get(), dragY.get(), true);
     }, [dragX, dragY, updateRenderedIndexesForViewport]);
 
     // Memoize only the nearby card set so React keeps heavy image/button trees out of the drag hot path
     const memoizedCards = useMemo(() => {
-        if (GRID_VIEW_SURFACE_MODE === 'canvas') return null;
+        if (GRID_VIEW_SURFACE_MODE !== 'dom') return null;
         return renderedIndexes.map((idx) => {
             const item = gridItems[idx];
             const coord = baseCoords[idx];
@@ -1169,7 +1170,7 @@ export const GridView: React.FC<GridViewProps> = ({
      * updates the mounted viewport-near card set resolved from the hex grid.
      */
     useEffect(() => {
-        if (GRID_VIEW_SURFACE_MODE === 'canvas') return;
+        if (GRID_VIEW_SURFACE_MODE !== 'dom') return;
         let rafId: number | null = null;
 
         const update = () => {
@@ -1300,6 +1301,41 @@ export const GridView: React.FC<GridViewProps> = ({
         flushPendingBackgroundTracks();
         scheduleFocusedIndexCommit(140);
     }, [flushPendingBackgroundTracks, scheduleFocusedIndexCommit]);
+
+    const renderHybridOverlayCard = ({ index, item, isFocused }: {
+        index: number;
+        item: GridItem;
+        isFocused: boolean;
+    }) => (
+        <PolaroidCard
+            item={item}
+            isDaylight={isDaylight}
+            theme={theme}
+            mode={mode}
+            t={t}
+            cardWidth={layoutConfig.cardWidth}
+            cardHeight={layoutConfig.cardHeight}
+            isEditMode={isEditMode}
+            onRemoveTrack={() => {
+                if (item.rawTrack) handleRemoveTrack(item.rawTrack, item.rawTrackIndex ?? index);
+            }}
+            onSelectArtist={onSelectArtist}
+            onSelectAlbum={onSelectAlbum}
+            onBeforeNestedNavigate={() => {
+                persistNavigationState(index);
+            }}
+            onSelect={() => openGridItemAtIndex(index)}
+            onCenter={() => {
+                if (isDraggingRef.current) return;
+                centerOnIndex(index, true);
+            }}
+            onAddQueue={mode === 'tracks' && onAddTrackToQueue && item.rawTrack
+                ? () => onAddTrackToQueue(item.rawTrack!)
+                : undefined}
+            openWhenFocusedOnCardClick
+            isFocused={isFocused}
+        />
+    );
 
     const showLoading = isLoading || externalTracksLoading || (mode === 'tracks' && loading && displayTracks.length === 0);
     const hasSearchQuery = deferredSearchQuery.trim().length > 0;
@@ -1477,6 +1513,33 @@ export const GridView: React.FC<GridViewProps> = ({
                     <div className="opacity-40 text-sm font-sans">
                         {hasSearchQuery ? (t('home.gridSearchNoResults') || 'No matching cards') : (t('home.loadingLibrary') || 'No items found')}
                     </div>
+                ) : GRID_VIEW_SURFACE_MODE === 'pixi' ? (
+                    <FoliaPixiGridSurface
+                        items={gridItems}
+                        coords={baseCoords}
+                        containerSize={containerSize}
+                        layoutConfig={layoutConfig}
+                        cardFrameOptions={cardFrameOptions}
+                        renderRadius={renderRadius}
+                        renderRing={renderRing}
+                        mode={mode}
+                        isDaylight={isDaylight}
+                        theme={theme}
+                        dragX={dragX}
+                        dragY={dragY}
+                        dragControls={dragControls}
+                        dragBounds={dragBounds}
+                        focusedIndex={focusedIndex}
+                        onFrameFocusedIndexChange={handleFrameFocusedIndexChange}
+                        onDragStart={handleGridDragStart}
+                        onDragEnd={handleGridDragEnd}
+                        onCenterIndex={(index) => {
+                            if (isDraggingRef.current) return;
+                            centerOnIndex(index, true);
+                        }}
+                        onOpenIndex={openGridItemAtIndex}
+                        renderOverlayCard={renderHybridOverlayCard}
+                    />
                 ) : GRID_VIEW_SURFACE_MODE === 'canvas' ? (
                     <FoliaCanvasGridSurface
                         items={gridItems}
@@ -1502,36 +1565,7 @@ export const GridView: React.FC<GridViewProps> = ({
                             centerOnIndex(index, true);
                         }}
                         onOpenIndex={openGridItemAtIndex}
-                        renderOverlayCard={({ index, item, isFocused }) => (
-                            <PolaroidCard
-                                item={item}
-                                isDaylight={isDaylight}
-                                theme={theme}
-                                mode={mode}
-                                t={t}
-                                cardWidth={layoutConfig.cardWidth}
-                                cardHeight={layoutConfig.cardHeight}
-                                isEditMode={isEditMode}
-                                onRemoveTrack={() => {
-                                    if (item.rawTrack) handleRemoveTrack(item.rawTrack, item.rawTrackIndex ?? index);
-                                }}
-                                onSelectArtist={onSelectArtist}
-                                onSelectAlbum={onSelectAlbum}
-                                onBeforeNestedNavigate={() => {
-                                    persistNavigationState(index);
-                                }}
-                                onSelect={() => openGridItemAtIndex(index)}
-                                onCenter={() => {
-                                    if (isDraggingRef.current) return;
-                                    centerOnIndex(index, true);
-                                }}
-                                onAddQueue={mode === 'tracks' && onAddTrackToQueue && item.rawTrack
-                                    ? () => onAddTrackToQueue(item.rawTrack!)
-                                    : undefined}
-                                openWhenFocusedOnCardClick
-                                isFocused={isFocused}
-                            />
-                        )}
+                        renderOverlayCard={renderHybridOverlayCard}
                     />
                 ) : (
                     <motion.div

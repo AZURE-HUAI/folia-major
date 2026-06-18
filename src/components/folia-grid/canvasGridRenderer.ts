@@ -448,6 +448,9 @@ const defaultCreateCanvas = (width: number, height: number): HTMLCanvasElement =
 const defaultLoadImage = (src: string): Promise<CanvasImageSource | null> => (
     new Promise((resolve) => {
         const image = new Image();
+        if (/^https?:\/\//i.test(src)) {
+            image.crossOrigin = 'anonymous';
+        }
         image.decoding = 'async';
         image.onload = () => resolve(image);
         image.onerror = () => resolve(null);
