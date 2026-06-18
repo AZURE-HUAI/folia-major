@@ -20,6 +20,7 @@ export interface HexCardFrame {
     display: '' | 'none';
     distance: number;
     distanceSq: number;
+    scale: number;
     transform: string;
     opacity: string;
     zIndex: string;
@@ -116,6 +117,7 @@ export const computeHexCardFrame = (
         display: visible ? '' : 'none',
         distance,
         distanceSq,
+        scale,
         transform: buildTransform(coord, scale),
         opacity: formatOpacity(opacity),
         zIndex: String(zIndex),

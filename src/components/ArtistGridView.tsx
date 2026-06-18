@@ -9,7 +9,7 @@ import { getNavidromeConfig, navidromeApi } from '../services/navidromeService';
 import { neteaseApi } from '../services/netease';
 import { createCoverPlaceholder } from '../utils/coverPlaceholders';
 import { getSizedCoverUrl } from '../utils/coverUrl';
-import { PolaroidCard } from './GridView';
+import { PolaroidCard } from './folia-grid/PolaroidCard';
 import { HexGridCoord, CubeCoord, getHexCubicSpiral } from './folia-grid/hexViewport';
 import { useFoliaHexViewport } from './folia-grid/useFoliaHexViewport';
 
