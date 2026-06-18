@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
     createCanvasCardSnapshotQueue,
+    drawCanvasGridCardSnapshot,
     hitTestCanvasGridCard,
     resolveCanvasGridFrame,
     type CanvasCardRenderOptions,
@@ -110,6 +111,28 @@ describe('canvasGridRenderer', () => {
         expect(frame.cards.map(card => card.index)).toEqual([1]);
     });
 
+    it('skips all DOM overlay cards when focused and hovered cards are both mounted', () => {
+        const items = [makeItem(0), makeItem(1), makeItem(2)];
+        const coords = [
+            makeCoord(0, 0, 0),
+            makeCoord(1, 260, 0),
+            makeCoord(2, 0, 260),
+        ];
+
+        const frame = resolveCanvasGridFrame({
+            items,
+            coords,
+            dx: 0,
+            dy: 0,
+            frameOptions,
+            renderOptions,
+            overlayIndexes: [0, 1],
+        });
+
+        expect(frame.closestIndex).toBe(0);
+        expect(frame.cards.map(card => card.index)).toEqual([2]);
+    });
+
     it('hit-tests scaled cards using the topmost visible card', () => {
         const items = [makeItem(0), makeItem(1)];
         const coords = [
@@ -149,5 +172,22 @@ describe('canvasGridRenderer', () => {
         expect(queue.size()).toBe(1);
         expect(createCanvas).toHaveBeenCalledTimes(1);
         expect(createCanvas).toHaveBeenCalledWith(330, 495);
+    });
+
+    it('draws explicit title text when the card name is a React node', () => {
+        const context = createFakeContext();
+        const item: GridItem = {
+            ...makeItem(7),
+            name: { type: 'span', props: { children: 'React Title' } } as any,
+            titleText: 'Snapshot Title',
+        };
+
+        drawCanvasGridCardSnapshot(context as any, item, renderOptions, null);
+
+        expect(context.fillText).toHaveBeenCalledWith(
+            'Snapshot Title',
+            expect.any(Number),
+            expect.any(Number)
+        );
     });
 });

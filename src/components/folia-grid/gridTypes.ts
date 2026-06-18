@@ -7,6 +7,7 @@ export type GridViewMode = 'collection' | 'tracks';
 export interface GridItem {
     id: string | number;
     name: React.ReactNode;
+    titleText?: string;
     searchText?: string;
     coverUrl?: string;
     subtitle?: string;

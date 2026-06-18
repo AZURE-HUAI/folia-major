@@ -1,6 +1,13 @@
 import React from 'react';
 import { SongResult } from '../types';
 
+export const formatSongNameText = (song: SongResult): string => {
+  const parts = [song.name];
+  if (song.alia?.[0]) parts.push(`(${song.alia[0]})`);
+  if (song.tns?.[0]) parts.push(song.tns[0]);
+  return parts.filter(Boolean).join(' ');
+};
+
 /**
  * 格式化歌曲名称显示，包含 alia 和 tns 信息
  * @param song 歌曲对象

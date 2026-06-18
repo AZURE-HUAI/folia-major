@@ -72,8 +72,16 @@ const toPlainText = (value: unknown): string => {
     return '';
 };
 
+const getGridItemTitleText = (item: GridItem): string => {
+    const explicitTitle = item.titleText?.trim();
+    if (explicitTitle) return explicitTitle;
+    const rawTrackName = item.rawTrack?.name?.trim();
+    if (rawTrackName) return rawTrackName;
+    return toPlainText(item.name);
+};
+
 const getCardTextLength = (item: GridItem, mode: GridViewMode): number => {
-    let length = toPlainText(item.name).length;
+    let length = getGridItemTitleText(item).length;
     length += item.subtitle?.length ?? 0;
     length += item.description?.length ?? 0;
     if (mode === 'tracks' && item.rawTrack) {
@@ -105,7 +113,7 @@ const makeSnapshotKey = (item: GridItem, options: CanvasCardRenderOptions): stri
     options.mode,
     item.id,
     item.coverUrl ?? '',
-    toPlainText(item.name),
+    getGridItemTitleText(item),
     item.subtitle ?? '',
     item.description ?? '',
     item.rawTrack?.al?.name ?? item.rawTrack?.album?.name ?? '',
@@ -260,7 +268,7 @@ export const drawCanvasGridCardSnapshot = (
     context.fillStyle = colorWithAlpha(options.textColor, 0.9);
     context.font = `700 ${Math.max(13, Math.round(width * 0.065))}px Inter, sans-serif`;
     context.textBaseline = 'alphabetic';
-    drawClampedText(context, toPlainText(item.name), labelX, textY, width - CARD_PADDING * 2, 17, 3);
+    drawClampedText(context, getGridItemTitleText(item), labelX, textY, width - CARD_PADDING * 2, 17, 3);
 
     textY += 58;
     if (item.description) {
@@ -289,6 +297,7 @@ export const resolveCanvasGridFrame = ({
     frameOptions,
     renderOptions,
     overlayIndex,
+    overlayIndexes,
     candidateIndexes,
 }: {
     items: GridItem[];
@@ -298,12 +307,16 @@ export const resolveCanvasGridFrame = ({
     frameOptions: HexCardFrameOptions;
     renderOptions: CanvasCardRenderOptions;
     overlayIndex?: number | null;
+    overlayIndexes?: readonly number[];
     candidateIndexes?: readonly number[];
 }): CanvasGridFrame => {
     const cards: CanvasGridFrameCard[] = [];
     let closestIndex = 0;
     let closestDistanceSq = Infinity;
     const indexes = candidateIndexes ?? items.map((_, index) => index);
+    const shouldSkipOverlay = (index: number) => (
+        index === overlayIndex || overlayIndexes?.includes(index) === true
+    );
 
     for (const index of indexes) {
         const coord = coords[index];
@@ -315,7 +328,7 @@ export const resolveCanvasGridFrame = ({
             closestDistanceSq = frame.distanceSq;
             closestIndex = index;
         }
-        if (!frame.visible || index === overlayIndex) continue;
+        if (!frame.visible || shouldSkipOverlay(index)) continue;
 
         const { width, height } = getCanvasGridCardSize(item, renderOptions);
         cards.push({

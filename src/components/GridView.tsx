@@ -5,7 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { SongResult, Theme } from '../types';
 import { isSongMarkedUnavailable, neteaseApi } from '../services/netease';
 import { getNavidromeConfig, navidromeApi } from '../services/navidromeService';
-import { formatSongName } from '../utils/songNameFormatter';
+import { formatSongName, formatSongNameText } from '../utils/songNameFormatter';
 import { getSizedCoverUrl } from '../utils/coverUrl';
 import { colorWithAlpha } from './visualizer/colorMix';
 import { saveToCache, getFromCache, removeFromCache } from '../services/db';
@@ -768,6 +768,7 @@ export const GridView: React.FC<GridViewProps> = ({
         return displayTracks.map((track, idx) => ({
             id: `${track.id}-${idx}`,
             name: formatSongName(track),
+            titleText: formatSongNameText(track),
             searchText: [
                 track.name,
                 track.alia?.join(' '),

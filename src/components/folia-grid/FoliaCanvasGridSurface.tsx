@@ -14,7 +14,7 @@ import {
 } from './canvasGridRenderer';
 import type { Theme } from '../../types';
 
-// Canvas-backed folia grid surface with a single DOM card overlay for rich interaction.
+// Canvas-backed folia grid surface with focused and hovered DOM card overlays for rich interaction.
 export interface CanvasGridOverlayRenderState {
     index: number;
     item: GridItem;
@@ -114,9 +114,22 @@ export const FoliaCanvasGridSurface: React.FC<FoliaCanvasGridSurfaceProps> = ({
         snapshotQueueRef.current.clear();
     }, [renderOptions]);
 
-    const overlayIndex = !isDragging && items.length > 0
-        ? (hoveredIndex ?? focusedIndex)
-        : null;
+    const overlayIndexes = useMemo(() => {
+        if (isDragging || items.length === 0) return [];
+        const indexes: number[] = [];
+        if (focusedIndex >= 0 && focusedIndex < items.length) {
+            indexes.push(focusedIndex);
+        }
+        if (
+            hoveredIndex !== null &&
+            hoveredIndex >= 0 &&
+            hoveredIndex < items.length &&
+            hoveredIndex !== focusedIndex
+        ) {
+            indexes.push(hoveredIndex);
+        }
+        return indexes;
+    }, [focusedIndex, hoveredIndex, isDragging, items.length]);
 
     const draw = useCallback(() => {
         rafRef.current = null;
@@ -160,7 +173,7 @@ export const FoliaCanvasGridSurface: React.FC<FoliaCanvasGridSurfaceProps> = ({
             dy,
             frameOptions: cardFrameOptions,
             renderOptions,
-            overlayIndex,
+            overlayIndexes,
             candidateIndexes,
         });
         frameCardsRef.current = frame.cards;
@@ -185,7 +198,7 @@ export const FoliaCanvasGridSurface: React.FC<FoliaCanvasGridSurfaceProps> = ({
         layoutConfig.spacingX,
         layoutConfig.spacingY,
         onFrameFocusedIndexChange,
-        overlayIndex,
+        overlayIndexes,
         renderRadius,
         renderRing,
         renderOptions,
@@ -247,10 +260,21 @@ export const FoliaCanvasGridSurface: React.FC<FoliaCanvasGridSurfaceProps> = ({
         }
     }, [focusedIndex, getLocalPoint, onCenterIndex, onOpenIndex]);
 
-    const overlayFrame = overlayIndex === null || !coords[overlayIndex]
-        ? null
-        : computeHexCardFrame(coords[overlayIndex], dragX.get(), dragY.get(), cardFrameOptions);
-    const overlayItem = overlayIndex === null ? null : items[overlayIndex];
+    const overlayCards = overlayIndexes.map((index) => {
+        const coord = coords[index];
+        const item = items[index];
+        if (!coord || !item) return null;
+        const frame = computeHexCardFrame(coord, dragX.get(), dragY.get(), cardFrameOptions);
+        if (!frame.visible) return null;
+        return {
+            index,
+            coord,
+            item,
+            frame,
+            isFocused: index === focusedIndex,
+            isHovered: index === hoveredIndex,
+        };
+    }).filter((state): state is NonNullable<typeof state> => state !== null);
 
     return (
         <>
@@ -258,33 +282,36 @@ export const FoliaCanvasGridSurface: React.FC<FoliaCanvasGridSurfaceProps> = ({
                 ref={canvasRef}
                 className="absolute inset-0 h-full w-full pointer-events-none"
             />
-            {overlayIndex !== null && overlayItem && overlayFrame?.visible && coords[overlayIndex] && (
+            {overlayCards.map(({ index, coord, item, frame, isFocused, isHovered }) => (
                 <motion.div
+                    key={`${mode}-${index}-${item.id}`}
                     className="absolute pointer-events-auto select-none"
                     style={{
-                        left: `calc(50% + ${coords[overlayIndex].baseX}px)`,
-                        top: `calc(50% + ${coords[overlayIndex].baseY}px)`,
+                        left: `calc(50% + ${coord.baseX}px)`,
+                        top: `calc(50% + ${coord.baseY}px)`,
                         x: dragX,
                         y: dragY,
-                        scale: overlayFrame.scale,
-                        opacity: overlayFrame.opacity,
-                        zIndex: 65,
+                        scale: frame.scale,
+                        opacity: frame.opacity,
+                        zIndex: isHovered ? 66 : 65,
                         transformOrigin: 'center center',
                         translate: '-50% -50%',
-                        ...getCssVarStyle(overlayFrame),
+                        ...getCssVarStyle(frame),
                     } as React.CSSProperties}
-                    onPointerEnter={() => setHoveredIndex(overlayIndex)}
-                    onPointerMove={() => setHoveredIndex(overlayIndex)}
-                    onPointerLeave={() => setHoveredIndex(null)}
+                    onPointerEnter={() => setHoveredIndex(index)}
+                    onPointerMove={() => setHoveredIndex(index)}
+                    onPointerLeave={() => {
+                        setHoveredIndex(prev => (prev === index ? null : prev));
+                    }}
                 >
                     {renderOverlayCard({
-                        index: overlayIndex,
-                        item: overlayItem,
-                        frame: overlayFrame,
-                        isFocused: overlayIndex === focusedIndex,
+                        index,
+                        item,
+                        frame,
+                        isFocused,
                     })}
                 </motion.div>
-            )}
+            ))}
             <div
                 className="absolute inset-0 z-[2] cursor-grab active:cursor-grabbing bg-transparent"
                 style={{ touchAction: 'none' }}
