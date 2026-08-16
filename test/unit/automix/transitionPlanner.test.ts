@@ -104,7 +104,14 @@ describe('planTransition', () => {
         const plan = planTransition(track(100, null), track(100, [line(10, 90)]));
         expect(plan.kind).toBe('fade');
         expect(plan.overlap).toBe(AUTOMIX_DEFAULT_OVERLAP_SEC);
-        expect(plan.reason).toContain('no lyric timeline on outgoing');
+        expect(plan.reason).toContain('no lyrics for the outgoing track');
+    });
+
+    it('says so when a lyric file exists but holds nothing sung', () => {
+        // An instrumental interlude blends exactly like a track with no lyrics at all, but the two
+        // mean different things when the question is why no vocal-free window could be proven.
+        const plan = planTransition(track(100, [line(10, 90)]), track(100, [line(0, 4, '   ')]));
+        expect(plan.reason).toContain('nothing sung in the incoming lyrics');
     });
 
     it('keeps the blend under a quarter of a very short track', () => {

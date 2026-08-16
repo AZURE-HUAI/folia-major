@@ -209,9 +209,16 @@ export const planTransition = (
         return hardCut(`track too short to fade across (${round(from.duration)}s)`);
     }
 
-    const window = tail === null || intro === null
-        ? `no lyric timeline on ${tail === null ? 'outgoing' : 'incoming'}`
-        : `outro ${round(tail)}s, intro ${round(intro)}s`;
+    // Worth separating: a track with no lyric file and a track whose lyric file holds nothing
+    // sung - an instrumental interlude, say - look identical in a blend but mean different things
+    // when the question is why a window could not be proven.
+    const missing = (lines: Line[] | null, side: string) =>
+        (lines?.length ? `nothing sung in the ${side} lyrics` : `no lyrics for the ${side} track`);
+    const window = tail === null
+        ? missing(from.lines, 'outgoing')
+        : intro === null
+            ? missing(to.lines, 'incoming')
+            : `outro ${round(tail)}s, intro ${round(intro)}s`;
     const length = usesVocalFree
         ? 'vocal-free'
         : beat === null ? 'default' : `${round(overlap / beat)} beats`;
