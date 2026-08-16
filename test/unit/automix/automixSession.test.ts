@@ -249,15 +249,18 @@ describe('automix session', () => {
         expect(finalTarget(harness.chains.B.fadeNode)).toBe(1);
     });
 
-    it('gives the role back when the next track never arrives', () => {
+    it('keeps the role on the loading deck when the outgoing track runs out first', () => {
         const harness = createHarness();
         harness.arm();
 
         harness.session.handleTailEnded();
 
         expect(harness.session.getPhase()).toBe('idle');
-        expect(harness.session.getActiveDeck()).toBe('A');
-        expect(harness.activeDeckChanges).toEqual(['B', 'A']);
+        // Handing the role back here is what used to leave the app silent: audioSrc is already on
+        // its way to this deck and the audio bridge has already aimed play() at it, so moving the
+        // role would drop the next track onto an element nothing is going to start.
+        expect(harness.session.getActiveDeck()).toBe('B');
+        expect(harness.activeDeckChanges).toEqual(['B']);
         expect(harness.tailSrcChanges.at(-1)).toBeNull();
     });
 
@@ -273,7 +276,7 @@ describe('automix session', () => {
         expect(harness.chains.B.fadeNode.events).toHaveLength(incomingEventCount);
     });
 
-    it('ends the transition and restores the role when playback is paused while armed', () => {
+    it('ends the transition when playback is paused while armed', () => {
         const harness = createHarness();
         harness.arm();
 
@@ -281,7 +284,7 @@ describe('automix session', () => {
         expect(harness.session.abort()).toBe(true);
 
         expect(harness.session.getPhase()).toBe('idle');
-        expect(harness.session.getActiveDeck()).toBe('A');
+        expect(harness.session.getActiveDeck()).toBe('B');
         // Deck A is the one actually making a sound while armed, so it is the one to stop.
         expect(harness.elements.A.pause).toHaveBeenCalled();
         expect(finalTarget(harness.chains.B.fadeNode)).toBe(1);
@@ -305,6 +308,19 @@ describe('automix session', () => {
         harness.session.handleActiveDeckPlaying('local:whatever');
 
         expect(finalTarget(harness.chains.A.fadeNode)).toBe(1);
+    });
+
+    it('sets the blend length in beats of the outgoing track rather than in seconds', () => {
+        // 90 BPM: eight beats is 5.33s, where a fixed five seconds would be five.
+        const harness = createHarness({ A: { bpm: 90 } });
+
+        const plan = harness.arm({
+            from: { duration: 100, lines: [] },
+            to: { duration: 100, lines: [] },
+        });
+
+        expect(plan?.overlap).toBeCloseTo(60 / 90 * 8, 2);
+        expect(plan?.reason).toContain('8 beats');
     });
 
     it('alternates the decks across consecutive transitions', () => {

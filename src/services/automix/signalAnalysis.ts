@@ -16,6 +16,8 @@ export const SILENCE_DB = -90;
 export const LOUD_OUTRO_DB = -14;
 /** A decaying tail: letting it breathe sounds better than shouldering it aside. */
 export const QUIET_OUTRO_DB = -30;
+/** Below this the track has already finished in every sense that matters; waiting is a hole. */
+export const SILENT_TAIL_DB = -45;
 export const CROSSOVER_EARLY = 0.35;
 export const CROSSOVER_LATE = 0.55;
 
@@ -167,6 +169,9 @@ export const crossoverFor = (outgoingDb: number | null): number => {
     if (outgoingDb === null || !Number.isFinite(outgoingDb)) {
         return (CROSSOVER_EARLY + CROSSOVER_LATE) / 2;
     }
+    // Not monotonic on purpose. A quiet tail is worth waiting for; a track that has already faded
+    // to nothing is not, and holding the incoming one back for it leaves an audible hole.
+    if (outgoingDb <= SILENT_TAIL_DB) return CROSSOVER_EARLY;
     const loudness = clamp((outgoingDb - QUIET_OUTRO_DB) / (LOUD_OUTRO_DB - QUIET_OUTRO_DB), 0, 1);
     return CROSSOVER_LATE + (CROSSOVER_EARLY - CROSSOVER_LATE) * loudness;
 };

@@ -111,8 +111,17 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         }, BALANCE_INTERVAL_MS);
     };
 
-    /** Returns both decks to a defined idle state. The one path every ending shares. */
-    const settle = (options: { restoreActive: boolean; pauseTail: boolean }) => {
+    /**
+     * Returns both decks to a defined idle state. The one path every ending shares.
+     *
+     * Deliberately never hands the deck role back, however the transition ended. The role decides
+     * which element React renders `audioSrc` onto, and by the time anything can go wrong the
+     * advance is already in flight: moving the role would drop the next track's source onto a
+     * different element than the one the audio bridge already called play() on, and the bridge
+     * only reacts to the *source* changing - which it did not. Nothing would ever press play
+     * again, and the listener hears the song end and then silence.
+     */
+    const settle = (options: { pauseTail: boolean }) => {
         clearTimers();
         const tailDeck = otherDeck(activeDeck);
 
@@ -138,11 +147,6 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             });
         }
 
-        if (options.restoreActive) {
-            activeDeck = tailDeck;
-            ports.onActiveDeckChange(tailDeck);
-        }
-
         phase = 'idle';
         plan = null;
         plannedNextKey = null;
@@ -158,7 +162,10 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
     const requestTransition = (request: AutomixTransitionRequest): TransitionPlan | null => {
         if (phase !== 'idle') return null;
 
-        const nextPlan = planTransition(request.from, request.to);
+        // The deck still playing is the one whose tempo sets the length: at this point it is the
+        // active one, and the only track with any audio behind it to measure.
+        const outgoingTempo = ports.getChain(activeDeck)?.analyser.tempo() ?? null;
+        const nextPlan = planTransition(request.from, request.to, outgoingTempo?.bpm ?? null);
         if (nextPlan.kind !== 'fade' || request.time < nextPlan.outStart) return nextPlan;
 
         const context = ports.getContext();
@@ -211,7 +218,7 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         const tailChain = ports.getChain(tailDeck);
 
         if (!context || !plan || !activeChain || !tailChain || !tailElement) {
-            settle({ restoreActive: false, pauseTail: true });
+            settle({ pauseTail: true });
             return;
         }
 
@@ -231,7 +238,7 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             rampGain(context, tailChain.fade, 0, CUT_SECONDS);
             rampGain(context, activeChain.fade, 1, CUT_SECONDS);
             cleanupTimer = setTimeout(
-                () => settle({ restoreActive: false, pauseTail: true }),
+                () => settle({ pauseTail: true }),
                 CUT_SECONDS * 1000 + 70,
             );
             return;
@@ -260,7 +267,7 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         startBalanceCorrection(context, tailChain, activeChain);
 
         cleanupTimer = setTimeout(
-            () => settle({ restoreActive: false, pauseTail: true }),
+            () => settle({ pauseTail: true }),
             shape.overlap * 1000 + FADE_CLEANUP_MARGIN_MS,
         );
     };
@@ -272,10 +279,11 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         // would jump that fade to full a fraction early.
         if (phase === 'fading') return;
 
-        // Still armed means the next track never arrived. Give the finished deck its role back so
-        // the app's ordinary end-of-track path owns playback again: the advance already in flight
-        // lands on it and the listener simply hears today's plain gap.
-        settle({ restoreActive: phase === 'armed', pauseTail: false });
+        // Still armed means the outgoing track ran out before the next one managed to make a
+        // sound - a slow URL resolve, a cold buffer. There is no blend left to have, but the deck
+        // that is loading the next track keeps the role: it is where audioSrc is already headed
+        // and the only element anything is going to press play on.
+        settle({ pauseTail: false });
     };
 
     /**
@@ -288,7 +296,7 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
     const abort = (): boolean => {
         if (phase === 'idle') return false;
         const wasArmed = phase === 'armed';
-        settle({ restoreActive: wasArmed, pauseTail: true });
+        settle({ pauseTail: true });
         return wasArmed;
     };
 

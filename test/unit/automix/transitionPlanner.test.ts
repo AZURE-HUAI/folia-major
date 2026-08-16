@@ -84,6 +84,25 @@ describe('planTransition', () => {
         expect(plan.reason).toContain('too short');
     });
 
+    it('measures the default blend in beats once a tempo is known', () => {
+        // Five seconds is two bars of a ballad and nearly four of a fast track, so the same
+        // number reads as leisurely on one song and frantic on the next. Eight beats does not.
+        expect(planTransition(track(100, null), track(100, null), 90).overlap).toBeCloseTo(5.33, 2);
+        expect(planTransition(track(100, null), track(100, null), 160).overlap).toBeCloseTo(3, 2);
+    });
+
+    it('trims a proven vocal-free window back to whole beats', () => {
+        // The gap is 6s; at 95 BPM that is nine beats and a half, so the blend takes the nine.
+        const plan = planTransition(track(100, [line(10, 94)]), track(100, [line(6, 90)]), 95);
+        expect(plan.overlap).toBeCloseTo(9 * 60 / 95, 2);
+    });
+
+    it('still caps a beat-derived length at the ceiling', () => {
+        // Eight beats of a very slow track would run to eleven seconds.
+        expect(planTransition(track(200, null), track(100, null), 45).overlap)
+            .toBe(AUTOMIX_MAX_OVERLAP_SEC);
+    });
+
     it('cuts when the outgoing duration is unknown', () => {
         expect(planTransition(track(NaN, [line(10, 90)]), track(100, [line(10, 90)])).kind).toBe('hardCut');
     });

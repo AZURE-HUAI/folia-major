@@ -110,7 +110,12 @@ describe('crossoverFor', () => {
     });
 
     it('lets a quiet decaying tail run', () => {
-        expect(crossoverFor(-45)).toBeCloseTo(CROSSOVER_LATE, 6);
+        expect(crossoverFor(-38)).toBeCloseTo(CROSSOVER_LATE, 6);
+    });
+
+    it('stops waiting for a track that has already faded to nothing', () => {
+        // Waiting on silence is a hole in the music, not a decaying tail worth preserving.
+        expect(crossoverFor(-60)).toBeCloseTo(CROSSOVER_EARLY, 6);
     });
 
     it('sits in the middle when the deck was never measured', () => {

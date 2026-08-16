@@ -33,8 +33,24 @@ export interface TransitionPlan {
 export const AUTOMIX_MAX_OVERLAP_SEC = 8;
 /** Floor for a blend to be one. Below this there is no time left to fade across, only a cut. */
 export const AUTOMIX_MIN_OVERLAP_SEC = 0.8;
-/** Used whenever the lyrics cannot point at a better window. The main tuning knob for feel. */
+/** Used whenever neither the lyrics nor a tempo can point at a better length. */
 export const AUTOMIX_DEFAULT_OVERLAP_SEC = 5;
+/**
+ * The length a blend really wants, in beats rather than seconds.
+ *
+ * A fixed number of seconds is the wrong unit: five seconds is two bars of a ballad and nearly
+ * four of a fast track, so the same setting reads as leisurely on one song and frantic on the
+ * next. Every DJ tool counts transitions in bars for this reason; eight beats is two bars of 4/4,
+ * the shortest span that still reads as a phrase.
+ */
+export const AUTOMIX_DEFAULT_OVERLAP_BEATS = 8;
+
+const beatSec = (bpm: number | null | undefined) =>
+    (bpm && Number.isFinite(bpm) && bpm > 0 ? 60 / bpm : null);
+
+/** Rounds a length down to whole beats, so a blend never ends mid-pulse. */
+const toWholeBeats = (seconds: number, beat: number | null) =>
+    (beat === null ? seconds : Math.max(1, Math.floor(seconds / beat)) * beat);
 
 /**
  * First and last moment a voice is present, from the lyric timeline.
@@ -68,11 +84,17 @@ const round = (seconds: number) => Math.round(seconds * 100) / 100;
  * at AUTOMIX_DEFAULT_OVERLAP_SEC. The listener switched this on; declining to blend and calling
  * it good taste would just be the feature not working.
  */
-export const planTransition = (from: TransitionTrack, to: TransitionTrack): TransitionPlan => {
+export const planTransition = (
+    from: TransitionTrack,
+    to: TransitionTrack,
+    /** Measured tempo of the outgoing track, when there is one. Sets the unit for the length. */
+    bpm: number | null = null,
+): TransitionPlan => {
     if (!Number.isFinite(from.duration) || from.duration <= 0) {
         return hardCut('outgoing duration unknown, nothing to schedule a fade against');
     }
 
+    const beat = beatSec(bpm);
     const outVocals = vocalBounds(from.lines);
     const inVocals = vocalBounds(to.lines);
     const tail = outVocals ? from.duration - outVocals.end : null;   // instrumental outro
@@ -80,12 +102,15 @@ export const planTransition = (from: TransitionTrack, to: TransitionTrack): Tran
     const vocalFree = tail !== null && intro !== null ? Math.min(tail, intro) : null;
     const usesVocalFree = vocalFree !== null && vocalFree >= AUTOMIX_MIN_OVERLAP_SEC;
 
+    const wanted = usesVocalFree
+        // The gap the lyrics prove is the better evidence, trimmed back to whole beats.
+        ? toWholeBeats(vocalFree, beat)
+        : beat === null
+            ? AUTOMIX_DEFAULT_OVERLAP_SEC
+            : beat * AUTOMIX_DEFAULT_OVERLAP_BEATS;
+
     // Quarter-length cap so a very short track is not half crossfade.
-    const overlap = Math.min(
-        usesVocalFree ? vocalFree : AUTOMIX_DEFAULT_OVERLAP_SEC,
-        AUTOMIX_MAX_OVERLAP_SEC,
-        from.duration / 4,
-    );
+    const overlap = Math.min(wanted, AUTOMIX_MAX_OVERLAP_SEC, from.duration / 4);
 
     // Only a track of a few seconds can land here, and there is no fade to be had in it.
     if (overlap < AUTOMIX_MIN_OVERLAP_SEC) {
@@ -101,7 +126,7 @@ export const planTransition = (from: TransitionTrack, to: TransitionTrack): Tran
         outStart: round(from.duration - overlap),
         inStart: 0,
         overlap: round(overlap),
-        reason: `${round(overlap)}s ${usesVocalFree ? 'vocal-free' : 'default'} (${window})`,
+        reason: `${round(overlap)}s ${usesVocalFree ? 'vocal-free' : beat === null ? 'default' : `${round(overlap / beat)} beats`} (${window})`,
     };
 };
 

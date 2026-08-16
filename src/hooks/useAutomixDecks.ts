@@ -42,6 +42,12 @@ export const isPausedByListener = (state: PlayerState): boolean => state === Pla
 const ANALYSER_INTERVAL_MS = 25;
 
 /**
+ * How long a settled transition is given to actually be making a sound before it is treated as
+ * stalled. Long enough for the audio bridge's own autoplay, which waits on the lyrics fetch.
+ */
+const STALL_GRACE_MS = 2_500;
+
+/**
  * The track the queue would advance to, mirroring handleNextTrack's own index maths.
  *
  * Deliberately does not reproduce the FM-mode top-up: that fetch is asynchronous, and a track we
@@ -104,6 +110,27 @@ export function useAutomixDecks({
     advanceRef.current = onAdvanceTrack;
     // Set when a pause interrupts an armed transition, consumed by the audio bridge's autoplay.
     const suppressAutoplayRef = useRef(false);
+    const playerStateRef = useRef(playerState);
+    playerStateRef.current = playerState;
+
+    /**
+     * Last resort against a transition that ends in silence.
+     *
+     * The audio bridge starts playback off the *source* changing, and a transition changes which
+     * element that source lands on. Any path that gets the two out of step leaves a deck holding
+     * the next track with nothing left in flight to press play on it, and the listener just hears
+     * the music stop. Checked once, well after the bridge has had its own chance, and never
+     * against a pause the listener asked for.
+     */
+    const scheduleStallCheck = useCallback(() => {
+        window.setTimeout(() => {
+            const element = elementsRef.current[sessionRef.current!.getActiveDeck()];
+            if (!element?.src || !element.paused) return;
+            if (playerStateRef.current === PlayerState.PAUSED) return;
+            console.log('[Automix] the deck holding the next track was never started, starting it');
+            void element.play().catch(() => { });
+        }, STALL_GRACE_MS);
+    }, []);
 
     const sessionRef = useRef<AutomixSession | null>(null);
     if (!sessionRef.current) {
@@ -115,7 +142,11 @@ export function useAutomixDecks({
                 audioRef.current = elementsRef.current[deck];
                 setActiveDeck(deck);
             },
-            onTailSrcChange: setTailSrc,
+            onTailSrcChange: src => {
+                setTailSrc(src);
+                // Null is the last thing every settle does, whichever way the transition ended.
+                if (src === null) scheduleStallCheck();
+            },
             advanceTrack: () => advanceRef.current(),
         });
     }
