@@ -92,30 +92,71 @@ interface ProfileRequest {
     enableMediaCache: boolean;
 }
 
-/** Either the bytes, or the reason there are none - which is the more useful answer most days. */
-type BytesResult = { bytes: ArrayBuffer } | { skipped: string };
+/**
+ * How much of the front of a track to read when the whole file is off limits.
+ *
+ * Enough for the head-side evidence at any bitrate this player deals with: about 40 seconds at
+ * 320kbps and a minute and a half at 128, which comfortably covers the leading silence, whether
+ * the track opens at full level, the intro's shape, a tempo and a key. Roughly a tenth of a
+ * typical track rather than all of it.
+ */
+const PREFIX_BYTES = 1_572_864;
 
-const readBytes = async ({ song, audioUrl, enableMediaCache }: ProfileRequest): Promise<BytesResult> => {
+/** Either the bytes, or the reason there are none - which is the more useful answer most days. */
+type BytesResult =
+    | { bytes: ArrayBuffer; partial: boolean }
+    | { skipped: string };
+
+/**
+ * Reads only the front of a file, and only if the server will genuinely serve only the front.
+ *
+ * A range off the END would be the more useful half - it is the outgoing track's tail that decides
+ * most transitions - but it is not decodable: strip a file's container header and no decoder will
+ * touch what is left. A range off the front keeps the header, so it decodes as a short track.
+ *
+ * If the server ignores the Range header it answers 200 with the whole file, which is exactly the
+ * download this path exists to avoid, so the body is cancelled rather than used.
+ */
+const readPrefix = async (audioUrl: string): Promise<BytesResult> => {
+    const response = await fetch(audioUrl, { headers: { Range: `bytes=0-${PREFIX_BYTES - 1}` } });
+    if (response.status !== 206) {
+        await response.body?.cancel();
+        return { skipped: 'the server would not serve a partial range, and a full download is not ours to spend' };
+    }
+    return { bytes: await response.arrayBuffer(), partial: true };
+};
+
+const readBytes = async (
+    { song, audioUrl, enableMediaCache }: ProfileRequest,
+    /** A head-only profile is already stored, so there is nothing a second range request buys. */
+    hasStoredPartial: boolean,
+): Promise<BytesResult> => {
     const cached = await getCachedSongAudioBlob(song);
-    if (cached) return { bytes: await cached.arrayBuffer() };
+    if (cached) return { bytes: await cached.arrayBuffer(), partial: false };
 
     if (!audioUrl) return { skipped: 'not cached yet and no URL to read it from' };
     // A blob: or file: URL is already on this machine, so reading it is free whatever the setting
-    // says. Anything else is a real download and needs the cache to justify it.
+    // says. Anything else is a real download and needs a reason.
     const isLocal = audioUrl.startsWith('blob:') || audioUrl.startsWith('file:')
         || getPlaybackSourceRef(song).kind !== 'online';
-    if (!isLocal && !enableMediaCache) {
-        return { skipped: 'song caching is off, so analysing would mean an extra download' };
-    }
 
     try {
+        if (!isLocal && !enableMediaCache) {
+            // Song caching is off, so the full file would be bandwidth nobody agreed to. Take the
+            // front of it instead: less than the transition is worth, and it still answers the
+            // questions about how this track STARTS - which is what the chooser needs from the
+            // track it is blending into.
+            if (hasStoredPartial) return { skipped: '' };
+            return await readPrefix(audioUrl);
+        }
+
         const blob = await (await fetch(audioUrl)).blob();
         if (!isLocal) {
             // The same write the audio bridge would have done after playback. Fetching once and
-            // feeding both is the whole reason this is allowed to run at all.
+            // feeding both is the whole reason a full read is allowed here at all.
             await saveAudioBlob(getSongResourceCacheKey('audio', song), blob);
         }
-        return { bytes: await blob.arrayBuffer() };
+        return { bytes: await blob.arrayBuffer(), partial: false };
     } catch (error) {
         console.warn('[Automix] could not read a track for analysis', error);
         return { skipped: 'the download failed' };
@@ -136,17 +177,25 @@ export const ensureTrackProfile = async (request: ProfileRequest): Promise<void>
     queue = queue.then(async () => {
         try {
             const stored = await getFromCache<TrackProfile>(storageKey(songKey));
-            if (stored?.version === TRACK_PROFILE_VERSION) {
-                remember(songKey, stored);
+            const usable = stored?.version === TRACK_PROFILE_VERSION ? stored : null;
+            // A complete profile is the end of it. A head-only one is worth revisiting: the track
+            // may have finished playing since and be sitting in the media cache now, in which case
+            // the tail - the half that decides most transitions - is finally readable.
+            if (usable && !usable.partial) {
+                remember(songKey, usable);
                 return;
             }
 
-            const result = await readBytes(request);
+            const result = await readBytes(request, Boolean(usable?.partial));
             if ('skipped' in result) {
+                if (usable) {
+                    remember(songKey, usable);
+                    return;
+                }
                 // Once per track, not once per prefetch pass. Without this the feature can sit
                 // completely inert - every transition falling through to the plain crossfade -
                 // and print nothing at all to say why.
-                if (skipped.get(songKey) !== result.skipped) {
+                if (result.skipped && skipped.get(songKey) !== result.skipped) {
                     skipped.set(songKey, result.skipped);
                     console.log(`[Automix] not analysing "${request.song.name}": ${result.skipped}`);
                 }
@@ -155,17 +204,19 @@ export const ensureTrackProfile = async (request: ProfileRequest): Promise<void>
             skipped.delete(songKey);
 
             const buffer = await decodeAtProfileRate(result.bytes);
-            const profile = buffer ? await analyseTrack(toMono(buffer), buffer.sampleRate) : null;
+            const profile = buffer
+                ? await analyseTrack(toMono(buffer), buffer.sampleRate, { partial: result.partial })
+                : null;
             remember(songKey, profile);
             if (profile) {
                 await saveToCache(storageKey(songKey), profile);
                 console.log(
-                    `[Automix] analysed "${request.song.name}":`
+                    `[Automix] analysed "${request.song.name}"${profile.partial ? ' (head only)' : ''}:`
                     + ` ${profile.bpm ? `${Math.round(profile.bpm)} BPM, ` : ''}`
                     + `${profile.loudness.toFixed(1)} dBFS,`
                     + ` lead-in ${profile.leadIn.toFixed(2)}s,`
-                    + ` ${profile.startsHot ? 'starts hot' : 'has an intro'},`
-                    + ` ${profile.endsHot ? 'ends hot' : 'decays out'}`,
+                    + ` ${profile.startsHot ? 'starts hot' : 'has an intro'}`
+                    + `${profile.endsHot === null ? '' : `, ${profile.endsHot ? 'ends hot' : 'decays out'}`}`,
                 );
             }
         } catch (error) {

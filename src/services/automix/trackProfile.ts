@@ -48,19 +48,30 @@ const YIELD_EVERY = 512;
 
 export interface TrackProfile {
     version: number;
+    /**
+     * Only the beginning of the file was analysed, so every field about the END of the track is
+     * null rather than wrong.
+     *
+     * This is what a track looks like when the only bytes we were allowed to read were a range
+     * request off the front of it. A tail range cannot be used: strip a file's container header
+     * and nothing will decode the rest, so the end of an uncached track is simply not knowable
+     * without downloading it.
+     */
+    partial: boolean;
+    /** Seconds actually analysed - NOT the track length when `partial`. */
     duration: number;
     /** Seconds of near-silence before the track starts sounding. */
     leadIn: number;
-    /** Seconds of near-silence after it stops. */
-    leadOut: number;
+    /** Seconds of near-silence after it stops. Null when only the head was read. */
+    leadOut: number | null;
     /** The track is already at full level as it starts - no intro to hide a blend in. */
     startsHot: boolean;
     /** It is still at full level when it stops - no decaying tail to blend under. */
-    endsHot: boolean;
+    endsHot: boolean | null;
     /** dB per second across the first EDGE_WINDOW_SEC of sound. Positive = building. */
     introSlope: number;
     /** dB per second across the last EDGE_WINDOW_SEC. Negative = fading or decaying out. */
-    outroSlope: number;
+    outroSlope: number | null;
     /** RMS of the sounding part, dBFS. */
     loudness: number;
     bpm: number | null;
@@ -206,6 +217,8 @@ const yieldToUi = () => new Promise<void>(resolve => { setTimeout(resolve, 0); }
 export const analyseTrack = async (
     mono: Float32Array,
     sampleRate: number,
+    /** Set when these samples are the head of a longer file, so the tail fields must stay null. */
+    options: { partial?: boolean } = {},
 ): Promise<TrackProfile | null> => {
     const duration = mono.length / sampleRate;
     if (!(duration > 1) || !(sampleRate > 0)) return null;
@@ -311,17 +324,21 @@ export const analyseTrack = async (
 
     const key = keyFromChroma(chroma);
 
+    // Everything about the end of a truncated file describes the truncation, not the music.
+    const partial = options.partial === true;
+
     return {
         version: TRACK_PROFILE_VERSION,
+        partial,
         duration,
         leadIn: first * hopSec,
-        leadOut: Math.max(0, duration - (last * hopSec + FFT_SIZE / sampleRate)),
+        leadOut: partial ? null : Math.max(0, duration - (last * hopSec + FFT_SIZE / sampleRate)),
         // Averaged over a second or so rather than read off one frame: a single loud transient at
         // the top of a track is a count-in, not a track that starts at full tilt.
         startsHot: mean(sounding.slice(0, Math.min(hotFrames, sounding.length))) > average - HOT_EDGE_DB,
-        endsHot: mean(sounding.slice(Math.max(0, sounding.length - hotFrames))) > average - HOT_EDGE_DB,
+        endsHot: partial ? null : mean(sounding.slice(Math.max(0, sounding.length - hotFrames))) > average - HOT_EDGE_DB,
         introSlope: slopePerSec(head, hopSec),
-        outroSlope: slopePerSec(tail, hopSec),
+        outroSlope: partial ? null : slopePerSec(tail, hopSec),
         loudness: counted ? 10 * Math.log10(energy / counted) : SILENCE_DB,
         bpm: tempo?.bpm ?? null,
         beatOffset,

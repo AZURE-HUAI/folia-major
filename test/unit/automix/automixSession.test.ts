@@ -361,6 +361,7 @@ describe('automix session, transition styles', () => {
 
     const profile = (overrides: Partial<TrackProfile> = {}): TrackProfile => ({
         version: TRACK_PROFILE_VERSION,
+        partial: false,
         duration: 100,
         leadIn: 0,
         leadOut: 0,

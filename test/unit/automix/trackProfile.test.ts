@@ -94,6 +94,18 @@ describe('analyseTrack', () => {
         expect(profile!.bpm).toBeLessThan(128);
     });
 
+    it('leaves the tail unknown rather than describing where the file was cut off', async () => {
+        // A range request off the front of a file decodes as a short track. Everything about its
+        // "end" is the truncation, so it has to come back null and not merely wrong.
+        const profile = await analyseTrack(join(silence(1), tone(6, 220)), RATE, { partial: true });
+        expect(profile!.partial).toBe(true);
+        expect(profile!.leadIn).toBeGreaterThan(0.8);
+        expect(profile!.startsHot).toBe(true);
+        expect(profile!.endsHot).toBeNull();
+        expect(profile!.leadOut).toBeNull();
+        expect(profile!.outroSlope).toBeNull();
+    });
+
     it('refuses to describe something too short to describe', async () => {
         expect(await analyseTrack(tone(0.5, 220), RATE)).toBeNull();
         expect(await analyseTrack(silence(4), RATE)).toBeNull();

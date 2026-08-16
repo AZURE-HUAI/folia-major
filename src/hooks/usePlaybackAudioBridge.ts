@@ -270,6 +270,17 @@ export function usePlaybackAudioBridge({
                                 return;
                             }
 
+                            // A load() landing between play() and its promise aborts the play.
+                            // That happens whenever the source changes again while a track is
+                            // still starting - skipping during an automix transition is the
+                            // reliable way to see it - and the autoplay flag was spent before
+                            // play() was ever called, so nothing would press play again and the
+                            // app sits silent. Put the intent back for the next run.
+                            if (error.name === 'AbortError') {
+                                shouldAutoPlayRef.current = true;
+                                return;
+                            }
+
                             if (error.name === 'NotAllowedError') {
                                 setStatusMsg({ type: 'info', text: t('status.clickToPlay') });
                                 setPlayerState(PlayerState.PAUSED);

@@ -129,25 +129,31 @@ export const chooseTransitionStyle = (input: {
         reason,
     });
 
+    // Every test below reads the tail fields strictly against true/false, never for truthiness:
+    // on a partial profile they are null, meaning "not knowable without downloading the file",
+    // and treating that as "no" would silently pick the same transition a real "no" picks.
+
     // Both ends still sounding, on consecutive tracks of one album: the join is part of the record.
     // This is not the old "songs from one album do not get blended" rule wearing a hat - that one
     // refused to do anything, this one picks a better join, and the switch still acts every time.
-    if (sameAlbum && from?.endsHot && to?.startsHot) {
+    if (sameAlbum && from?.endsHot === true && to?.startsHot === true) {
         return decide('gapless', 'consecutive album tracks that run into each other');
     }
 
-    // Nothing to fade into: the incoming track is at full level from its first bar.
-    if (to?.startsHot && from?.bpm) {
+    // Nothing to fade into: the incoming track is at full level from its first bar. Both halves of
+    // this are head-side, so it still works on tracks that were only analysed from the front.
+    if (to?.startsHot === true && from?.bpm) {
         return decide('beatCut', 'the next track starts at full level, so this one is cut');
     }
 
     // A produced fade-out. Fading a fade doubles it; overlap earlier and swap the low end instead.
-    if (from && from.outroSlope <= FADE_OUT_SLOPE_DB_PER_SEC) {
+    if (from?.outroSlope !== null && from?.outroSlope !== undefined
+        && from.outroSlope <= FADE_OUT_SLOPE_DB_PER_SEC) {
         return decide('bassSwap', 'this track fades out on its own');
     }
 
     // A tail that decays rather than stops, and a next track with an intro to rise through it.
-    if (from && !from.endsHot && to && (to.leadIn > INTRO_SILENCE_SEC || !to.startsHot)) {
+    if (from?.endsHot === false && to && (to.leadIn > INTRO_SILENCE_SEC || to.startsHot === false)) {
         return decide('tailRide', 'a decaying tail with an intro to come up underneath it');
     }
 

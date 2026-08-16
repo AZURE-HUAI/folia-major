@@ -12,6 +12,7 @@ import { TRACK_PROFILE_VERSION, type TrackProfile } from '@/services/automix/tra
 
 const profile = (overrides: Partial<TrackProfile> = {}): TrackProfile => ({
     version: TRACK_PROFILE_VERSION,
+    partial: false,
     duration: 200,
     leadIn: 0,
     leadOut: 0,
@@ -110,6 +111,31 @@ describe('chooseTransitionStyle', () => {
         // This used to be every transition there was. It should now be the rarest one.
         expect(chooseTransitionStyle({ from: null, to: null, sameAlbum: false }).style).toBe('plainBlend');
         expect(chooseTransitionStyle({ from: profile(), to: null, sameAlbum: false }).style).toBe('bassSwap');
+    });
+
+    it('still cuts into a hot start when only the heads of both tracks were readable', () => {
+        // Song caching off: all we could read is the front of each file. Both halves of the cut
+        // rule are head-side, so this is the case that has to keep working.
+        const head = (overrides: Partial<TrackProfile> = {}) =>
+            profile({ partial: true, leadOut: null, endsHot: null, outroSlope: null, ...overrides });
+
+        const choice = chooseTransitionStyle({
+            from: head({ bpm: 128 }),
+            to: head({ startsHot: true }),
+            sameAlbum: false,
+        });
+        expect(choice.style).toBe('beatCut');
+    });
+
+    it('does not read an unknown tail as a known one', () => {
+        // null means "not knowable without downloading the file". Treating it as false would pick
+        // tailRide for tracks that end dead flat, and gapless is simply not decidable at all.
+        const head = profile({ partial: true, leadOut: null, endsHot: null, outroSlope: null });
+
+        expect(chooseTransitionStyle({ from: head, to: profile({ startsHot: true }), sameAlbum: true }).style)
+            .not.toBe('gapless');
+        expect(chooseTransitionStyle({ from: head, to: profile({ leadIn: 2, bpm: null }), sameAlbum: false }).style)
+            .toBe('bassSwap');
     });
 
     it('shortens an overlap between clashing keys instead of trying to fix it', () => {
