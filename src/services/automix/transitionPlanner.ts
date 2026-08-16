@@ -78,6 +78,17 @@ export const AUTOMIX_DEFAULT_OVERLAP_SEC = 5;
  */
 export const AUTOMIX_DEFAULT_OVERLAP_BEATS = 8;
 
+/** Stamped this early is stamped at the top of the file, not sung at the top of the song. */
+const CREDIT_STAMP_SEC = 0.05;
+/**
+ * How long the silence after the credit block has to be before it counts as an intro.
+ *
+ * The same three seconds `attachInterludes` uses to decide a track starts singing late, and for
+ * the same reason: below it there is no window to place anything in, so whether those opening
+ * lines were credits or lyrics stops mattering.
+ */
+const CREDIT_MIN_GAP_SEC = 3;
+
 const beatSec = (bpm: number | null | undefined) =>
     (bpm && Number.isFinite(bpm) && bpm > 0 ? 60 / bpm : null);
 
@@ -96,7 +107,19 @@ const toWholeBeats = (seconds: number, beat: number | null) =>
 const vocalBounds = (lines: Line[] | null | undefined): { start: number; end: number } | null => {
     const sung = lines?.filter(line => line.fullText.trim().length > 0 && !isInterludeLine(line));
     if (!sung?.length) return null;
-    return { start: sung[0].startTime, end: sung[sung.length - 1].endTime };
+
+    // Skip the credit block online lyric files open with. Recognised by its shape rather than by
+    // its wording - a list of role names would be one language's list, and wrong for the next
+    // file: these lines sit at timestamp zero, several of them often share that exact timestamp
+    // (no performance sings three lines at once), and a real intro follows. Reading them as the
+    // first sung moment reported an intro of zero seconds for very nearly every online track,
+    // which threw away the vocal-free window on all of them.
+    let first = 0;
+    while (first < sung.length - 1 && sung[first].startTime <= CREDIT_STAMP_SEC) first += 1;
+    // Unless singing really does resume straight away, in which case those were lyrics after all.
+    if (sung[first].startTime < CREDIT_MIN_GAP_SEC) first = 0;
+
+    return { start: sung[first].startTime, end: sung[sung.length - 1].endTime };
 };
 
 const hardCut = (reason: string): TransitionPlan => ({

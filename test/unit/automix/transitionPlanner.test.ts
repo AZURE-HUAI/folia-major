@@ -64,6 +64,41 @@ describe('planTransition', () => {
         expect(plan.overlap).toBe(AUTOMIX_MAX_OVERLAP_SEC);
     });
 
+    it('does not read the credit block at 0:00 as the first sung moment', () => {
+        // Built through the real parser: online lyric files open with "作词 : X" stamped at 0:00,
+        // and counting that as singing reported a zero-second intro for very nearly every track -
+        // which threw away the vocal-free window on all of them and left every blend on the
+        // beat-count fallback. Observed in the app as "every transition is the last two seconds".
+        const incoming = parseLRC(
+            '[00:00.000]作词 : 老番茄\n[00:00.000]作曲 : 老番茄\n'
+            + '[00:12.00]first sung line\n[00:20.00]second line',
+        );
+
+        const plan = planTransition(track(100, [line(10, 60)]), track(100, incoming.lines));
+
+        expect(plan.overlap).toBe(AUTOMIX_MAX_OVERLAP_SEC);
+        expect(plan.reason).toContain('intro 12s');
+    });
+
+    it('recognises the credit block by its shape, not by anyone\'s list of role names', () => {
+        // Whatever the words are, in whatever language: stamped at zero, with the song starting
+        // later. A list of role names would be one file format's list and wrong for the next.
+        const plan = planTransition(
+            track(100, [line(10, 60)]),
+            track(100, [line(0, 0, 'Produced by Someone'), line(0, 0, '제작'), line(9, 40, 'sung')]),
+        );
+        expect(plan.reason).toContain('intro 9s');
+    });
+
+    it('keeps a timeline that genuinely opens on a lyric', () => {
+        // A line at zero followed straight away by more singing was singing, not a credit.
+        const plan = planTransition(
+            track(100, [line(10, 90)]),
+            track(100, [line(0, 2, 'cold open'), line(2.5, 40, 'and on it goes')]),
+        );
+        expect(plan.reason).toContain('intro 0s');
+    });
+
     it('blends at the default length when a lyric timeline is missing', () => {
         // Local files, instrumentals, tracks whose lyrics failed to fetch: all still blend.
         const plan = planTransition(track(100, null), track(100, [line(10, 90)]));
