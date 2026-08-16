@@ -15,6 +15,7 @@ import {
     type TransitionPlan,
     type TransitionTrack,
 } from './transitionPlanner';
+import type { TrackProfile } from './trackProfile';
 
 // src/services/automix/automixSession.ts
 // The automix state machine, with every browser and React dependency behind a port so the
@@ -75,8 +76,9 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
     let phase: AutomixPhase = 'idle';
     let plan: TransitionPlan | null = null;
     let plannedNextKey: string | null = null;
-    /** Leading silence on the track being blended into: the only wait that costs nothing. */
-    let plannedIncomingLeadIn: number | null = null;
+    /** Both offline profiles, kept from planning until the blend is actually scheduled. */
+    let plannedFrom: TrackProfile | null = null;
+    let plannedTo: TrackProfile | null = null;
     let cleanupTimer: ReturnType<typeof setTimeout> | null = null;
     let balanceTimer: ReturnType<typeof setInterval> | null = null;
     let appliedTrimDb = 0;
@@ -103,16 +105,23 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
      * The correction only ever attenuates, only ever the track that is leaving, and never backs
      * off once applied: a monotonic one-way trim cannot oscillate, and over-trimming a track that
      * is halfway out of the door costs nothing.
+     *
+     * `incomingReference` is what the incoming track settles at rather than what it is doing in
+     * the second it starts, and that distinction is the whole correctness of this. A track's first
+     * seconds are nearly always its intro, which is quiet *on purpose*; measuring it live and
+     * calling the difference a mastering imbalance pulled the outgoing track down by the full
+     * ceiling on essentially every song change, which is not a correction, it is a constant.
      */
     const startBalanceCorrection = (
         context: AudioContext,
         tailChain: AutomixDeckChain,
         activeChain: AutomixDeckChain,
+        incomingReference: number | null,
     ) => {
         appliedTrimDb = 0;
         balanceTimer = setInterval(() => {
             const outgoingDb = tailChain.analyser.loudnessDb();
-            const incomingDb = activeChain.analyser.loudnessDb();
+            const incomingDb = incomingReference ?? activeChain.analyser.loudnessDb();
             if (outgoingDb === null || incomingDb === null) return;
 
             const target = trimForBalance(outgoingDb, incomingDb);
@@ -122,6 +131,20 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             rampGainDb(context, tailChain.trim, -appliedTrimDb, BALANCE_RAMP_SEC);
         }, BALANCE_INTERVAL_MS);
     };
+
+    /**
+     * The incoming track's own average level, in the units the taps report.
+     *
+     * The taps read *after* each deck's ReplayGain and the profile was measured *before* it, so the
+     * deck's current compensation is added back on - otherwise with ReplayGain switched on the
+     * comparison would credit the incoming track with an imbalance ReplayGain had already removed.
+     * Null when the track was never analysed; then the live reading is all there is.
+     */
+    const incomingReferenceDb = (chain: AutomixDeckChain): number | null => (
+        plannedTo === null
+            ? null
+            : plannedTo.loudness + 20 * Math.log10(Math.max(chain.replayGain.gain.value, 1e-6))
+    );
 
     /**
      * Returns both decks to a defined idle state. The one path every ending shares.
@@ -164,7 +187,8 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         phase = 'idle';
         plan = null;
         plannedNextKey = null;
-        plannedIncomingLeadIn = null;
+        plannedFrom = null;
+        plannedTo = null;
         ports.onTailSrcChange(null);
     };
 
@@ -207,7 +231,8 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         phase = 'armed';
         plan = nextPlan;
         plannedNextKey = request.nextKey;
-        plannedIncomingLeadIn = request.to.profile?.leadIn ?? null;
+        plannedFrom = request.from.profile ?? null;
+        plannedTo = request.to.profile ?? null;
 
         // The order matters: pin the outgoing source to the deck it is already playing on before
         // the roles change, so that deck's src string never changes and its playback is never
@@ -272,11 +297,16 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         const tempo = tailChain.analyser.tempo();
         const outgoingDb = tailChain.analyser.loudnessDb();
         const nextBeatIn = tailChain.analyser.nextBeatIn(context.currentTime);
+        // Two questions, each answered by whichever half knows it. The tap heard the last few
+        // seconds, so it knows WHERE the beats are right now. The profile measured the whole file
+        // with a tempo prior, so it knows how FAST the track runs - which is the half a live
+        // autocorrelation gets an octave wrong, and the half that decides the length.
+        const periodSec = plannedFrom?.bpm ? 60 / plannedFrom.bpm : tempo?.periodSec ?? null;
         const fade = planBlendShape({
             overlap,
             outgoingDb,
             nextBeatIn,
-            periodSec: tempo?.periodSec ?? null,
+            periodSec,
             minOverlap: plan.minOverlap,
             maxOverlap: remaining,
         });
@@ -286,8 +316,8 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             overlap: fade.overlap,
             crossover: fade.crossover,
             nextBeatIn,
-            periodSec: tempo?.periodSec ?? null,
-            incomingLeadIn: plannedIncomingLeadIn,
+            periodSec,
+            incomingLeadIn: plannedTo?.leadIn ?? null,
         });
 
         const spans = shape.hold + shape.overlap;
@@ -297,7 +327,7 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             + ` ${shape.overlap < 0.1 ? `${Math.round(shape.overlap * 1000)}ms` : `${shape.overlap.toFixed(2)}s`}`
             + ` at ${Math.round(shape.crossover * 100)}%`
             + `${shape.bassSwap ? ', low end swapped' : ''}`
-            + `${fade.snappedToBeat && shape.style === plan.style ? ` on a beat (${tempo ? Math.round(tempo.bpm) : '?'} BPM)` : ''}`
+            + `${fade.snappedToBeat && shape.style === plan.style ? ` on a beat (${periodSec ? Math.round(60 / periodSec) : '?'} BPM)` : ''}`
             + `${outgoingDb === null ? '' : `, outgoing ${outgoingDb.toFixed(1)} dBFS`}`,
         );
 
@@ -314,7 +344,7 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         // Only where there is an overlap to balance. Across a splice or a cut the two tracks are
         // never both audible, so pulling one down would just be a level step nobody asked for.
         if (shape.overlap >= AUTOMIX_MIN_OVERLAP_SEC) {
-            startBalanceCorrection(context, tailChain, activeChain);
+            startBalanceCorrection(context, tailChain, activeChain, incomingReferenceDb(activeChain));
         }
 
         cleanupTimer = setTimeout(

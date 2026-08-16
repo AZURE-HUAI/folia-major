@@ -116,8 +116,12 @@ const vocalBounds = (lines: Line[] | null | undefined): { start: number; end: nu
     // which threw away the vocal-free window on all of them.
     let first = 0;
     while (first < sung.length - 1 && sung[first].startTime <= CREDIT_STAMP_SEC) first += 1;
-    // Unless singing really does resume straight away, in which case those were lyrics after all.
-    if (sung[first].startTime < CREDIT_MIN_GAP_SEC) first = 0;
+    // ONE line there is ambiguous - a track really can open on a lyric - so a single one only
+    // counts as a credit when a silence follows it. Two or more sharing that one stamp is not
+    // ambiguous at any gap: no performance sings three lines at the same instant. Requiring the
+    // silence in that case too is what still reported a zero-second intro for every track whose
+    // singing happens to start inside the first three seconds.
+    if (first < 2 && sung[first].startTime < CREDIT_MIN_GAP_SEC) first = 0;
 
     return { start: sung[first].startTime, end: sung[sung.length - 1].endTime };
 };

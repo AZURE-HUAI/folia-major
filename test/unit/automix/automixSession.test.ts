@@ -378,6 +378,52 @@ describe('automix session, transition styles', () => {
         ...overrides,
     });
 
+    it('does not read the arriving track\'s intro as a mastering imbalance', () => {
+        // The incoming deck is measured a second into its own track, which is nearly always its
+        // intro - quiet on purpose. Comparing that against the outgoing track's tail said "10dB
+        // out" on song changes that were not out at all, and pulled the outgoing track down by the
+        // whole ceiling every single time. A correction that saturates on every input is a
+        // constant. The profile says where this track actually lives, so that is the comparison.
+        const harness = createHarness({ A: { loudnessDb: -10 }, B: { loudnessDb: -30 } });
+        harness.arm({
+            from: { ...BLENDABLE_FROM, profile: profile() },
+            to: { ...BLENDABLE_TO, profile: profile({ loudness: -9 }) },
+        });
+
+        harness.session.handleActiveDeckPlaying('local:next-song');
+        vi.advanceTimersByTime(300);
+
+        expect(harness.chains.A.trimNode.events).toHaveLength(0);
+    });
+
+    it('still holds down a master that really is the louder of the two', () => {
+        const harness = createHarness({ A: { loudnessDb: -8 }, B: { loudnessDb: -30 } });
+        harness.arm({
+            from: { ...BLENDABLE_FROM, profile: profile() },
+            to: { ...BLENDABLE_TO, profile: profile({ loudness: -20 }) },
+        });
+
+        harness.session.handleActiveDeckPlaying('local:next-song');
+        vi.advanceTimersByTime(300);
+
+        // A track that lives at -20 against one still at -8: the ceiling, and this time it means it.
+        expect(finalTarget(harness.chains.A.trimNode)).toBeCloseTo(0.501, 3);
+    });
+
+    it('spaces the beat grid by the profile, which cannot land an octave out', () => {
+        // The live tap heard a few seconds and called it 160; the file measured end to end is 80,
+        // and 160 is exactly the double an autocorrelation has no way to rule out. Where the beats
+        // fall is still the tap's answer - the profile's phase has drifted by the end of a track.
+        const harness = createHarness({ A: { loudnessDb: -20, bpm: 160, nextBeatIn: 0.1 } });
+        // 80 BPM rounds the six-second window down to six beats, so the blend starts at 95.5s.
+        harness.arm({ time: 96, from: { ...BLENDABLE_FROM, profile: profile({ bpm: 80 }) } });
+
+        harness.session.handleActiveDeckPlaying('local:next-song');
+
+        // Beats every 0.75s from 0.1s in, handover at 42.5%: the length moves to put it on 1.6s.
+        expect(lastCurve(harness.chains.A.fadeNode)?.duration).toBeCloseTo(1.6 / 0.425, 5);
+    });
+
     it('takes the low end off the arriving track and gives it back at the handover', () => {
         // The one thing two overlapping tracks cannot share. Everything below ~250Hz doubles in
         // level, beats against itself and cancels; the mids overlap perfectly happily.

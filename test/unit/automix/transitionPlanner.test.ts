@@ -90,6 +90,18 @@ describe('planTransition', () => {
         expect(plan.reason).toContain('intro 9s');
     });
 
+    it('reads a credit block as credits however soon the singing starts', () => {
+        // Two lines sharing one timestamp is proof by itself - nothing sings both at that instant -
+        // so a silence after them is not also required. Demanding one read a zero-second intro for
+        // every track whose first line happens to land inside the first few seconds, which is most
+        // of them, and that is what kept the vocal-free window unusable in the app.
+        const plan = planTransition(
+            track(100, [line(10, 60)]),
+            track(100, [line(0, 0, '作词 : X'), line(0, 0, '作曲 : Y'), line(1.5, 40, 'sung')]),
+        );
+        expect(plan.reason).toContain('intro 1.5s');
+    });
+
     it('keeps a timeline that genuinely opens on a lyric', () => {
         // A line at zero followed straight away by more singing was singing, not a credit.
         const plan = planTransition(
