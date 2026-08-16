@@ -36,7 +36,10 @@ import {
 
 export type StatusSetter = React.Dispatch<React.SetStateAction<StatusMessage | null>>;
 export const CACHE_SIZE_KEY = 'folia_cache_size';
-const ENABLE_MEDIA_CACHE_KEY = 'folia_enable_media_cache';
+export const ENABLE_MEDIA_CACHE_KEY = 'folia_enable_media_cache';
+/** What the toggle used to write to, before it was corrected to the prefixed key above. */
+export const LEGACY_ENABLE_MEDIA_CACHE_KEY = 'enable_media_cache';
+const AUTOMIX_ENABLED_KEY = 'folia_automix_enabled';
 const LAST_SEEN_GUIDE_VERSION_STORAGE_KEY = 'folia_last_seen_guide_version';
 
 export type AudioQuality = AudioQualityPreference;
@@ -86,6 +89,33 @@ const setStoredBoolean = (key: string, value: boolean) => {
     if (typeof window !== 'undefined') {
         localStorage.setItem(key, String(value));
     }
+};
+
+/**
+ * Reads the media cache toggle, honouring the key its own setter used to write to.
+ *
+ * The setter wrote a bare 'enable_media_cache' while startup read the folia-prefixed key, so the
+ * setting silently reverted to off on every restart. Anyone who switched it on has their real
+ * preference sitting under the legacy key, and simply correcting the setter would throw that
+ * away once more - so read it as a fallback and promote it to the canonical key.
+ */
+export const readStoredEnableMediaCache = (): boolean => {
+    if (typeof window === 'undefined') {
+        return false;
+    }
+
+    const canonical = localStorage.getItem(ENABLE_MEDIA_CACHE_KEY);
+    if (canonical !== null) {
+        return canonical === 'true';
+    }
+
+    const legacy = localStorage.getItem(LEGACY_ENABLE_MEDIA_CACHE_KEY);
+    if (legacy === null) {
+        return false;
+    }
+
+    localStorage.setItem(ENABLE_MEDIA_CACHE_KEY, legacy);
+    return legacy === 'true';
 };
 
 export const readSystemThemeIsDaylight = (): boolean | null => {
@@ -1161,6 +1191,7 @@ export type SettingsUiState = {
     hideRemoteControlTaskbarIcon: boolean;
     openPlayerOnLaunch: boolean;
     enableMediaCache: boolean;
+    automixEnabled: boolean;
     backgroundOpacity: number;
     subtitleOverlayOpacity: number;
     subtitleOverlayBackground: boolean;
@@ -1289,6 +1320,7 @@ export type SettingsUiState = {
     handleToggleHideRemoteControlTaskbarIcon: (enable: boolean) => void;
     handleToggleOpenPlayerOnLaunch: (enable: boolean) => void;
     handleToggleMediaCache: (enable: boolean) => void;
+    handleToggleAutomix: (enable: boolean) => void;
     handleSetBackgroundOpacity: (opacity: number) => void;
     handleSetSubtitleOverlayOpacity: (opacity: number) => void;
     handleToggleSubtitleOverlayBackground: (enabled: boolean) => void;
@@ -1421,7 +1453,8 @@ export const useSettingsUiStore = create<SettingsUiState>((set, get) => ({
     hideTaskbarIcon: getStoredBoolean(HIDE_TASKBAR_ICON_STORAGE_KEY, false),
     hideRemoteControlTaskbarIcon: getStoredBoolean(REMOTE_CONTROL_SKIP_TASKBAR_STORAGE_KEY, false),
     openPlayerOnLaunch: getStoredBoolean(OPEN_PLAYER_ON_LAUNCH_STORAGE_KEY, false),
-    enableMediaCache: getStoredBoolean(ENABLE_MEDIA_CACHE_KEY, false),
+    enableMediaCache: readStoredEnableMediaCache(),
+    automixEnabled: getStoredBoolean(AUTOMIX_ENABLED_KEY, false),
     backgroundOpacity: readStoredBackgroundOpacity(),
     subtitleOverlayOpacity: readStoredSubtitleOverlayOpacity(),
     subtitleOverlayBackground: getStoredBoolean(SUBTITLE_OVERLAY_BACKGROUND_STORAGE_KEY, true),
@@ -1789,8 +1822,12 @@ export const useSettingsUiStore = create<SettingsUiState>((set, get) => ({
         });
     },
     handleToggleMediaCache: (enable) => {
-        setStoredBoolean('enable_media_cache', enable);
+        setStoredBoolean(ENABLE_MEDIA_CACHE_KEY, enable);
         set({ enableMediaCache: enable });
+    },
+    handleToggleAutomix: (enable) => {
+        setStoredBoolean(AUTOMIX_ENABLED_KEY, enable);
+        set({ automixEnabled: enable });
     },
     handleSetBackgroundOpacity: (opacity) => {
         if (typeof window !== 'undefined') {

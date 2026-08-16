@@ -59,6 +59,7 @@ import { useElectronWindowPlaybackHandoff } from './hooks/useElectronWindowPlayb
 import { useMediaSessionBridge } from './hooks/useMediaSessionBridge';
 import { usePlayerChromeAutoHide } from './hooks/usePlayerChromeAutoHide';
 import { usePlaybackAudioBridge } from './hooks/usePlaybackAudioBridge';
+import { useAutomixDecks, type AutomixDeckId } from './hooks/useAutomixDecks';
 import { usePlaybackInteractionBridge } from './hooks/usePlaybackInteractionBridge';
 import { usePlaybackUiEffects } from './hooks/usePlaybackUiEffects';
 import { useLibraryPlaybackController } from './hooks/useLibraryPlaybackController';
@@ -159,6 +160,7 @@ export default function App() {
         setIsUserGuideModalOpen: state.setIsUserGuideModalOpen,
         openAudioEqualizer: state.openAudioEqualizer,
     })));
+    const automixEnabled = useSettingsUiStore(state => state.automixEnabled);
     const setThemeQuickEditorContext = useThemeQuickEditorStore(state => state.setContext);
     const openThemeQuickEditor = useThemeQuickEditorStore(state => state.openEditor);
     const canOpenThemeQuickEditor = useThemeQuickEditorStore(state => state.canOpenEditor);
@@ -238,13 +240,18 @@ export default function App() {
     }), [bass, lowMid, mid, spectrum, treble, vocal]);
 
     // Refs
-    const audioRef = useRef<HTMLAudioElement>(null);
+    // Points at whichever automix deck is currently the one being listened to. Everything
+    // downstream - transport, progress, lyrics, media session - reads playback through here and
+    // stays unaware that there are two elements.
+    const audioRef = useRef<HTMLAudioElement | null>(null);
+    // The automix decks are set up much further down, but a few reset paths declared above here
+    // need to be able to stop a transition. A ref keeps that reachable without reordering them.
+    const automixRef = useRef<{ abortTransition: () => void } | null>(null);
     const animationFrameRef = useRef<number>(0);
     const audioContextRef = useRef<AudioContext | null>(null);
     const analyserRef = useRef<AnalyserNode | null>(null);
     const gainNodeRef = useRef<GainNode | null>(null);
     const replayGainLinearRef = useRef(1);
-    const sourceRef = useRef<MediaElementAudioSourceNode | null>(null);
     const blobUrlRef = useRef<string | null>(null);
     const queueScrollRef = useRef<HTMLDivElement>(null);
     const shouldAutoPlay = useRef(false);
@@ -502,14 +509,16 @@ export default function App() {
         const clampedVolume = clampMediaVolume(targetVolume);
 
         if (gainNodeRef.current && audioContextRef.current) {
+            // Volume only. ReplayGain lives on each deck now, because during a blend the two
+            // tracks need their own compensation and this node is shared by both.
             if (smoothing <= 0) {
                 gainNodeRef.current.gain.setValueAtTime(
-                    replayGainLinearRef.current * clampedVolume,
+                    clampedVolume,
                     audioContextRef.current.currentTime
                 );
             } else {
                 gainNodeRef.current.gain.setTargetAtTime(
-                    replayGainLinearRef.current * clampedVolume,
+                    clampedVolume,
                     audioContextRef.current.currentTime,
                     smoothing
                 );
@@ -899,6 +908,9 @@ export default function App() {
         const { nextProviderId, resolve } = providerSwitchPending;
         setProviderSwitchPending(null);
 
+        // Stops any deck still fading out in the background: this path clears the active deck
+        // only, and a tail left running would have no control pointing at it any more.
+        automixRef.current?.abortTransition();
         const audio = audioRef.current;
         audio?.pause();
         audio?.removeAttribute('src');
@@ -1387,6 +1399,27 @@ export default function App() {
         onClearPendingUnavailableSkip: clearPendingUnavailableSkip,
     });
 
+    const automix = useAutomixDecks({
+        audioRef,
+        audioContextRef,
+        audioSrc,
+        currentSong,
+        lyrics,
+        duration,
+        playQueue,
+        loopMode: effectiveLoopMode,
+        audioQuality,
+        playerState,
+        isEnabled: automixEnabled && !isNowPlayingStageActive,
+        onAdvanceTrack: () => {
+            // Same advance the end of a track would trigger, only early enough for the outgoing
+            // deck to still be sounding when the next one starts.
+            void handleNextTrack({ allowStopOnMissing: true, shouldNavigateToPlayer: false });
+        },
+    });
+
+    automixRef.current = automix;
+
     const { setupAudioAnalyzer, cacheSongAssets } = usePlaybackAudioBridge({
         audioRef,
         audioSrc,
@@ -1402,7 +1435,9 @@ export default function App() {
         analyserRef,
         gainNodeRef,
         replayGainLinearRef,
-        sourceRef,
+        connectDecks: automix.connectDecks,
+        getActiveChain: automix.getActiveChain,
+        suppressAutoplayRef: automix.suppressAutoplayRef,
         setPlayerState,
         setStatusMsg,
         syncOutputGain,
@@ -1436,6 +1471,7 @@ export default function App() {
     useNavidromeScrobbleReporter({
         audioRef,
         currentSong,
+        activeDeck: automix.activeDeck,
     });
 
     const mediaSessionPlayRef = useRef(resumePlayback);
@@ -1559,6 +1595,7 @@ export default function App() {
     usePlaybackVisualizerBridge({
         audioRef,
         analyserRef,
+        isTransitionAudible: automix.isTransitionAudible,
         animationFrameRef,
         activePlaybackContext,
         audioPower,
@@ -2951,6 +2988,190 @@ export default function App() {
         }
     }, [shouldKeepHomeMounted]);
 
+    // The two automix decks are identical and interchangeable. Every handler below ignores the
+    // deck that is not currently active, so a track fading out in the background can never drive
+    // the progress bar, the duration, the queue, or the player state.
+    const renderAudioDeck = (deck: AutomixDeckId, register: (element: HTMLAudioElement | null) => void) => (
+        <audio
+            key={deck}
+            ref={register}
+            src={automix.deckSrc(deck)}
+            preload="auto"
+            crossOrigin="anonymous"
+            loop={effectiveLoopMode === 'one' && automix.activeDeck === deck}
+            onPlay={(e) => {
+                if (!automix.isActiveDeck(e.currentTarget)) return;
+                shouldAutoPlay.current = false;
+                currentTime.set(e.currentTarget.currentTime);
+                setPlayerState(PlayerState.PLAYING);
+            }}
+            onPlaying={(e) => {
+                if (!automix.isActiveDeck(e.currentTarget)) return;
+                shouldAutoPlay.current = false;
+                currentTime.set(e.currentTarget.currentTime);
+                setupAudioAnalyzer();
+                playbackAutoSkipCountRef.current = 0;
+                // The source plays, so a later TTL refresh of the same media is legitimate again.
+                lastAudioRecoverySourceRef.current = null;
+                setPlayerState(PlayerState.PLAYING);
+                // Last chance to refuse the blend, now that we know when this deck really started.
+                automix.handleActiveDeckPlaying();
+            }}
+            onPause={(e) => {
+                if (!automix.isActiveDeck(e.currentTarget)) return;
+                shouldAutoPlay.current = false;
+                if (!e.currentTarget.ended) {
+                    setPlayerState(PlayerState.PAUSED);
+                }
+            }}
+            onTimeUpdate={(e) => {
+                const audioElement = e.currentTarget;
+                if (!automix.isActiveDeck(audioElement)) return;
+                if (!audioElement.paused && !audioElement.ended) {
+                    currentTime.set(audioElement.currentTime);
+                    setPlayerState(PlayerState.PLAYING);
+                }
+                automix.checkTransitionPoint(audioElement.currentTime);
+            }}
+            onSeeked={(e) => {
+                if (!automix.isActiveDeck(e.currentTarget)) return;
+                currentTime.set(e.currentTarget.currentTime);
+            }}
+            // Buffer progress debug helper. Uncomment to inspect how much of
+            // the current source the browser has actually buffered.
+            // onProgress={(e) => {
+            //     const audioElement = e.currentTarget;
+            //     const buffered = audioElement.buffered;
+            //     const source = audioElement.currentSrc || audioSrc;
+            //     if (!source || buffered.length === 0 || !Number.isFinite(audioElement.duration) || audioElement.duration <= 0) {
+            //         return;
+            //     }
+            //
+            //     const bufferedEnd = buffered.end(buffered.length - 1);
+            //     const bufferedPercent = Math.max(
+            //         0,
+            //         Math.min(100, Math.round((bufferedEnd / audioElement.duration) * 100))
+            //     );
+            //     if (lastBufferedPercentLogRef.current !== bufferedPercent) {
+            //         lastBufferedPercentLogRef.current = bufferedPercent;
+            //         console.log('[Audio] buffered percent', {
+            //             src: source,
+            //             currentTime: audioElement.currentTime,
+            //             bufferedEnd,
+            //             duration: audioElement.duration,
+            //             bufferedPercent,
+            //         });
+            //     }
+            // }}
+            onEnded={(e) => {
+                // A track finishing in the background has already handed the queue over.
+                if (!automix.isActiveDeck(e.currentTarget)) {
+                    automix.handleTailEnded();
+                    return;
+                }
+
+                // Cache if playing fully
+                if (audioSrc && !audioSrc.startsWith('blob:') && currentSong && !isStagePlaybackSong(currentSong)) {
+                    cacheSongAssets();
+                }
+
+                // If single loop is active, native loop handles it.
+                // If not, we handle queue logic.
+                if (effectiveLoopMode !== 'one') {
+                    void handleNextTrack({ allowStopOnMissing: true, shouldNavigateToPlayer: false });
+                }
+            }}
+            onLoadedMetadata={(e) => {
+                const audioElement = e.currentTarget;
+                if (!automix.isActiveDeck(audioElement)) return;
+                setDuration(audioElement.duration);
+
+                const pendingResumeTime = pendingResumeTimeRef.current;
+                if (pendingResumeTime !== null) {
+                    const safeDuration = Number.isFinite(audioElement.duration) && audioElement.duration > 0
+                        ? Math.max(audioElement.duration - 0.25, 0)
+                        : pendingResumeTime;
+                    const nextTime = Math.min(pendingResumeTime, safeDuration);
+                    audioElement.currentTime = nextTime;
+                    currentTime.set(nextTime);
+                    pendingResumeTimeRef.current = null;
+                    return;
+                }
+
+                currentTime.set(0); // Ensure currentTime is reset when new audio loads
+            }}
+            onError={(e) => {
+                if (!automix.isActiveDeck(e.currentTarget)) {
+                    automix.handleTailEnded();
+                    return;
+                }
+
+                if (!audioSrc) {
+                    return;
+                }
+
+                const audioElement = e.currentTarget;
+                const reportedDuration = Number.isFinite(audioElement.duration) && audioElement.duration > 0
+                    ? audioElement.duration
+                    : duration;
+                const isLocalTailDecodeError = Boolean(
+                    isLocalPlaybackSong(currentSong) &&
+                    Number.isFinite(reportedDuration) &&
+                    reportedDuration > 0 &&
+                    audioElement.currentTime > 0 &&
+                    reportedDuration - audioElement.currentTime <= LOCAL_TAIL_DECODE_ERROR_TOLERANCE_SEC
+                );
+
+                if (isLocalTailDecodeError) {
+                    currentTime.set(Math.max(audioElement.currentTime, reportedDuration));
+                    setPlayerState(PlayerState.IDLE);
+
+                    if (effectiveLoopMode === 'one') {
+                        audioElement.currentTime = 0;
+                        audioElement.load();
+                        const replayPromise = audioElement.play();
+                        if (replayPromise !== undefined) {
+                            replayPromise.catch(() => {
+                                setPlayerState(PlayerState.PAUSED);
+                            });
+                        }
+                        return;
+                    }
+
+                    void handleNextTrack({ allowStopOnMissing: true, shouldNavigateToPlayer: false });
+                    return;
+                }
+
+                const failedSrc = e.currentTarget.currentSrc || audioSrc;
+                const shouldRetryOnlineSong = Boolean(
+                    currentSong &&
+                    !isLocalPlaybackSong(currentSong) &&
+                    !isNavidromePlaybackSong(currentSong) &&
+                    !isStagePlaybackSong(currentSong) &&
+                    failedSrc &&
+                    !failedSrc.startsWith('blob:')
+                );
+
+                if (shouldRetryOnlineSong) {
+                    void (async () => {
+                        const recovered = await recoverOnlinePlaybackSource({
+                            failedSrc,
+                            resumeAt: e.currentTarget.currentTime,
+                            autoplay: (!e.currentTarget.paused && !e.currentTarget.ended) || playerState === PlayerState.PLAYING || shouldAutoPlay.current,
+                        });
+
+                        if (!recovered) {
+                            skipAfterPlaybackFailure();
+                        }
+                    })();
+                    return;
+                }
+
+                skipAfterPlaybackFailure();
+            }}
+        />
+    );
+
     return (
         <AppShell
             appStyle={appStyle}
@@ -2974,163 +3195,10 @@ export default function App() {
                     void window.electron?.setMainWindowClickThroughUnlockHover?.(false);
                 }
             }}
-            audioElement={<audio
-                ref={audioRef}
-                src={audioSrc || undefined}
-                preload="auto"
-                crossOrigin="anonymous"
-                loop={effectiveLoopMode === 'one'}
-                onPlay={(e) => {
-                    shouldAutoPlay.current = false;
-                    currentTime.set(e.currentTarget.currentTime);
-                    setPlayerState(PlayerState.PLAYING);
-                }}
-                onPlaying={(e) => {
-                    shouldAutoPlay.current = false;
-                    currentTime.set(e.currentTarget.currentTime);
-                    setupAudioAnalyzer();
-                    playbackAutoSkipCountRef.current = 0;
-                    // The source plays, so a later TTL refresh of the same media is legitimate again.
-                    lastAudioRecoverySourceRef.current = null;
-                    setPlayerState(PlayerState.PLAYING);
-                }}
-                onPause={(e) => {
-                    shouldAutoPlay.current = false;
-                    if (!e.currentTarget.ended) {
-                        setPlayerState(PlayerState.PAUSED);
-                    }
-                }}
-                onTimeUpdate={(e) => {
-                    const audioElement = e.currentTarget;
-                    if (!audioElement.paused && !audioElement.ended) {
-                        currentTime.set(audioElement.currentTime);
-                        setPlayerState(PlayerState.PLAYING);
-                    }
-                }}
-                onSeeked={(e) => {
-                    currentTime.set(e.currentTarget.currentTime);
-                }}
-                // Buffer progress debug helper. Uncomment to inspect how much of
-                // the current source the browser has actually buffered.
-                // onProgress={(e) => {
-                //     const audioElement = e.currentTarget;
-                //     const buffered = audioElement.buffered;
-                //     const source = audioElement.currentSrc || audioSrc;
-                //     if (!source || buffered.length === 0 || !Number.isFinite(audioElement.duration) || audioElement.duration <= 0) {
-                //         return;
-                //     }
-                //
-                //     const bufferedEnd = buffered.end(buffered.length - 1);
-                //     const bufferedPercent = Math.max(
-                //         0,
-                //         Math.min(100, Math.round((bufferedEnd / audioElement.duration) * 100))
-                //     );
-                //     if (lastBufferedPercentLogRef.current !== bufferedPercent) {
-                //         lastBufferedPercentLogRef.current = bufferedPercent;
-                //         console.log('[Audio] buffered percent', {
-                //             src: source,
-                //             currentTime: audioElement.currentTime,
-                //             bufferedEnd,
-                //             duration: audioElement.duration,
-                //             bufferedPercent,
-                //         });
-                //     }
-                // }}
-                onEnded={() => {
-                    // Cache if playing fully
-                    if (audioSrc && !audioSrc.startsWith('blob:') && currentSong && !isStagePlaybackSong(currentSong)) {
-                        cacheSongAssets();
-                    }
-
-                    // If single loop is active, native loop handles it.
-                    // If not, we handle queue logic.
-                    if (effectiveLoopMode !== 'one') {
-                        void handleNextTrack({ allowStopOnMissing: true, shouldNavigateToPlayer: false });
-                    }
-                }}
-                onLoadedMetadata={(e) => {
-                    const audioElement = e.currentTarget;
-                    setDuration(audioElement.duration);
-
-                    const pendingResumeTime = pendingResumeTimeRef.current;
-                    if (pendingResumeTime !== null) {
-                        const safeDuration = Number.isFinite(audioElement.duration) && audioElement.duration > 0
-                            ? Math.max(audioElement.duration - 0.25, 0)
-                            : pendingResumeTime;
-                        const nextTime = Math.min(pendingResumeTime, safeDuration);
-                        audioElement.currentTime = nextTime;
-                        currentTime.set(nextTime);
-                        pendingResumeTimeRef.current = null;
-                        return;
-                    }
-
-                    currentTime.set(0); // Ensure currentTime is reset when new audio loads
-                }}
-                onError={(e) => {
-                    if (!audioSrc) {
-                        return;
-                    }
-
-                    const audioElement = e.currentTarget;
-                    const reportedDuration = Number.isFinite(audioElement.duration) && audioElement.duration > 0
-                        ? audioElement.duration
-                        : duration;
-                    const isLocalTailDecodeError = Boolean(
-                        isLocalPlaybackSong(currentSong) &&
-                        Number.isFinite(reportedDuration) &&
-                        reportedDuration > 0 &&
-                        audioElement.currentTime > 0 &&
-                        reportedDuration - audioElement.currentTime <= LOCAL_TAIL_DECODE_ERROR_TOLERANCE_SEC
-                    );
-
-                    if (isLocalTailDecodeError) {
-                        currentTime.set(Math.max(audioElement.currentTime, reportedDuration));
-                        setPlayerState(PlayerState.IDLE);
-
-                        if (effectiveLoopMode === 'one') {
-                            audioElement.currentTime = 0;
-                            audioElement.load();
-                            const replayPromise = audioElement.play();
-                            if (replayPromise !== undefined) {
-                                replayPromise.catch(() => {
-                                    setPlayerState(PlayerState.PAUSED);
-                                });
-                            }
-                            return;
-                        }
-
-                        void handleNextTrack({ allowStopOnMissing: true, shouldNavigateToPlayer: false });
-                        return;
-                    }
-
-                    const failedSrc = e.currentTarget.currentSrc || audioSrc;
-                    const shouldRetryOnlineSong = Boolean(
-                        currentSong &&
-                        !isLocalPlaybackSong(currentSong) &&
-                        !isNavidromePlaybackSong(currentSong) &&
-                        !isStagePlaybackSong(currentSong) &&
-                        failedSrc &&
-                        !failedSrc.startsWith('blob:')
-                    );
-
-                    if (shouldRetryOnlineSong) {
-                        void (async () => {
-                            const recovered = await recoverOnlinePlaybackSource({
-                                failedSrc,
-                                resumeAt: e.currentTarget.currentTime,
-                                autoplay: (!e.currentTarget.paused && !e.currentTarget.ended) || playerState === PlayerState.PLAYING || shouldAutoPlay.current,
-                            });
-
-                            if (!recovered) {
-                                skipAfterPlaybackFailure();
-                            }
-                        })();
-                        return;
-                    }
-
-                    skipAfterPlaybackFailure();
-                }}
-            />}
+            audioElement={<>
+                {renderAudioDeck('A', automix.registerDeckA)}
+                {renderAudioDeck('B', automix.registerDeckB)}
+            </>}
         >
 
             {/* Home Mount Point */}

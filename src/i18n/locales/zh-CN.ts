@@ -369,6 +369,7 @@ export default {
     "close": "关闭",
     "volume": "音量",
     "openEqualizer": "打开音频均衡器",
+    "automix": "智能过渡",
     "equalizerTitle": "10 段音频均衡器",
     "equalizerDescription": "从低频到高频调节播放声音，修改会自动保存。",
     "equalizerEnabled": "均衡器已开启",

@@ -38,6 +38,8 @@ type UsePlaybackVisualizerBridgeParams = {
     syncNowPlayingClock: (progressSec: number, durationSec: number, paused: boolean) => void;
     lyricTimelineOffsetMs: number;
     lyricCurrentTime: MotionValue<number>;
+    /** True while an automix handover is in progress and a deck other than the active one sounds. */
+    isTransitionAudible: () => boolean;
 };
 
 // Runs the requestAnimationFrame loop for audio-reactive visuals and lyric timing.
@@ -67,14 +69,20 @@ export function usePlaybackVisualizerBridge({
     syncNowPlayingClock,
     lyricTimelineOffsetMs,
     lyricCurrentTime,
+    isTransitionAudible,
 }: UsePlaybackVisualizerBridgeParams) {
     const currentLineIndexRef = useRef(-1);
 
     const updateLoop = useCallback(() => {
         const audioElement = audioRef.current;
         const isActuallyPlaying = Boolean(audioElement && !audioElement.paused && !audioElement.ended);
+        // Mid-handover the active deck is still loading while the outgoing one is still sounding.
+        // The analyser is downstream of both, so it has real signal: dropping to the idle breath
+        // here would put a visible stutter at exactly the moment meant to be seamless. The clock
+        // below deliberately keeps using isActuallyPlaying - the new deck's time is not ours yet.
+        const hasAudibleSignal = isActuallyPlaying || isTransitionAudible();
 
-        if (isActuallyPlaying && analyserRef.current) {
+        if (hasAudibleSignal && analyserRef.current) {
             const bufferLength = analyserRef.current.frequencyBinCount;
             const dataArray = new Uint8Array(bufferLength);
             analyserRef.current.getByteFrequencyData(dataArray);
@@ -244,6 +252,7 @@ export function usePlaybackVisualizerBridge({
         syncStageLyricsClock,
         lyricTimelineOffsetMs,
         lyricCurrentTime,
+        isTransitionAudible,
     ]);
 
     useEffect(() => {

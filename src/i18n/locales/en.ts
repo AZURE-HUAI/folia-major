@@ -368,6 +368,7 @@ export default {
     "close": "Close",
     "volume": "Volume",
     "openEqualizer": "Open audio equalizer",
+    "automix": "Smart transition",
     "equalizerTitle": "10-band equalizer",
     "equalizerDescription": "Shape playback from deep bass to high treble. Changes are saved automatically.",
     "equalizerEnabled": "Equalizer on",

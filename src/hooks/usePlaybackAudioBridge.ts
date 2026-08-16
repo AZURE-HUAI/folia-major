@@ -10,6 +10,7 @@ import { resolveNavidromePlaybackCarrier } from '../utils/appPlaybackGuards';
 import { calculateReplayGain } from '../utils/replayGain';
 import { saveToCache } from '../services/db';
 import { applyAudioEqualizerSettings, connectAudioEqualizerGraph } from '../services/audioEqualizerGraph';
+import { rampGain, type AutomixDeckChain } from '../services/automix/crossfadeGraph';
 import { useSettingsUiStore } from '../stores/useSettingsUiStore';
 
 // src/hooks/usePlaybackAudioBridge.ts
@@ -29,7 +30,12 @@ type UsePlaybackAudioBridgeParams = {
     analyserRef: MutableRefObject<AnalyserNode | null>;
     gainNodeRef: MutableRefObject<GainNode | null>;
     replayGainLinearRef: MutableRefObject<number>;
-    sourceRef: MutableRefObject<MediaElementAudioSourceNode | null>;
+    /** Wires both automix decks into the shared mix point. Returns false if a deck is missing. */
+    connectDecks: (context: AudioContext, output: AudioNode) => boolean;
+    /** The deck the app is currently listening through, for per-track loudness compensation. */
+    getActiveChain: () => AutomixDeckChain | null;
+    /** Set when a pause interrupted an armed transition; suppresses exactly one autoplay. */
+    suppressAutoplayRef: MutableRefObject<boolean>;
     setPlayerState: React.Dispatch<React.SetStateAction<PlayerState>>;
     setStatusMsg: React.Dispatch<React.SetStateAction<StatusMessage | null>>;
     syncOutputGain: (targetVolume: number, smoothing?: number) => void;
@@ -55,7 +61,9 @@ export function usePlaybackAudioBridge({
     analyserRef,
     gainNodeRef,
     replayGainLinearRef,
-    sourceRef,
+    connectDecks,
+    getActiveChain,
+    suppressAutoplayRef,
     setPlayerState,
     setStatusMsg,
     syncOutputGain,
@@ -101,7 +109,13 @@ export function usePlaybackAudioBridge({
         replayGainLinearRef.current = calculation.linearGain;
 
         try {
-            syncOutputGain(getTargetPlaybackVolume(), 0.1);
+            // Onto the deck rather than the shared output: loudness compensation is a per-track
+            // value, so during a blend the two decks legitimately need different ones.
+            const activeChain = getActiveChain();
+            if (activeChain) {
+                rampGain(audioContextRef.current, activeChain.replayGain, calculation.linearGain, 0.1);
+            }
+
             const replayGainLogSignature = JSON.stringify({
                 songId: currentSong.id,
                 mode: replayGainMode,
@@ -117,10 +131,12 @@ export function usePlaybackAudioBridge({
         } catch (error) {
             console.warn('[AudioContext] Failed to apply ReplayGain', error);
         }
-    }, [audioContextRef, currentSong, gainNodeRef, getTargetPlaybackVolume, localSongs, replayGainLinearRef, replayGainMode, syncOutputGain]);
+    }, [audioContextRef, currentSong, gainNodeRef, getActiveChain, localSongs, replayGainLinearRef, replayGainMode]);
 
     const setupAudioAnalyzer = useCallback(() => {
-        if (!audioRef.current || sourceRef.current) return;
+        // The context is the sentinel, not the source node: a deck that failed to connect must
+        // not let this run twice, because createMediaElementSource throws on a second call.
+        if (!audioRef.current || audioContextRef.current) return;
         try {
             const AudioContextClass = window.AudioContext || (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
             const ctx = new AudioContextClass();
@@ -131,11 +147,15 @@ export function usePlaybackAudioBridge({
             analyser.smoothingTimeConstant = 0.6;
             analyserRef.current = analyser;
 
+            // The shared mix point. Both decks land here, so the equaliser and the analyser each
+            // exist once and see the sum: the tone never steps mid-blend and the visualiser draws
+            // what is actually being heard.
             const gainNode = ctx.createGain();
             gainNodeRef.current = gainNode;
 
-            const source = ctx.createMediaElementSource(audioRef.current);
-            source.connect(gainNode);
+            if (!connectDecks(ctx, gainNode)) {
+                console.warn('[AudioContext] Deck setup incomplete, automix will stay idle');
+            }
             connectAudioEqualizerGraph({
                 context: ctx,
                 input: gainNode,
@@ -144,13 +164,12 @@ export function usePlaybackAudioBridge({
                 settings: audioEqualizerSettings,
             });
             analyser.connect(ctx.destination);
-            sourceRef.current = source;
             applyReplayGain();
             syncOutputGain(getTargetPlaybackVolume(), 0);
         } catch (error) {
             console.error('Audio Context Setup Failed:', error);
         }
-    }, [analyserRef, applyReplayGain, audioContextRef, audioEqualizerSettings, audioRef, gainNodeRef, getTargetPlaybackVolume, sourceRef, syncOutputGain]);
+    }, [analyserRef, applyReplayGain, audioContextRef, audioEqualizerSettings, audioRef, connectDecks, gainNodeRef, getTargetPlaybackVolume, syncOutputGain]);
 
     const cacheSongAssets = useCallback(async () => {
         if (!currentSong || !audioSrc || audioSrc.startsWith('blob:')) return;
@@ -227,6 +246,16 @@ export function usePlaybackAudioBridge({
         if (audioSrc && audioRef.current) {
             if (shouldAutoPlayRef.current && !isLyricsLoading) {
                 shouldAutoPlayRef.current = false;
+
+                // Automix starts the next track seconds early, so a pause can land after the
+                // advance is already in flight and too late to recall. Honour the pause instead:
+                // without this the listener presses pause and the next song starts anyway.
+                if (suppressAutoplayRef.current) {
+                    suppressAutoplayRef.current = false;
+                    setPlayerState(PlayerState.PAUSED);
+                    return;
+                }
+
                 syncOutputGain(getTargetPlaybackVolume(), 0);
                 const playPromise = audioRef.current.play();
                 if (playPromise !== undefined) {
@@ -249,7 +278,7 @@ export function usePlaybackAudioBridge({
                 }
             }
         }
-    }, [audioRef, audioSrc, getTargetPlaybackVolume, isLyricsLoading, setPlayerState, setStatusMsg, setupAudioAnalyzer, shouldAutoPlayRef, syncOutputGain, t]);
+    }, [audioRef, audioSrc, getTargetPlaybackVolume, isLyricsLoading, setPlayerState, setStatusMsg, setupAudioAnalyzer, shouldAutoPlayRef, suppressAutoplayRef, syncOutputGain, t]);
 
     return {
         setupAudioAnalyzer,
