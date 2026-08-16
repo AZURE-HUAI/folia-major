@@ -1,5 +1,13 @@
-import { rampGain, rampGainDb, scheduleCrossfade, type AutomixDeckChain } from './crossfadeGraph';
+import {
+    rampGain,
+    rampGainDb,
+    resetLowCut,
+    scheduleBassSwap,
+    scheduleCrossfade,
+    type AutomixDeckChain,
+} from './crossfadeGraph';
 import { planBlendShape, trimForBalance } from './signalAnalysis';
+import { shapeBlend } from './transitionChooser';
 import {
     AUTOMIX_MIN_OVERLAP_SEC,
     planTransition,
@@ -56,6 +64,8 @@ export interface AutomixTransitionRequest {
     audioSrc: string;
     from: TransitionTrack;
     to: TransitionTrack;
+    /** The two tracks are neighbours on one album, which is what allows a gapless join. */
+    sameAlbum?: boolean;
     /** Playback key of the track the queue will advance to, checked again before the ramp. */
     nextKey: string;
 }
@@ -65,6 +75,8 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
     let phase: AutomixPhase = 'idle';
     let plan: TransitionPlan | null = null;
     let plannedNextKey: string | null = null;
+    /** Leading silence on the track being blended into: the only wait that costs nothing. */
+    let plannedIncomingLeadIn: number | null = null;
     let cleanupTimer: ReturnType<typeof setTimeout> | null = null;
     let balanceTimer: ReturnType<typeof setInterval> | null = null;
     let appliedTrimDb = 0;
@@ -135,8 +147,9 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         }
 
         // Unity on both decks, always. A deck left at zero gain is silent playback: the one
-        // failure here a listener cannot work around by pressing anything. The trim goes with it,
-        // or the deck that was faded out would come back attenuated next time it is used.
+        // failure here a listener cannot work around by pressing anything. The trim and the low
+        // cut go with it, or a deck that was faded out would come back attenuated and thin the
+        // next time it is used.
         const context = ports.getContext();
         if (context) {
             (['A', 'B'] as const).forEach(deck => {
@@ -144,12 +157,14 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
                 if (!chain) return;
                 rampGain(context, chain.fade, 1, 0.03);
                 rampGain(context, chain.trim, 1, 0.03);
+                resetLowCut(context, chain.lowCut);
             });
         }
 
         phase = 'idle';
         plan = null;
         plannedNextKey = null;
+        plannedIncomingLeadIn = null;
         ports.onTailSrcChange(null);
     };
 
@@ -165,7 +180,14 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         // The deck still playing is the one whose tempo sets the length: at this point it is the
         // active one, and the only track with any audio behind it to measure.
         const outgoingTempo = ports.getChain(activeDeck)?.analyser.tempo() ?? null;
-        const nextPlan = planTransition(request.from, request.to, outgoingTempo?.bpm ?? null);
+        const nextPlan = planTransition(
+            request.from,
+            request.to,
+            // The offline profile measured the whole file; the live tap only heard the last few
+            // seconds. Prefer the profile, fall back to the tap for anything never analysed.
+            request.from.profile?.bpm ?? outgoingTempo?.bpm ?? null,
+            { sameAlbum: request.sameAlbum },
+        );
         if (nextPlan.kind !== 'fade' || request.time < nextPlan.outStart) return nextPlan;
 
         const context = ports.getContext();
@@ -185,6 +207,7 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         phase = 'armed';
         plan = nextPlan;
         plannedNextKey = request.nextKey;
+        plannedIncomingLeadIn = request.to.profile?.leadIn ?? null;
 
         // The order matters: pin the outgoing source to the deck it is already playing on before
         // the roles change, so that deck's src string never changes and its playback is never
@@ -248,27 +271,55 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         // two swap places, and its beat grid decides where that swap lands.
         const tempo = tailChain.analyser.tempo();
         const outgoingDb = tailChain.analyser.loudnessDb();
-        const shape = planBlendShape({
+        const nextBeatIn = tailChain.analyser.nextBeatIn(context.currentTime);
+        const fade = planBlendShape({
             overlap,
             outgoingDb,
-            nextBeatIn: tailChain.analyser.nextBeatIn(context.currentTime),
+            nextBeatIn,
             periodSec: tempo?.periodSec ?? null,
-            minOverlap: AUTOMIX_MIN_OVERLAP_SEC,
+            minOverlap: plan.minOverlap,
             maxOverlap: remaining,
         });
+        const shape = shapeBlend({
+            style: plan.style,
+            room: overlap,
+            overlap: fade.overlap,
+            crossover: fade.crossover,
+            nextBeatIn,
+            periodSec: tempo?.periodSec ?? null,
+            incomingLeadIn: plannedIncomingLeadIn,
+        });
 
+        const spans = shape.hold + shape.overlap;
         console.log(
-            `[Automix] blending ${shape.overlap.toFixed(2)}s, handover at ${Math.round(shape.crossover * 100)}%`
-            + `${shape.snappedToBeat ? ` on a beat (${tempo ? Math.round(tempo.bpm) : '?'} BPM)` : ''}`
+            `[Automix] ${shape.style}${shape.style === plan.style ? '' : ` (planned ${plan.style})`}:`
+            + `${shape.hold > 0.01 ? ` waits ${shape.hold.toFixed(2)}s, then` : ''}`
+            + ` ${shape.overlap < 0.1 ? `${Math.round(shape.overlap * 1000)}ms` : `${shape.overlap.toFixed(2)}s`}`
+            + ` at ${Math.round(shape.crossover * 100)}%`
+            + `${shape.bassSwap ? ', low end swapped' : ''}`
+            + `${fade.snappedToBeat && shape.style === plan.style ? ` on a beat (${tempo ? Math.round(tempo.bpm) : '?'} BPM)` : ''}`
             + `${outgoingDb === null ? '' : `, outgoing ${outgoingDb.toFixed(1)} dBFS`}`,
         );
 
-        scheduleCrossfade(context, tailChain.fade, activeChain.fade, shape.overlap, shape.crossover);
-        startBalanceCorrection(context, tailChain, activeChain);
+        // Read before scheduling so the filter sweep and the gain curve share one start time.
+        const startAt = context.currentTime + shape.hold;
+        if (shape.bassSwap) {
+            scheduleBassSwap(
+                context, tailChain.lowCut, activeChain.lowCut, startAt, shape.overlap, shape.crossover,
+            );
+        }
+        scheduleCrossfade(
+            context, tailChain.fade, activeChain.fade, shape.overlap, shape.crossover, shape.hold,
+        );
+        // Only where there is an overlap to balance. Across a splice or a cut the two tracks are
+        // never both audible, so pulling one down would just be a level step nobody asked for.
+        if (shape.overlap >= AUTOMIX_MIN_OVERLAP_SEC) {
+            startBalanceCorrection(context, tailChain, activeChain);
+        }
 
         cleanupTimer = setTimeout(
             () => settle({ pauseTail: true }),
-            shape.overlap * 1000 + FADE_CLEANUP_MARGIN_MS,
+            spans * 1000 + FADE_CLEANUP_MARGIN_MS,
         );
     };
 

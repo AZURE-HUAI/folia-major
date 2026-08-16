@@ -1,6 +1,20 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { rampGain, rampGainDb, scheduleCrossfade } from '@/services/automix/crossfadeGraph';
-import { asGain, createFakeContext, createFakeGainNode, finalTarget, lastCurve } from './fakeAudioGraph';
+import {
+    BASS_OPEN_HZ,
+    BASS_SWAP_HZ,
+    rampGain,
+    rampGainDb,
+    scheduleBassSwap,
+    scheduleCrossfade,
+} from '@/services/automix/crossfadeGraph';
+import {
+    asGain,
+    createFakeContext,
+    createFakeFilter,
+    createFakeGainNode,
+    finalTarget,
+    lastCurve,
+} from './fakeAudioGraph';
 
 // test/unit/automix/crossfadeGraph.test.ts
 
@@ -79,6 +93,62 @@ describe('scheduleCrossfade', () => {
         // A blend is optional. An incoming deck stuck at zero gain is silent playback.
         expect(finalTarget(incoming)).toBe(1);
         expect(finalTarget(outgoing)).toBe(0);
+    });
+});
+
+describe('scheduleCrossfade, held', () => {
+    it('keeps the incoming deck silent until the handover moment', () => {
+        // The incoming deck starts when the media element manages to start, not when we ask. So
+        // placing a handover anywhere other than "now" means letting it run muted until then -
+        // which is what makes a cut a cut and a splice a splice.
+        const context = createFakeContext(10);
+        const outgoing = createFakeGainNode();
+        const incoming = createFakeGainNode();
+
+        scheduleCrossfade(context, asGain(outgoing), asGain(incoming), 0.04, 0.5, 1.2);
+
+        expect(incoming.events).toContainEqual({ type: 'set', time: 10, value: 0 });
+        expect(outgoing.events).toContainEqual({ type: 'set', time: 10, value: 1 });
+        expect(lastCurve(incoming)).toMatchObject({ time: 11.2, duration: 0.04 });
+        expect(lastCurve(outgoing)).toMatchObject({ time: 11.2, duration: 0.04 });
+    });
+});
+
+describe('scheduleBassSwap', () => {
+    const run = (seconds = 4, crossover = 0.5) => {
+        const context = createFakeContext(0);
+        const outgoing = createFakeFilter();
+        const incoming = createFakeFilter();
+        scheduleBassSwap(context, outgoing.node, incoming.node, 0, seconds, crossover);
+        return { outgoing, incoming };
+    };
+
+    it('brings the incoming track in without its bass and hands the low end over', () => {
+        const { outgoing, incoming } = run();
+
+        expect(incoming.events[1]).toMatchObject({ type: 'set', time: 0, value: BASS_SWAP_HZ });
+        expect(incoming.events.at(-1)).toMatchObject({ type: 'exp', value: BASS_OPEN_HZ });
+        expect(outgoing.events[1]).toMatchObject({ type: 'set', time: 0, value: BASS_OPEN_HZ });
+        expect(outgoing.events.at(-1)).toMatchObject({ type: 'exp', value: BASS_SWAP_HZ });
+    });
+
+    it('swaps around the crossover, not around the middle', () => {
+        const { incoming } = run(4, 0.25);
+
+        // Crossover at 1s, so the sweep is centred there rather than at 2s.
+        const hold = incoming.events[2] as { time: number };
+        const end = incoming.events[3] as { time: number };
+        expect((hold.time + end.time) / 2).toBeCloseTo(1, 6);
+    });
+
+    it('finishes the sweep inside the blend even when the handover is right at the edge', () => {
+        // Otherwise a deck is still sweeping after the other one has gone, and the swap is heard
+        // as a filter move rather than as the two tracks changing places.
+        const { incoming } = run(1, 0.9);
+
+        const end = incoming.events.at(-1) as { time: number };
+        expect(end.time).toBeLessThanOrEqual(1);
+        expect((incoming.events[2] as { time: number }).time).toBeGreaterThanOrEqual(0);
     });
 });
 

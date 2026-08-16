@@ -6,6 +6,7 @@ import {
     type AutomixSessionPorts,
 } from '@/services/automix/automixSession';
 import type { TransitionTrack } from '@/services/automix/transitionPlanner';
+import { TRACK_PROFILE_VERSION, type TrackProfile } from '@/services/automix/trackProfile';
 import {
     asElement,
     createFakeChain,
@@ -344,5 +345,129 @@ describe('automix session', () => {
 
         expect(harness.arm()).toBeNull();
         expect(harness.advanceTrack).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('automix session, transition styles', () => {
+    beforeEach(() => {
+        vi.useFakeTimers();
+        vi.spyOn(console, 'log').mockImplementation(() => { });
+    });
+
+    afterEach(() => {
+        vi.useRealTimers();
+        vi.restoreAllMocks();
+    });
+
+    const profile = (overrides: Partial<TrackProfile> = {}): TrackProfile => ({
+        version: TRACK_PROFILE_VERSION,
+        duration: 100,
+        leadIn: 0,
+        leadOut: 0,
+        startsHot: false,
+        endsHot: false,
+        introSlope: 0,
+        outroSlope: 0,
+        loudness: -14,
+        bpm: 120,
+        beatOffset: 0,
+        key: -1,
+        major: true,
+        keyConfidence: 0,
+        ...overrides,
+    });
+
+    it('takes the low end off the arriving track and gives it back at the handover', () => {
+        // The one thing two overlapping tracks cannot share. Everything below ~250Hz doubles in
+        // level, beats against itself and cancels; the mids overlap perfectly happily.
+        const harness = createHarness({ A: { loudnessDb: -20 } });
+        harness.arm({
+            from: { ...BLENDABLE_FROM, profile: profile({ outroSlope: -3 }) },
+            to: { ...BLENDABLE_TO, profile: profile({ leadIn: 2 }) },
+        });
+
+        harness.session.handleActiveDeckPlaying('local:next-song');
+
+        // The arriving deck opens filtered and ends open; the leaving deck does the opposite.
+        expect(finalTarget(harness.chains.B.lowCutParam)).toBe(20);
+        expect(harness.chains.B.lowCutParam.events[1]).toMatchObject({ type: 'set', value: 250 });
+        expect(finalTarget(harness.chains.A.lowCutParam)).toBe(250);
+        expect(harness.chains.A.lowCutParam.events[1]).toMatchObject({ type: 'set', value: 20 });
+    });
+
+    it('opens the low cut on both decks again when the transition settles', () => {
+        const harness = createHarness();
+        harness.arm({
+            from: { ...BLENDABLE_FROM, profile: profile({ outroSlope: -3 }) },
+            to: { ...BLENDABLE_TO, profile: profile({ leadIn: 2 }) },
+        });
+        harness.session.handleActiveDeckPlaying('local:next-song');
+
+        vi.advanceTimersByTime(9_000);
+
+        // A deck left filtered would come back thin the next time it is used - the same failure
+        // mode the trim reset exists for.
+        expect(finalTarget(harness.chains.A.lowCutParam)).toBe(20);
+        expect(finalTarget(harness.chains.B.lowCutParam)).toBe(20);
+    });
+
+    it('waits out the outgoing track and splices, for a segue the album already had', () => {
+        const harness = createHarness();
+        const plan = harness.arm({
+            time: 99,
+            sameAlbum: true,
+            from: { ...BLENDABLE_FROM, profile: profile({ endsHot: true }) },
+            to: { ...BLENDABLE_TO, profile: profile({ startsHot: true, leadIn: 3 }) },
+        });
+        expect(plan?.style).toBe('gapless');
+
+        harness.session.handleActiveDeckPlaying('local:next-song');
+
+        // Five seconds of the outgoing track are left, so the incoming deck - which has already
+        // started, silently - waits all but the splice out. It costs nothing here because the
+        // incoming track opens with three seconds of silence to spend.
+        const splice = lastCurve(harness.chains.A.fadeNode);
+        expect(splice?.duration).toBeCloseTo(0.006, 4);
+        expect(splice?.time).toBeCloseTo(1.494, 3);
+        expect(harness.chains.A.lowCutParam.events).toHaveLength(0);
+    });
+
+    it('overlaps instead when a splice would eat the start of the next track', () => {
+        const harness = createHarness();
+        harness.arm({
+            time: 99,
+            sameAlbum: true,
+            from: { ...BLENDABLE_FROM, profile: profile({ endsHot: true }) },
+            to: { ...BLENDABLE_TO, profile: profile({ startsHot: true, leadIn: 0 }) },
+        });
+
+        harness.session.handleActiveDeckPlaying('local:next-song');
+
+        // No leading silence to wait in, so the join would have to cut into the first notes.
+        expect(lastCurve(harness.chains.A.fadeNode)?.duration).toBeGreaterThan(1);
+        expect(finalTarget(harness.chains.A.lowCutParam)).toBe(250);
+    });
+
+    it('cuts rather than fades into a track that starts at full level', () => {
+        const harness = createHarness();
+        const plan = harness.arm({
+            time: 99,
+            from: { ...BLENDABLE_FROM, profile: profile({ bpm: 120 }) },
+            to: { ...BLENDABLE_TO, profile: profile({ startsHot: true }) },
+        });
+        expect(plan?.style).toBe('beatCut');
+
+        harness.session.handleActiveDeckPlaying('local:next-song');
+
+        expect(lastCurve(harness.chains.A.fadeNode)?.duration).toBeCloseTo(0.04, 4);
+    });
+
+    it('leaves an unanalysed pair on the plain crossfade it always had', () => {
+        const harness = createHarness();
+        const plan = harness.arm();
+
+        expect(plan?.style).toBe('plainBlend');
+        harness.session.handleActiveDeckPlaying('local:next-song');
+        expect(harness.chains.A.lowCutParam.events).toHaveLength(0);
     });
 });

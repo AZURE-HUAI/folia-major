@@ -5,6 +5,8 @@ import type { LyricData, SongResult, StageLoopMode } from '../types';
 import type { AudioQualityPreference } from '../types/onlineMusic';
 import { getPlaybackSongKey } from '../utils/appPlaybackGuards';
 import { getPrefetchedData } from '../services/prefetchService';
+import { getSongAlbumLabel } from '../services/onlineMusic/songMetadata';
+import { getTrackProfile } from '../services/automix/profileService';
 import { connectAutomixDeck, type AutomixDeckChain } from '../services/automix/crossfadeGraph';
 import { createAutomixSession, type AutomixDeckId, type AutomixSession } from '../services/automix/automixSession';
 import { AUTOMIX_MAX_OVERLAP_SEC } from '../services/automix/transitionPlanner';
@@ -230,17 +232,21 @@ export function useAutomixDecks({
         const nextSong = resolveNextQueueSong(playQueue, currentSong, loopMode);
         if (!nextSong) return report(`${audioSrc}:queue-end`, 'nothing queued after this track');
 
+        // Queue neighbours already, so one shared album name is the whole test for a segue.
+        const album = getSongAlbumLabel(currentSong);
         const plan = session.requestTransition({
             time,
             audioSrc,
-            from: { duration, lines: lyrics?.lines ?? null },
+            from: { duration, lines: lyrics?.lines ?? null, profile: getTrackProfile(currentSong) },
             to: {
                 duration: nextSong.durationMs / 1000,
                 // Already in memory for online tracks: the queue prefetcher fetches the next few
                 // songs' lyrics on every song change. Local files have no such cache, so they get
                 // the planner's default-length blend instead of a vocal-placed one.
                 lines: getPrefetchedData(nextSong, audioQuality)?.lyrics?.lines ?? null,
+                profile: getTrackProfile(nextSong),
             },
+            sameAlbum: Boolean(album) && album === getSongAlbumLabel(nextSong),
             nextKey: getPlaybackSongKey(nextSong),
         });
         if (!plan) return;

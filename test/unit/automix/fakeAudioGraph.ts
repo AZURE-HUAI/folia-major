@@ -10,6 +10,7 @@ export type GainEvent =
     | { type: 'cancel'; time: number }
     | { type: 'set'; time: number; value: number }
     | { type: 'ramp'; time: number; value: number }
+    | { type: 'exp'; time: number; value: number }
     | { type: 'curve'; time: number; duration: number; curve: Float32Array };
 
 export interface FakeGainNode {
@@ -32,6 +33,9 @@ export const createFakeGainNode = (): FakeGainNode => {
         linearRampToValueAtTime: (next: number, time: number) => {
             events.push({ type: 'ramp', time, value: next });
         },
+        exponentialRampToValueAtTime: (next: number, time: number) => {
+            events.push({ type: 'exp', time, value: next });
+        },
         setValueCurveAtTime: (curve: Float32Array, time: number, duration: number) => {
             events.push({ type: 'curve', time, duration, curve });
         },
@@ -46,7 +50,7 @@ export const asGain = (node: FakeGainNode) => node as unknown as GainNode;
 export const finalTarget = (node: FakeGainNode): number | null => {
     for (let index = node.events.length - 1; index >= 0; index -= 1) {
         const event = node.events[index];
-        if (event.type === 'set' || event.type === 'ramp') return event.value;
+        if (event.type === 'set' || event.type === 'ramp' || event.type === 'exp') return event.value;
     }
     return null;
 };
@@ -59,10 +63,21 @@ export const lastCurve = (node: FakeGainNode) => {
     return null;
 };
 
+/** A biquad's frequency is an AudioParam too, so the same recorder describes the bass swap. */
+export const createFakeFilter = () => {
+    const frequency = createFakeGainNode();
+    return {
+        node: { type: 'highpass', frequency: frequency.gain, Q: { value: 1 } } as unknown as BiquadFilterNode,
+        events: frequency.events,
+        param: frequency,
+    };
+};
+
 export interface FakeDeckChain extends AutomixDeckChain {
     fadeNode: FakeGainNode;
     replayGainNode: FakeGainNode;
     trimNode: FakeGainNode;
+    lowCutParam: FakeGainNode;
 }
 
 /** Measurements a deck can be told to report, so a blend's shape can be driven from a test. */
@@ -77,12 +92,14 @@ export const createFakeChain = (readings: FakeAnalyserReadings = {}): FakeDeckCh
     const fadeNode = createFakeGainNode();
     const replayGainNode = createFakeGainNode();
     const trimNode = createFakeGainNode();
+    const lowCut = createFakeFilter();
     const bpm = readings.bpm ?? null;
 
     return {
         source: {} as MediaElementAudioSourceNode,
         replayGain: replayGainNode as unknown as GainNode,
         trim: trimNode as unknown as GainNode,
+        lowCut: lowCut.node,
         fade: fadeNode as unknown as GainNode,
         analyser: {
             tick: () => { },
@@ -96,6 +113,7 @@ export const createFakeChain = (readings: FakeAnalyserReadings = {}): FakeDeckCh
         fadeNode,
         replayGainNode,
         trimNode,
+        lowCutParam: lowCut.param,
     };
 };
 

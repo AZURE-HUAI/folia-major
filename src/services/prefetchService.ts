@@ -18,6 +18,7 @@ import { getSongResourceCacheKey } from './onlineMusic/resourceKeys';
 import { getSongCacheWithLegacyMigration, hasCachedSongAudio } from './onlineMusic/resourceCache';
 import { toSafePlaybackUrl } from '../utils/appPlaybackHelpers';
 import { getProviderSongMetadata } from './onlineMusic/songMetadata';
+import { ensureTrackProfile } from './automix/profileService';
 
 // Prefetch configuration
 const PREFETCH_COUNT_NEXT = 2;  // Prefetch 2 songs ahead
@@ -133,6 +134,11 @@ const prefetchSong = async (
     if (existing && lyricPreferenceMatches && existing.audioUrl && isUrlValid(existing.audioUrlFetchedAt) && (existing.lyrics || existing.lyricRaw?.isPureMusic)) {
         console.log(`[Prefetch] Already cached: ${song.name}`);
         touchPrefetchCacheEntry(songKey, existing);
+        void ensureTrackProfile({
+            song,
+            audioUrl: existing.audioUrl === 'CACHED_IN_DB' ? null : existing.audioUrl,
+            enableMediaCache: currentSettings.enableMediaCache,
+        });
         return;
     }
 
@@ -297,6 +303,16 @@ const prefetchSong = async (
     }
 
     prefetchCache.set(songKey, data);
+
+    // Measured here because this is where the bytes are cheapest: the track is about to be cached
+    // anyway, so with song caching on it is one download feeding both the cache and the analysis,
+    // and with it off nothing is fetched at all. Never awaited - a slow decode must not hold up
+    // the lyrics for the song after this one.
+    void ensureTrackProfile({
+        song,
+        audioUrl: data.audioUrl === 'CACHED_IN_DB' ? null : data.audioUrl,
+        enableMediaCache: currentSettings.enableMediaCache,
+    });
 };
 
 export const updatePrefetchedAudioUrl = (
@@ -370,6 +386,15 @@ export const prefetchNearbySongs = async (
     }
 
     console.log(`[Prefetch] Will prefetch ${songsToPrefetch.length} songs near index ${currentIndex}`);
+
+    // The track playing right now is the other half of every transition it is about to be in, and
+    // it is not in the prefetch set. Its bytes are already in the media cache if they are anywhere,
+    // so this is free whenever it is possible at all.
+    void ensureTrackProfile({
+        song: currentSong,
+        audioUrl: null,
+        enableMediaCache: useSettingsUiStore.getState().enableMediaCache,
+    });
 
     // Prefetch using requestIdleCallback for non-blocking execution
     const prefetchWithIdle = (songs: SongResult[], index: number) => {
