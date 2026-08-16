@@ -81,25 +81,40 @@ describe('planTransition', () => {
     });
 
     it('recognises the credit block by its shape, not by anyone\'s list of role names', () => {
-        // Whatever the words are, in whatever language: stamped at zero, with the song starting
-        // later. A list of role names would be one file format's list and wrong for the next.
+        // Whatever the words are, in whatever language: a short label, a separator, a name. A list
+        // of role names would be one platform's and one language's list, wrong for the next file.
         const plan = planTransition(
             track(100, [line(10, 60)]),
-            track(100, [line(0, 0, 'Produced by Someone'), line(0, 0, '제작'), line(9, 40, 'sung')]),
+            track(100, [line(0, 0, '작사 : 누군가'), line(0, 0, 'Lyricist: Someone'), line(9, 40, 'sung')]),
         );
         expect(plan.reason).toContain('intro 9s');
     });
 
-    it('reads a credit block as credits however soon the singing starts', () => {
-        // Two lines sharing one timestamp is proof by itself - nothing sings both at that instant -
-        // so a silence after them is not also required. Demanding one read a zero-second intro for
-        // every track whose first line happens to land inside the first few seconds, which is most
-        // of them, and that is what kept the vocal-free window unusable in the app.
-        const plan = planTransition(
-            track(100, [line(10, 60)]),
-            track(100, [line(0, 0, '作词 : X'), line(0, 0, '作曲 : Y'), line(1.5, 40, 'sung')]),
-        );
-        expect(plan.reason).toContain('intro 1.5s');
+    // The three lyric sources lay the SAME three credit lines of 老番茄 - 反正 out three different
+    // ways, which is why nothing about the timing can be used to find them. Captured off the live
+    // providers on 2026-08-16; if a fourth source is added, put its real head here too.
+    const CREDITS = ['作词：老番茄', '作曲：老番茄', '编曲：杨秋儒'];
+    const realHeads: Array<[string, Line[]]> = [
+        // Round seconds, then a gap far too short to have required one.
+        ['QQ', [
+            ...CREDITS.map((text, index) => line(index === 2 ? 2 : index, index === 2 ? 7 : index + 1, text)),
+            line(9.81, 12.15, '反正又不是没人在意'),
+        ]],
+        // Spread evenly across the whole intro, ending one millisecond before the singing.
+        ['Kugou', [
+            line(0, 3.272, CREDITS[0]), line(3.272, 6.545, CREDITS[1]), line(6.545, 9.817, CREDITS[2]),
+            line(9.818, 12.088, '反正又不是没人在意'),
+        ]],
+        // Every credit stacked on the same zero stamp.
+        ['NetEase', [
+            ...CREDITS.map(text => line(0, 0, text)),
+            line(9.81, 12.15, '反正又不是没人在意'),
+        ]],
+    ];
+
+    it.each(realHeads)('finds the same first sung moment in a real %s file', (_source, lines) => {
+        const plan = planTransition(track(100, [line(10, 60)]), track(100, lines));
+        expect(plan.reason).toContain('intro 9.8');
     });
 
     it('keeps a timeline that genuinely opens on a lyric', () => {

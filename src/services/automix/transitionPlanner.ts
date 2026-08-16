@@ -78,16 +78,32 @@ export const AUTOMIX_DEFAULT_OVERLAP_SEC = 5;
  */
 export const AUTOMIX_DEFAULT_OVERLAP_BEATS = 8;
 
-/** Stamped this early is stamped at the top of the file, not sung at the top of the song. */
-const CREDIT_STAMP_SEC = 0.05;
 /**
- * How long the silence after the credit block has to be before it counts as an intro.
+ * A "label : value" line - the credit block every online lyric file opens with.
  *
- * The same three seconds `attachInterludes` uses to decide a track starts singing late, and for
- * the same reason: below it there is no window to place anything in, so whether those opening
- * lines were credits or lyrics stops mattering.
+ * Matched by the shape of the line and not by a list of role names, because 作词/作曲, 작사,
+ * Lyricist, Compositor are one platform's and one language's vocabulary and wrong for the next
+ * file. What every one of them shares is the format: a short label, a separator, a name.
+ *
+ * The timing cannot do this job, which took three attempts and three real files to establish. For
+ * ONE track (老番茄 - 反正) the three sources lay the same three credit lines out as:
+ *
+ *   QQ       0.000-1.000, 1.000-2.000, 2.000-7.000     then singing at 9.81  (a 2.8s gap)
+ *   Kugou    0.000-3.272, 3.272-6.545, 6.545-9.817     then singing at 9.818 (a 1ms gap)
+ *   NetEase  every line stamped 0.000                  then singing
+ *
+ * Kugou spreads them evenly across the whole intro and ends flush against the first sung line, QQ
+ * uses round seconds and leaves a gap too short to require, NetEase stacks them all on zero. There
+ * is no stamp, no gap and no duration common to the three - only the text.
  */
-const CREDIT_MIN_GAP_SEC = 3;
+const CREDIT_LINE = /^\s*[^\s:：]{1,10}\s*[:：]\s*\S/;
+/**
+ * How far into a track the credit block can still be running.
+ *
+ * It is always inside the intro, so this only bounds the damage if a song genuinely opens on a
+ * line that reads like a credit - it can cost the first few lines, never the whole song.
+ */
+const CREDIT_BLOCK_MAX_SEC = 20;
 
 const beatSec = (bpm: number | null | undefined) =>
     (bpm && Number.isFinite(bpm) && bpm > 0 ? 60 / bpm : null);
@@ -108,20 +124,15 @@ const vocalBounds = (lines: Line[] | null | undefined): { start: number; end: nu
     const sung = lines?.filter(line => line.fullText.trim().length > 0 && !isInterludeLine(line));
     if (!sung?.length) return null;
 
-    // Skip the credit block online lyric files open with. Recognised by its shape rather than by
-    // its wording - a list of role names would be one language's list, and wrong for the next
-    // file: these lines sit at timestamp zero, several of them often share that exact timestamp
-    // (no performance sings three lines at once), and a real intro follows. Reading them as the
-    // first sung moment reported an intro of zero seconds for very nearly every online track,
-    // which threw away the vocal-free window on all of them.
+    // Walk off the credit block the file opens with. Reading it as the first sung moment reported
+    // an intro of zero seconds for very nearly every online track, which threw the vocal-free
+    // window away on all of them - in the app, every blend landing in the last couple of seconds.
+    // Only ever a leading run, and it stops at the first line that is not shaped like a credit,
+    // which is the song starting.
     let first = 0;
-    while (first < sung.length - 1 && sung[first].startTime <= CREDIT_STAMP_SEC) first += 1;
-    // ONE line there is ambiguous - a track really can open on a lyric - so a single one only
-    // counts as a credit when a silence follows it. Two or more sharing that one stamp is not
-    // ambiguous at any gap: no performance sings three lines at the same instant. Requiring the
-    // silence in that case too is what still reported a zero-second intro for every track whose
-    // singing happens to start inside the first three seconds.
-    if (first < 2 && sung[first].startTime < CREDIT_MIN_GAP_SEC) first = 0;
+    while (first < sung.length - 1
+        && sung[first].startTime <= CREDIT_BLOCK_MAX_SEC
+        && CREDIT_LINE.test(sung[first].fullText)) first += 1;
 
     return { start: sung[first].startTime, end: sung[sung.length - 1].endTime };
 };
