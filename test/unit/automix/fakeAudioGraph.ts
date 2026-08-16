@@ -62,17 +62,40 @@ export const lastCurve = (node: FakeGainNode) => {
 export interface FakeDeckChain extends AutomixDeckChain {
     fadeNode: FakeGainNode;
     replayGainNode: FakeGainNode;
+    trimNode: FakeGainNode;
 }
 
-export const createFakeChain = (): FakeDeckChain => {
+/** Measurements a deck can be told to report, so a blend's shape can be driven from a test. */
+export interface FakeAnalyserReadings {
+    loudnessDb?: number | null;
+    bpm?: number | null;
+    /** Seconds from the blend starting to the next beat. */
+    nextBeatIn?: number | null;
+}
+
+export const createFakeChain = (readings: FakeAnalyserReadings = {}): FakeDeckChain => {
     const fadeNode = createFakeGainNode();
     const replayGainNode = createFakeGainNode();
+    const trimNode = createFakeGainNode();
+    const bpm = readings.bpm ?? null;
+
     return {
         source: {} as MediaElementAudioSourceNode,
         replayGain: replayGainNode as unknown as GainNode,
+        trim: trimNode as unknown as GainNode,
         fade: fadeNode as unknown as GainNode,
+        analyser: {
+            tick: () => { },
+            loudnessDb: () => readings.loudnessDb ?? null,
+            tempo: () => (bpm === null
+                ? null
+                : { bpm, periodSec: 60 / bpm, confidence: 1, beatOffsetHops: 0 }),
+            nextBeatIn: () => readings.nextBeatIn ?? null,
+            reset: () => { },
+        },
         fadeNode,
         replayGainNode,
+        trimNode,
     };
 };
 

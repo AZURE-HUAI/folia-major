@@ -118,14 +118,3 @@ export const resolveOverlap = (plan: TransitionPlan, remainingSec: number): numb
     const overlap = Math.min(plan.overlap, remainingSec);
     return overlap >= AUTOMIX_MIN_OVERLAP_SEC ? round(overlap) : 0;
 };
-
-/**
- * Equal-power crossfade gains for progress 0..1.
- *
- * Equal-power rather than linear because the two tracks are uncorrelated: summing two linear
- * ramps dips ~3dB at the midpoint and the blend audibly sags.
- */
-export const equalPowerGains = (progress: number): { out: number; in: number } => {
-    const p = Math.min(1, Math.max(0, progress));
-    return { out: Math.cos(p * Math.PI / 2), in: Math.sin(p * Math.PI / 2) };
-};

@@ -4,7 +4,6 @@ import { isInterludeLine, parseLRC } from '../../../src/utils/lyrics/parserCore'
 import {
     AUTOMIX_DEFAULT_OVERLAP_SEC,
     AUTOMIX_MAX_OVERLAP_SEC,
-    equalPowerGains,
     planTransition,
     resolveOverlap,
     type TransitionTrack,
@@ -114,19 +113,5 @@ describe('resolveOverlap', () => {
 
     it('treats an unreadable remaining time as no room at all', () => {
         expect(resolveOverlap(fadePlan, NaN)).toBe(0);
-    });
-});
-
-describe('equalPowerGains', () => {
-    it('holds constant power across the blend instead of dipping at the midpoint', () => {
-        for (const progress of [0, 0.25, 0.5, 0.75, 1]) {
-            const { out, in: incoming } = equalPowerGains(progress);
-            expect(out ** 2 + incoming ** 2).toBeCloseTo(1, 6);
-        }
-    });
-
-    it('clamps out-of-range progress', () => {
-        expect(equalPowerGains(-1).out).toBe(1);
-        expect(equalPowerGains(2).in).toBe(1);
     });
 });

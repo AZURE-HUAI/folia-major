@@ -33,6 +33,15 @@ export type { AutomixDeckId };
 export const isPausedByListener = (state: PlayerState): boolean => state === PlayerState.PAUSED;
 
 /**
+ * How often both decks are measured.
+ *
+ * 25ms is the hop the onset detector works at, and it bounds how precisely a blend can be put on
+ * a beat. A timer rather than requestAnimationFrame because this is a music player: rAF stops
+ * being called the moment the window is hidden, which is most of the time it is being used.
+ */
+const ANALYSER_INTERVAL_MS = 25;
+
+/**
  * The track the queue would advance to, mirroring handleNextTrack's own index maths.
  *
  * Deliberately does not reproduce the FM-mode top-up: that fetch is asynchronous, and a track we
@@ -230,6 +239,20 @@ export function useAutomixDecks({
      * keep playing with no control left pointing at it.
      */
     const abortTransition = useCallback(() => { session.abort(); }, [session]);
+
+    // Both decks are measured continuously while playing, not only once a blend is imminent: the
+    // tempo estimate needs seconds of history behind it, and by the time a transition is planned
+    // there is none left to gather. One timer for both decks, and only while there is sound.
+    useEffect(() => {
+        if (!isEnabled || playerState !== PlayerState.PLAYING) return;
+        const timer = setInterval(() => {
+            const context = audioContextRef.current;
+            if (!context) return;
+            const now = context.currentTime;
+            (['A', 'B'] as const).forEach(deck => chainsRef.current[deck]?.analyser.tick(now));
+        }, ANALYSER_INTERVAL_MS);
+        return () => clearInterval(timer);
+    }, [audioContextRef, isEnabled, playerState]);
 
     // Any pause, from the UI, a media key or the OS, ends a transition. Watching player state
     // rather than the element's pause event matters: while armed the active deck is the silent

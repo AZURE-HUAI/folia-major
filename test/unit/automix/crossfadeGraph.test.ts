@@ -1,38 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-    CROSSFADE_IN_CURVE,
-    CROSSFADE_OUT_CURVE,
-    rampGain,
-    scheduleCrossfade,
-} from '@/services/automix/crossfadeGraph';
-import { asGain, createFakeContext, createFakeGainNode, finalTarget } from './fakeAudioGraph';
+import { rampGain, rampGainDb, scheduleCrossfade } from '@/services/automix/crossfadeGraph';
+import { asGain, createFakeContext, createFakeGainNode, finalTarget, lastCurve } from './fakeAudioGraph';
 
 // test/unit/automix/crossfadeGraph.test.ts
-
-describe('crossfade curves', () => {
-    it('hands loudness over at constant power rather than dipping in the middle', () => {
-        // Two uncorrelated songs summed on a linear pair lose about 3dB halfway through; the
-        // whole reason for a cosine pair is that this stays at one all the way across.
-        for (let index = 0; index < CROSSFADE_OUT_CURVE.length; index += 1) {
-            const power = CROSSFADE_OUT_CURVE[index] ** 2 + CROSSFADE_IN_CURVE[index] ** 2;
-            expect(power).toBeCloseTo(1, 5);
-        }
-    });
-
-    it('starts and ends on full handover', () => {
-        expect(CROSSFADE_OUT_CURVE[0]).toBeCloseTo(1, 6);
-        expect(CROSSFADE_OUT_CURVE.at(-1)).toBeCloseTo(0, 6);
-        expect(CROSSFADE_IN_CURVE[0]).toBeCloseTo(0, 6);
-        expect(CROSSFADE_IN_CURVE.at(-1)).toBeCloseTo(1, 6);
-    });
-
-    it('descends and ascends monotonically, so neither track wobbles on the way', () => {
-        for (let index = 1; index < CROSSFADE_OUT_CURVE.length; index += 1) {
-            expect(CROSSFADE_OUT_CURVE[index]).toBeLessThan(CROSSFADE_OUT_CURVE[index - 1]);
-            expect(CROSSFADE_IN_CURVE[index]).toBeGreaterThan(CROSSFADE_IN_CURVE[index - 1]);
-        }
-    });
-});
 
 describe('scheduleCrossfade', () => {
     afterEach(() => vi.restoreAllMocks());
@@ -44,12 +14,55 @@ describe('scheduleCrossfade', () => {
 
         expect(scheduleCrossfade(context, asGain(outgoing), asGain(incoming), 4)).toBe(true);
 
-        expect(outgoing.events).toContainEqual({
-            type: 'curve', time: 12.5, duration: 4, curve: CROSSFADE_OUT_CURVE,
-        });
-        expect(incoming.events).toContainEqual({
-            type: 'curve', time: 12.5, duration: 4, curve: CROSSFADE_IN_CURVE,
-        });
+        expect(lastCurve(outgoing)).toMatchObject({ time: 12.5, duration: 4 });
+        expect(lastCurve(incoming)).toMatchObject({ time: 12.5, duration: 4 });
+    });
+
+    it('hands loudness over at constant power rather than dipping in the middle', () => {
+        // Two uncorrelated songs summed on a linear pair lose about 3dB halfway through, and the
+        // blend audibly sags. That has to hold wherever the handover is put, not only at 50%.
+        const context = createFakeContext();
+        const outgoing = createFakeGainNode();
+        const incoming = createFakeGainNode();
+
+        scheduleCrossfade(context, asGain(outgoing), asGain(incoming), 4, 0.3);
+
+        const out = lastCurve(outgoing)!.curve;
+        const into = lastCurve(incoming)!.curve;
+        for (let index = 0; index < out.length; index += 1) {
+            expect(out[index] ** 2 + into[index] ** 2).toBeCloseTo(1, 5);
+        }
+    });
+
+    it('starts and ends on full handover, moving one way the whole time', () => {
+        const context = createFakeContext();
+        const outgoing = createFakeGainNode();
+        const incoming = createFakeGainNode();
+
+        scheduleCrossfade(context, asGain(outgoing), asGain(incoming), 4, 0.35);
+
+        const out = lastCurve(outgoing)!.curve;
+        const into = lastCurve(incoming)!.curve;
+        expect(out[0]).toBeCloseTo(1, 6);
+        expect(out.at(-1)).toBeCloseTo(0, 6);
+        expect(into[0]).toBeCloseTo(0, 6);
+        expect(into.at(-1)).toBeCloseTo(1, 6);
+        for (let index = 1; index < out.length; index += 1) {
+            expect(out[index]).toBeLessThan(out[index - 1]);
+            expect(into[index]).toBeGreaterThan(into[index - 1]);
+        }
+    });
+
+    it('reaches the halfway point where the crossover says, not in the middle', () => {
+        const context = createFakeContext();
+        const outgoing = createFakeGainNode();
+        const incoming = createFakeGainNode();
+
+        scheduleCrossfade(context, asGain(outgoing), asGain(incoming), 4, 0.3);
+
+        const out = lastCurve(outgoing)!.curve;
+        const crossing = out.findIndex(value => value <= Math.SQRT1_2);
+        expect(crossing / (out.length - 1)).toBeCloseTo(0.3, 1);
     });
 
     it('leaves both decks in a defined state when the engine rejects the curves', () => {
@@ -94,5 +107,14 @@ describe('rampGain', () => {
             { type: 'set', time: 3, value: 0.4 },
             { type: 'ramp', time: 3.05, value: 1 },
         ]);
+    });
+
+    it('converts dB to the linear gain the engine wants', () => {
+        const context = createFakeContext();
+        const node = createFakeGainNode();
+
+        rampGainDb(context, asGain(node), -6, 0.4);
+
+        expect(finalTarget(node)).toBeCloseTo(0.501, 3);
     });
 });

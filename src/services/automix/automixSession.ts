@@ -1,5 +1,12 @@
-import { rampGain, scheduleCrossfade, type AutomixDeckChain } from './crossfadeGraph';
-import { planTransition, resolveOverlap, type TransitionPlan, type TransitionTrack } from './transitionPlanner';
+import { rampGain, rampGainDb, scheduleCrossfade, type AutomixDeckChain } from './crossfadeGraph';
+import { planBlendShape, trimForBalance } from './signalAnalysis';
+import {
+    AUTOMIX_MIN_OVERLAP_SEC,
+    planTransition,
+    resolveOverlap,
+    type TransitionPlan,
+    type TransitionTrack,
+} from './transitionPlanner';
 
 // src/services/automix/automixSession.ts
 // The automix state machine, with every browser and React dependency behind a port so the
@@ -23,6 +30,12 @@ export const otherDeck = (deck: AutomixDeckId): AutomixDeckId => (deck === 'A' ?
 const FADE_CLEANUP_MARGIN_MS = 150;
 /** A refused blend still has to get the outgoing deck to silence without a click. */
 const CUT_SECONDS = 0.05;
+/** How often the balance correction re-reads the two decks during a blend. */
+const BALANCE_INTERVAL_MS = 100;
+/** Slow enough that the correction is never heard arriving. */
+const BALANCE_RAMP_SEC = 0.4;
+/** Nothing smaller than this is worth moving a gain for. */
+const BALANCE_STEP_DB = 0.75;
 
 export interface AutomixSessionPorts {
     getContext: () => AudioContext | null;
@@ -53,29 +66,75 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
     let plan: TransitionPlan | null = null;
     let plannedNextKey: string | null = null;
     let cleanupTimer: ReturnType<typeof setTimeout> | null = null;
+    let balanceTimer: ReturnType<typeof setInterval> | null = null;
+    let appliedTrimDb = 0;
 
-    const clearCleanupTimer = () => {
-        if (cleanupTimer === null) return;
-        clearTimeout(cleanupTimer);
-        cleanupTimer = null;
+    const clearTimers = () => {
+        if (cleanupTimer !== null) {
+            clearTimeout(cleanupTimer);
+            cleanupTimer = null;
+        }
+        if (balanceTimer !== null) {
+            clearInterval(balanceTimer);
+            balanceTimer = null;
+        }
+    };
+
+    /**
+     * Keeps the outgoing track from sitting on top of the incoming one for the length of a blend.
+     *
+     * The curves hand over equal *power*, which only means equal *loudness* if the two masters
+     * were cut at the same level - and across a real library they differ by up to 10dB, which is
+     * exactly what "the old song drowns the new one" sounds like. Both decks are measured ahead of
+     * their fade, so the comparison is master against master whatever the curves are doing.
+     *
+     * The correction only ever attenuates, only ever the track that is leaving, and never backs
+     * off once applied: a monotonic one-way trim cannot oscillate, and over-trimming a track that
+     * is halfway out of the door costs nothing.
+     */
+    const startBalanceCorrection = (
+        context: AudioContext,
+        tailChain: AutomixDeckChain,
+        activeChain: AutomixDeckChain,
+    ) => {
+        appliedTrimDb = 0;
+        balanceTimer = setInterval(() => {
+            const outgoingDb = tailChain.analyser.loudnessDb();
+            const incomingDb = activeChain.analyser.loudnessDb();
+            if (outgoingDb === null || incomingDb === null) return;
+
+            const target = trimForBalance(outgoingDb, incomingDb);
+            if (target < appliedTrimDb + BALANCE_STEP_DB) return;
+
+            appliedTrimDb = target;
+            rampGainDb(context, tailChain.trim, -appliedTrimDb, BALANCE_RAMP_SEC);
+        }, BALANCE_INTERVAL_MS);
     };
 
     /** Returns both decks to a defined idle state. The one path every ending shares. */
     const settle = (options: { restoreActive: boolean; pauseTail: boolean }) => {
-        clearCleanupTimer();
+        clearTimers();
         const tailDeck = otherDeck(activeDeck);
+
+        if (appliedTrimDb > 0) {
+            console.log(`[Automix] held the outgoing track ${appliedTrimDb.toFixed(1)}dB down to keep it off the next one`);
+            appliedTrimDb = 0;
+        }
 
         if (options.pauseTail) {
             ports.getElement(tailDeck)?.pause();
         }
 
         // Unity on both decks, always. A deck left at zero gain is silent playback: the one
-        // failure here a listener cannot work around by pressing anything.
+        // failure here a listener cannot work around by pressing anything. The trim goes with it,
+        // or the deck that was faded out would come back attenuated next time it is used.
         const context = ports.getContext();
         if (context) {
             (['A', 'B'] as const).forEach(deck => {
                 const chain = ports.getChain(deck);
-                if (chain) rampGain(context, chain.fade, 1, 0.03);
+                if (!chain) return;
+                rampGain(context, chain.fade, 1, 0.03);
+                rampGain(context, chain.trim, 1, 0.03);
             });
         }
 
@@ -136,6 +195,10 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         const context = ports.getContext();
         const activeChain = ports.getChain(activeDeck);
 
+        // A deck that just started is playing something new; its old measurements describe a
+        // track nobody is listening to any more.
+        activeChain?.analyser.reset();
+
         if (phase !== 'armed') {
             // Whatever a cancelled blend left behind, a deck playing outside a transition sits at
             // unity. Cheap insurance against the only failure that is not self-correcting.
@@ -152,7 +215,8 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             return;
         }
 
-        const overlap = resolveOverlap(plan, tailElement.duration - tailElement.currentTime);
+        const remaining = tailElement.duration - tailElement.currentTime;
+        const overlap = resolveOverlap(plan, remaining);
         // The queue can move under us between planning and playing: a manual skip, or a track
         // that turned out to be unavailable and auto-skipped. Blending into a song we never
         // measured is precisely the bad transition this feature exists to refuse.
@@ -166,13 +230,38 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             console.log(`[Automix] dropping blend, ${refusal}`);
             rampGain(context, tailChain.fade, 0, CUT_SECONDS);
             rampGain(context, activeChain.fade, 1, CUT_SECONDS);
-        } else {
-            scheduleCrossfade(context, tailChain.fade, activeChain.fade, overlap);
+            cleanupTimer = setTimeout(
+                () => settle({ restoreActive: false, pauseTail: true }),
+                CUT_SECONDS * 1000 + 70,
+            );
+            return;
         }
+
+        // Everything measured about the outgoing track, spent here: its level decides how fast the
+        // two swap places, and its beat grid decides where that swap lands.
+        const tempo = tailChain.analyser.tempo();
+        const outgoingDb = tailChain.analyser.loudnessDb();
+        const shape = planBlendShape({
+            overlap,
+            outgoingDb,
+            nextBeatIn: tailChain.analyser.nextBeatIn(context.currentTime),
+            periodSec: tempo?.periodSec ?? null,
+            minOverlap: AUTOMIX_MIN_OVERLAP_SEC,
+            maxOverlap: remaining,
+        });
+
+        console.log(
+            `[Automix] blending ${shape.overlap.toFixed(2)}s, handover at ${Math.round(shape.crossover * 100)}%`
+            + `${shape.snappedToBeat ? ` on a beat (${tempo ? Math.round(tempo.bpm) : '?'} BPM)` : ''}`
+            + `${outgoingDb === null ? '' : `, outgoing ${outgoingDb.toFixed(1)} dBFS`}`,
+        );
+
+        scheduleCrossfade(context, tailChain.fade, activeChain.fade, shape.overlap, shape.crossover);
+        startBalanceCorrection(context, tailChain, activeChain);
 
         cleanupTimer = setTimeout(
             () => settle({ restoreActive: false, pauseTail: true }),
-            refusal ? CUT_SECONDS * 1000 + 70 : overlap * 1000 + FADE_CLEANUP_MARGIN_MS,
+            shape.overlap * 1000 + FADE_CLEANUP_MARGIN_MS,
         );
     };
 
@@ -210,7 +299,7 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         handleActiveDeckPlaying,
         handleTailEnded,
         abort,
-        dispose: clearCleanupTimer,
+        dispose: clearTimers,
     };
 };
 

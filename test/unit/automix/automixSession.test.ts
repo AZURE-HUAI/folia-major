@@ -13,6 +13,7 @@ import {
     createFakeElement,
     finalTarget,
     lastCurve,
+    type FakeAnalyserReadings,
     type FakeAudioElement,
     type FakeDeckChain,
 } from './fakeAudioGraph';
@@ -28,14 +29,17 @@ const line = (startTime: number, endTime: number, fullText = 'la'): Line => ({
 const BLENDABLE_FROM: TransitionTrack = { duration: 100, lines: [line(10, 94)] };
 const BLENDABLE_TO: TransitionTrack = { duration: 100, lines: [line(5, 90)] };
 
-const createHarness = () => {
+const createHarness = (readings: Partial<Record<AutomixDeckId, FakeAnalyserReadings>> = {}) => {
     // Deck A sits exactly on the planned outStart: a six second outro against a five second
     // intro gives a five second overlap, so the track has five seconds left to give.
     const elements: Record<AutomixDeckId, FakeAudioElement> = {
         A: createFakeElement(100, 95),
         B: createFakeElement(100, 0),
     };
-    const chains: Record<AutomixDeckId, FakeDeckChain> = { A: createFakeChain(), B: createFakeChain() };
+    const chains: Record<AutomixDeckId, FakeDeckChain> = {
+        A: createFakeChain(readings.A),
+        B: createFakeChain(readings.B),
+    };
     const context = createFakeContext();
 
     const activeDeckChanges: AutomixDeckId[] = [];
@@ -151,6 +155,51 @@ describe('automix session', () => {
         expect(outgoing?.curve.at(-1)).toBeCloseTo(0, 6);
         expect(incoming?.curve[0]).toBeCloseTo(0, 6);
         expect(incoming?.curve.at(-1)).toBeCloseTo(1, 6);
+    });
+
+    it('holds the outgoing track down when it is measurably the louder of the two', () => {
+        // Equal power is not equal loudness: masters differ by up to 10dB across a library, and
+        // that difference is exactly what "the old song sits on top of the new one" sounds like.
+        const harness = createHarness({ A: { loudnessDb: -10 }, B: { loudnessDb: -20 } });
+        harness.arm();
+        harness.session.handleActiveDeckPlaying('local:next-song');
+
+        vi.advanceTimersByTime(150);
+
+        expect(finalTarget(harness.chains.A.trimNode)).toBeCloseTo(0.501, 3);
+        // The arriving track is never lifted: that risks clipping and has to be undone afterwards.
+        expect(harness.chains.B.trimNode.events).toHaveLength(0);
+    });
+
+    it('leaves the levels alone when the track arriving is the louder one', () => {
+        const harness = createHarness({ A: { loudnessDb: -24 }, B: { loudnessDb: -14 } });
+        harness.arm();
+        harness.session.handleActiveDeckPlaying('local:next-song');
+
+        vi.advanceTimersByTime(300);
+
+        expect(harness.chains.A.trimNode.events).toHaveLength(0);
+    });
+
+    it('gives the trim back so the deck is not still attenuated next time it is used', () => {
+        const harness = createHarness({ A: { loudnessDb: -10 }, B: { loudnessDb: -20 } });
+        harness.arm();
+        harness.session.handleActiveDeckPlaying('local:next-song');
+
+        vi.advanceTimersByTime(5_200);
+
+        expect(finalTarget(harness.chains.A.trimNode)).toBe(1);
+    });
+
+    it('lands the handover on a beat of the outgoing track', () => {
+        const harness = createHarness({ A: { loudnessDb: -20, bpm: 120, nextBeatIn: 0.1 } });
+        harness.arm();
+
+        harness.session.handleActiveDeckPlaying('local:next-song');
+
+        // Beats every half second from 0.1s in. At -20dBFS the handover sits at 42.5% of the
+        // blend, so the length moves until that lands on the beat at 2.1s.
+        expect(lastCurve(harness.chains.A.fadeNode)?.duration).toBeCloseTo(2.1 / 0.425, 5);
     });
 
     it('drops the blend when the queue moved to a song it never measured', () => {
