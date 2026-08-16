@@ -76,16 +76,32 @@ describe('chooseTransitionStyle', () => {
             to: profile({ startsHot: true }),
             sameAlbum: false,
         });
-        expect(choice.style).toBe('beatCut');
+        expect(choice.style).not.toBe('gapless');
     });
 
-    it('cuts rather than fades when the next track has no intro to fade into', () => {
+    it('cuts into a hot start only when there is a beat of silence to place the cut in', () => {
+        // 120 BPM = half a second a beat, and the wait can only be paid for out of the incoming
+        // track's own leading silence.
         const choice = chooseTransitionStyle({
-            from: profile({ bpm: 128 }),
-            to: profile({ startsHot: true, leadIn: 0 }),
+            from: profile({ bpm: 120 }),
+            to: profile({ startsHot: true, leadIn: 0.8 }),
             sameAlbum: false,
         });
         expect(choice.style).toBe('beatCut');
+    });
+
+    it('shortens the overlap instead of chopping when the cut cannot be placed', () => {
+        // Every transition in a real playlist came out as a 40ms cut once, because a hot start was
+        // taken as licence to cut whether or not the cut could land anywhere musical. An
+        // unplaceable cut is not a transition - it is the feature appearing to be switched off.
+        const choice = chooseTransitionStyle({
+            from: profile({ bpm: 120 }),
+            to: profile({ startsHot: true, leadIn: 0.07 }),
+            sameAlbum: false,
+        });
+        expect(choice.style).toBe('bassSwap');
+        expect(choice.lengthScale).toBeLessThan(1);
+        expect(choice.lengthScale).toBeGreaterThan(0);
     });
 
     it('swaps the low end under a track that fades itself out', () => {
@@ -121,7 +137,7 @@ describe('chooseTransitionStyle', () => {
 
         const choice = chooseTransitionStyle({
             from: head({ bpm: 128 }),
-            to: head({ startsHot: true }),
+            to: head({ startsHot: true, leadIn: 1 }),
             sameAlbum: false,
         });
         expect(choice.style).toBe('beatCut');

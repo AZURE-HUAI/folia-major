@@ -56,6 +56,14 @@ const LENGTH_SCALE: Record<KeyRelation, number> = {
     unknown: 1,
 };
 
+/**
+ * How much shorter an overlap gets when the incoming track opens at full level.
+ *
+ * A track with no intro gives the blend nothing to hide under, so the overlap wants to be brief -
+ * but brief is not the same as absent, and this is the number that says so.
+ */
+const HOT_START_SCALE = 0.6;
+
 /** Longer for a style that wants room, shorter for one that wants none. */
 const STYLE_SCALE: Record<TransitionStyle, number> = {
     gapless: 1,
@@ -122,10 +130,10 @@ export const chooseTransitionStyle = (input: {
 }): StyleChoice => {
     const { from, to, sameAlbum } = input;
     const relation = keyRelation(from, to);
-    const decide = (style: TransitionStyle, reason: string): StyleChoice => ({
+    const decide = (style: TransitionStyle, reason: string, extraScale = 1): StyleChoice => ({
         style,
         relation,
-        lengthScale: LENGTH_SCALE[relation] * STYLE_SCALE[style],
+        lengthScale: LENGTH_SCALE[relation] * STYLE_SCALE[style] * extraScale,
         reason,
     });
 
@@ -140,10 +148,21 @@ export const chooseTransitionStyle = (input: {
         return decide('gapless', 'consecutive album tracks that run into each other');
     }
 
-    // Nothing to fade into: the incoming track is at full level from its first bar. Both halves of
-    // this are head-side, so it still works on tracks that were only analysed from the front.
+    // Nothing to fade into: the incoming track is at full level from its first bar.
     if (to?.startsHot === true && from?.bpm) {
-        return decide('beatCut', 'the next track starts at full level, so this one is cut');
+        // A cut is only worth having if it lands somewhere musical, and landing it means waiting
+        // for a beat of the outgoing track - a wait that can only be paid for out of the incoming
+        // track's own leading silence, because the incoming deck starts when it starts. Without at
+        // least a beat of silence to spend, the "cut" is an arbitrary chop a fraction of a second
+        // from the end of the track, which is the feature appearing to do nothing at all.
+        if (to.leadIn >= 60 / from.bpm) {
+            return decide('beatCut', 'the next track starts at full level, so this one is cut');
+        }
+        return decide(
+            'bassSwap',
+            'the next track starts at full level, so the overlap is kept short',
+            HOT_START_SCALE,
+        );
     }
 
     // A produced fade-out. Fading a fade doubles it; overlap earlier and swap the low end instead.

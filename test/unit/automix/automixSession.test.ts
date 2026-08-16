@@ -454,7 +454,9 @@ describe('automix session, transition styles', () => {
         const plan = harness.arm({
             time: 99,
             from: { ...BLENDABLE_FROM, profile: profile({ bpm: 120 }) },
-            to: { ...BLENDABLE_TO, profile: profile({ startsHot: true }) },
+            // A beat of leading silence: at 120 BPM that is the half second the cut needs to be
+            // placeable. Without it the chooser keeps a short overlap instead.
+            to: { ...BLENDABLE_TO, profile: profile({ startsHot: true, leadIn: 0.8 }) },
         });
         expect(plan?.style).toBe('beatCut');
 
