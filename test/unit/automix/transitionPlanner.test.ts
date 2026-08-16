@@ -8,17 +8,29 @@ import {
     resolveOverlap,
     type TransitionTrack,
 } from '../../../src/services/automix/transitionPlanner';
+import { makeProfile } from './trackProfileFixture';
 
 const line = (startTime: number, endTime: number, fullText = 'la'): Line => ({
     words: [], startTime, endTime, fullText,
 });
 
-const track = (duration: number, lines: Line[] | null): TransitionTrack => ({ duration, lines });
+/**
+ * The two ends come from two different places now, and the signature says so.
+ *
+ * `lines` decides the OUTGOING side - where the singing stopped. `vocalStart` decides the INCOMING
+ * side and is measured off the audio, so it arrives on the profile: omit it for a track that was
+ * never analysed, pass null for one that was analysed and holds no voice.
+ */
+const track = (duration: number, lines: Line[] | null, vocalStart?: number | null): TransitionTrack => ({
+    duration,
+    lines,
+    profile: vocalStart === undefined ? null : makeProfile({ vocalStart }),
+});
 
 describe('planTransition', () => {
     it('overlaps only the vocal-free outro and intro', () => {
         // outro = 100 - 94 = 6s, intro = 4s -> the smaller one bounds the blend
-        const plan = planTransition(track(100, [line(10, 94)]), track(100, [line(4, 90)]));
+        const plan = planTransition(track(100, [line(10, 94)]), track(100, null, 4));
         expect(plan.kind).toBe('fade');
         expect(plan.overlap).toBe(4);
         expect(plan.outStart).toBe(96);
@@ -26,14 +38,14 @@ describe('planTransition', () => {
     });
 
     it('caps the overlap so a long outro does not swallow the next song', () => {
-        const plan = planTransition(track(100, [line(10, 70)]), track(100, [line(30, 90)]));
+        const plan = planTransition(track(100, [line(10, 70)]), track(100, null, 30));
         expect(plan.overlap).toBe(AUTOMIX_MAX_OVERLAP_SEC);
     });
 
     it('still blends at the default length when the vocals leave no gap', () => {
         // Two songs that sing end to end. Placing the blend well is impossible here, but the
         // listener asked for blended song changes, so it blends anyway rather than quietly cutting.
-        const plan = planTransition(track(100, [line(10, 99.8)]), track(100, [line(0.1, 90)]));
+        const plan = planTransition(track(100, [line(10, 99.8)]), track(100, null, 0.1));
         expect(plan.kind).toBe('fade');
         expect(plan.overlap).toBe(AUTOMIX_DEFAULT_OVERLAP_SEC);
         expect(plan.reason).toContain('default');
@@ -41,104 +53,62 @@ describe('planTransition', () => {
 
     it('blends two tracks off one album like any other pair', () => {
         // Album continuity used to veto this. The switch is the listener's answer to that question.
-        const plan = planTransition(track(100, [line(10, 90)]), track(100, [line(10, 90)]));
+        const plan = planTransition(track(100, [line(10, 90)]), track(100, null, 10));
         expect(plan.kind).toBe('fade');
         expect(plan.overlap).toBeGreaterThan(0);
     });
 
+    it('takes the intro from the audio, so a credit block cannot report a zero-second one', () => {
+        // Every online lyric source opens with a credit block and the three of them format it
+        // three incompatible ways - QQ at 0/1/2s, Kugou spread evenly across the whole intro and
+        // flush against the first sung line, NetEase all stacked on 0.000. Reading "the first
+        // line" as "the first sung moment" gave an intro of zero on nearly every online track and
+        // no timing rule can separate the three. The lyric file no longer gets asked.
+        const creditBlock = [line(0, 1, '作词：someone'), line(1, 2, '作曲：someone'), line(9.81, 12, 'sung')];
+        const plan = planTransition(track(100, [line(10, 80)]), track(100, creditBlock, 9.81));
+        expect(plan.reason).toContain('intro 9.81s');
+    });
+
     it('ignores blank interlude lines when locating the last sung moment', () => {
         // a trailing placeholder line must not read as singing, or the outro collapses to 5s
-        const plan = planTransition(track(100, [line(10, 20), line(90, 95, '   ')]), track(100, [line(30, 90)]));
+        const plan = planTransition(track(100, [line(10, 20), line(90, 95, '   ')]), track(100, null, 30));
         expect(plan.overlap).toBe(AUTOMIX_MAX_OVERLAP_SEC);
     });
 
     it('does not read the parser\'s own interlude placeholder as singing', () => {
-        // Built through the real parser rather than by hand: attachInterludes prepends a '......'
-        // line at 0.5s to every track that starts singing after 0:03. Counting that as a voice
-        // reported a half-second intro for almost every song and refused every blend there is.
-        const incoming = parseLRC('[00:12.00]first sung line\n[00:20.00]second line');
-        expect(isInterludeLine(incoming.lines[0])).toBe(true);
+        // Built through the real parser rather than by hand, and that matters: attachInterludes
+        // inserts '......' lines the hand-built fixtures above have no idea about. Reading one as
+        // a voice once vetoed every blend in the app while every unit test passed.
+        const outgoing = parseLRC('[00:12.00]first sung line\n[00:20.00]last sung line');
+        expect(isInterludeLine(outgoing.lines[0])).toBe(true);
 
-        const plan = planTransition(track(100, [line(10, 60)]), track(100, incoming.lines));
+        const plan = planTransition(track(100, outgoing.lines), track(100, null, 30));
         expect(plan.kind).toBe('fade');
-        expect(plan.overlap).toBe(AUTOMIX_MAX_OVERLAP_SEC);
-    });
-
-    it('does not read the credit block at 0:00 as the first sung moment', () => {
-        // Built through the real parser: online lyric files open with "作词 : X" stamped at 0:00,
-        // and counting that as singing reported a zero-second intro for very nearly every track -
-        // which threw away the vocal-free window on all of them and left every blend on the
-        // beat-count fallback. Observed in the app as "every transition is the last two seconds".
-        const incoming = parseLRC(
-            '[00:00.000]作词 : 老番茄\n[00:00.000]作曲 : 老番茄\n'
-            + '[00:12.00]first sung line\n[00:20.00]second line',
-        );
-
-        const plan = planTransition(track(100, [line(10, 60)]), track(100, incoming.lines));
-
-        expect(plan.overlap).toBe(AUTOMIX_MAX_OVERLAP_SEC);
-        expect(plan.reason).toContain('intro 12s');
-    });
-
-    it('recognises the credit block by its shape, not by anyone\'s list of role names', () => {
-        // Whatever the words are, in whatever language: a short label, a separator, a name. A list
-        // of role names would be one platform's and one language's list, wrong for the next file.
-        const plan = planTransition(
-            track(100, [line(10, 60)]),
-            track(100, [line(0, 0, '작사 : 누군가'), line(0, 0, 'Lyricist: Someone'), line(9, 40, 'sung')]),
-        );
-        expect(plan.reason).toContain('intro 9s');
-    });
-
-    // The three lyric sources lay the SAME three credit lines of 老番茄 - 反正 out three different
-    // ways, which is why nothing about the timing can be used to find them. Captured off the live
-    // providers on 2026-08-16; if a fourth source is added, put its real head here too.
-    const CREDITS = ['作词：老番茄', '作曲：老番茄', '编曲：杨秋儒'];
-    const realHeads: Array<[string, Line[]]> = [
-        // Round seconds, then a gap far too short to have required one.
-        ['QQ', [
-            ...CREDITS.map((text, index) => line(index === 2 ? 2 : index, index === 2 ? 7 : index + 1, text)),
-            line(9.81, 12.15, '反正又不是没人在意'),
-        ]],
-        // Spread evenly across the whole intro, ending one millisecond before the singing.
-        ['Kugou', [
-            line(0, 3.272, CREDITS[0]), line(3.272, 6.545, CREDITS[1]), line(6.545, 9.817, CREDITS[2]),
-            line(9.818, 12.088, '反正又不是没人在意'),
-        ]],
-        // Every credit stacked on the same zero stamp.
-        ['NetEase', [
-            ...CREDITS.map(text => line(0, 0, text)),
-            line(9.81, 12.15, '反正又不是没人在意'),
-        ]],
-    ];
-
-    it.each(realHeads)('finds the same first sung moment in a real %s file', (_source, lines) => {
-        const plan = planTransition(track(100, [line(10, 60)]), track(100, lines));
-        expect(plan.reason).toContain('intro 9.8');
-    });
-
-    it('keeps a timeline that genuinely opens on a lyric', () => {
-        // A line at zero followed straight away by more singing was singing, not a credit.
-        const plan = planTransition(
-            track(100, [line(10, 90)]),
-            track(100, [line(0, 2, 'cold open'), line(2.5, 40, 'and on it goes')]),
-        );
-        expect(plan.reason).toContain('intro 0s');
+        expect(plan.reason).toContain('outro 75s');
     });
 
     it('blends at the default length when a lyric timeline is missing', () => {
         // Local files, instrumentals, tracks whose lyrics failed to fetch: all still blend.
-        const plan = planTransition(track(100, null), track(100, [line(10, 90)]));
+        const plan = planTransition(track(100, null), track(100, null, 10));
         expect(plan.kind).toBe('fade');
         expect(plan.overlap).toBe(AUTOMIX_DEFAULT_OVERLAP_SEC);
         expect(plan.reason).toContain('no lyrics for the outgoing track');
     });
 
+    it('separates a track nobody analysed from one with no voice in it', () => {
+        // Both blend the same way; they are different answers to "why was there no window", and
+        // one of them is a bug report waiting to happen while the other is an instrumental.
+        expect(planTransition(track(100, [line(10, 90)]), track(100, null)).reason)
+            .toContain('the incoming track was never analysed');
+        expect(planTransition(track(100, [line(10, 90)]), track(100, null, null)).reason)
+            .toContain('no voice found in the incoming track');
+    });
+
     it('says so when a lyric file exists but holds nothing sung', () => {
         // An instrumental interlude blends exactly like a track with no lyrics at all, but the two
         // mean different things when the question is why no vocal-free window could be proven.
-        const plan = planTransition(track(100, [line(10, 90)]), track(100, [line(0, 4, '   ')]));
-        expect(plan.reason).toContain('nothing sung in the incoming lyrics');
+        const plan = planTransition(track(100, [line(0, 4, '   ')]), track(100, null, 10));
+        expect(plan.reason).toContain('nothing sung in the outgoing lyrics');
     });
 
     it('keeps the blend under a quarter of a very short track', () => {
@@ -162,7 +132,7 @@ describe('planTransition', () => {
 
     it('trims a proven vocal-free window back to whole beats', () => {
         // The gap is 6s; at 95 BPM that is nine beats and a half, so the blend takes the nine.
-        const plan = planTransition(track(100, [line(10, 94)]), track(100, [line(6, 90)]), 95);
+        const plan = planTransition(track(100, [line(10, 94)]), track(100, null, 6), 95);
         expect(plan.overlap).toBeCloseTo(9 * 60 / 95, 2);
     });
 
@@ -178,7 +148,7 @@ describe('planTransition', () => {
 });
 
 describe('resolveOverlap', () => {
-    const fadePlan = planTransition(track(100, [line(10, 94)]), track(100, [line(6, 90)]));
+    const fadePlan = planTransition(track(100, [line(10, 94)]), track(100, null, 6));
 
     it('keeps the planned overlap when the track still has the room', () => {
         expect(fadePlan.overlap).toBe(6);

@@ -10,7 +10,7 @@ import { estimateTempo, rmsDb, spectralFlux, SILENCE_DB } from './signalAnalysis
 // are loud or decaying, the beat grid, the key - is about the *incoming* song.
 
 /** Bumped whenever the maths changes, so stored profiles from an older build are re-measured. */
-export const TRACK_PROFILE_VERSION = 1;
+export const TRACK_PROFILE_VERSION = 2;
 
 /**
  * What the analysis runs at.
@@ -45,6 +45,19 @@ const HOT_WINDOW_SEC = 1.5;
 const HOT_EDGE_DB = 6;
 /** Frames between yields, so a four-minute track does not hold the main thread for its whole scan. */
 const YIELD_EVERY = 512;
+/**
+ * The band a lead vocal lives in.
+ *
+ * Bottom end above the kick and the bass fundamental, top end at the edge of speech - the same
+ * range a telephone was built around, for the same reason. Everything outside it is mostly other
+ * instruments, and including it only makes them louder in the answer.
+ */
+const VOCAL_LOW_HZ = 300;
+const VOCAL_HIGH_HZ = 3400;
+/** How far below the track's own most-centred moment still counts as a voice being present. */
+const VOCAL_BELOW_PEAK_DB = 9;
+/** A voice holds. A centred snare or a stab does not, and this is what tells them apart. */
+const VOCAL_MIN_SEC = 0.8;
 
 export interface TrackProfile {
     version: number;
@@ -62,6 +75,17 @@ export interface TrackProfile {
     duration: number;
     /** Seconds of near-silence before the track starts sounding. */
     leadIn: number;
+    /**
+     * Seconds to the first sustained centre-panned sound in the vocal band - where the singing
+     * starts, as far as the audio can tell.
+     *
+     * Null when the file is mono (nothing to cancel), or when nothing centred ever holds long
+     * enough - an instrumental. This is deliberately measured rather than read off the lyric
+     * timeline: every online lyric source opens with a credit block and the three of them format
+     * it three incompatible ways, so "the first line" is not "the first sung moment" in any of
+     * them. The audio has no such problem, and it also answers for tracks with no lyric file.
+     */
+    vocalStart: number | null;
     /** Seconds of near-silence after it stops. Null when only the head was read. */
     leadOut: number | null;
     /** The track is already at full level as it starts - no intro to hide a blend in. */
@@ -189,6 +213,33 @@ export const keyFromChroma = (chroma: readonly number[]): KeyEstimate => {
     };
 };
 
+/**
+ * Where a voice first arrives, from a per-frame "how centred is this track right now" curve.
+ *
+ * Thresholded against the track's own loudest centred moment rather than an absolute level, for
+ * the same reason the silence floor is: masters differ by 10dB and a fixed number would answer for
+ * one of them. The sustain requirement is what separates a voice from the other things that sit in
+ * the middle of a mix - a snare, a centred stab - which are loud for a frame or two and gone.
+ */
+const firstSustained = (centre: readonly number[], hopSec: number): number | null => {
+    let peak = SILENCE_DB;
+    for (const value of centre) if (value > peak) peak = value;
+    if (peak <= SILENCE_DB) return null;
+
+    const floor = peak - VOCAL_BELOW_PEAK_DB;
+    const needed = Math.max(1, Math.round(VOCAL_MIN_SEC / hopSec));
+    let run = 0;
+    for (let index = 0; index < centre.length; index += 1) {
+        if (centre[index] <= floor) {
+            run = 0;
+            continue;
+        }
+        run += 1;
+        if (run >= needed) return (index - run + 1) * hopSec;
+    }
+    return null;
+};
+
 /** Least-squares slope of a dB series, per second. */
 const slopePerSec = (values: readonly number[], hopSec: number) => {
     const count = values.length;
@@ -217,8 +268,12 @@ const yieldToUi = () => new Promise<void>(resolve => { setTimeout(resolve, 0); }
 export const analyseTrack = async (
     mono: Float32Array,
     sampleRate: number,
-    /** Set when these samples are the head of a longer file, so the tail fields must stay null. */
-    options: { partial?: boolean } = {},
+    options: {
+        /** Set when these samples are the head of a longer file, so the tail fields must stay null. */
+        partial?: boolean;
+        /** (L-R)/2, the off-centre half of the mix. Null for a mono file; then no voice is findable. */
+        side?: Float32Array | null;
+    } = {},
 ): Promise<TrackProfile | null> => {
     const duration = mono.length / sampleRate;
     if (!(duration > 1) || !(sampleRate > 0)) return null;
@@ -249,8 +304,16 @@ export const analyseTrack = async (
             : -1;
     }
 
+    // The vocal band, as bin indices. Sums over it are the only thing the side channel is for.
+    const side = options.side && options.side.length >= mono.length ? options.side : null;
+    const vocalLowBin = Math.max(1, Math.floor(VOCAL_LOW_HZ / binHz));
+    const vocalHighBin = Math.min(bins - 1, Math.ceil(VOCAL_HIGH_HZ / binHz));
+    const sideReal = new Float64Array(side ? FFT_SIZE : 0);
+    const sideImag = new Float64Array(side ? FFT_SIZE : 0);
+
     const levels: number[] = [];
     const envelope: number[] = [];
+    const centre: number[] = [];
     const chroma = new Array<number>(12).fill(0);
     let energy = 0;
     let counted = 0;
@@ -267,12 +330,29 @@ export const analyseTrack = async (
         }
         fft(real, imag);
 
+        let midBand = 0;
         for (let index = 0; index < bins; index += 1) {
             const magnitude = Math.hypot(real[index], imag[index]);
             // dB domain, matching the live analyser's input so the same flux maths applies.
             spectrum[index] = magnitude > 0 ? Math.max(SILENCE_DB, 20 * Math.log10(magnitude)) : SILENCE_DB;
             const pitchClass = binPitchClass[index];
             if (pitchClass >= 0) chroma[pitchClass] += magnitude;
+            if (index >= vocalLowBin && index <= vocalHighBin) midBand += magnitude * magnitude;
+        }
+
+        if (side) {
+            for (let index = 0; index < FFT_SIZE; index += 1) {
+                sideReal[index] = side[start + index] * window[index];
+                sideImag[index] = 0;
+            }
+            fft(sideReal, sideImag);
+            let sideBand = 0;
+            for (let index = vocalLowBin; index <= vocalHighBin; index += 1) {
+                sideBand += sideReal[index] * sideReal[index] + sideImag[index] * sideImag[index];
+            }
+            // What survives cancelling the two channels against each other: the centred content.
+            const centred = midBand - sideBand;
+            centre.push(centred > 0 ? Math.max(SILENCE_DB, 10 * Math.log10(centred)) : SILENCE_DB);
         }
 
         if (frames > 0) envelope.push(spectralFlux(spectrum, previous, fluxBins));
@@ -332,6 +412,7 @@ export const analyseTrack = async (
         partial,
         duration,
         leadIn: first * hopSec,
+        vocalStart: side ? firstSustained(centre, hopSec) : null,
         leadOut: partial ? null : Math.max(0, duration - (last * hopSec + FFT_SIZE / sampleRate)),
         // Averaged over a second or so rather than read off one frame: a single loud transient at
         // the top of a track is a count-in, not a track that starts at full tilt.

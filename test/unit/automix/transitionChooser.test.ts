@@ -6,28 +6,10 @@ import {
     keyRelation,
     shapeBlend,
 } from '@/services/automix/transitionChooser';
-import { TRACK_PROFILE_VERSION, type TrackProfile } from '@/services/automix/trackProfile';
+import type { TrackProfile } from '@/services/automix/trackProfile';
+import { makeProfile as profile } from './trackProfileFixture';
 
 // test/unit/automix/transitionChooser.test.ts
-
-const profile = (overrides: Partial<TrackProfile> = {}): TrackProfile => ({
-    version: TRACK_PROFILE_VERSION,
-    partial: false,
-    duration: 200,
-    leadIn: 0,
-    leadOut: 0,
-    startsHot: false,
-    endsHot: false,
-    introSlope: 0,
-    outroSlope: 0,
-    loudness: -14,
-    bpm: 120,
-    beatOffset: 0,
-    key: -1,
-    major: true,
-    keyConfidence: 0,
-    ...overrides,
-});
 
 const inKey = (key: number, major: boolean) => profile({ key, major, keyConfidence: 0.8 });
 

@@ -52,17 +52,29 @@ export const getTrackProfile = (song: SongResult | null | undefined): TrackProfi
     song ? profiles.get(getPlaybackSongKey(song)) ?? null : null
 );
 
-/** Averages to mono, which is what every measurement here wants and a quarter of the memory. */
-const toMono = (buffer: AudioBuffer): Float32Array => {
-    const mono = new Float32Array(buffer.length);
-    for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
-        const data = buffer.getChannelData(channel);
-        for (let index = 0; index < mono.length; index += 1) mono[index] += data[index];
+/**
+ * Splits the decode into mid and side.
+ *
+ * Mid - (L+R)/2 - is the mono sum every other measurement here wants. Side - (L-R)/2 - is what is
+ * left when the two channels cancel, which is everything the mix placed off-centre. Keeping it is
+ * what makes a voice findable: lead vocals are panned dead centre on essentially every commercial
+ * master, so they live almost entirely in mid and almost not at all in side. Cancelling one against
+ * the other is the same arithmetic karaoke machines have used to drop the lead vocal for decades.
+ *
+ * Null side for a mono file: there are no two channels to cancel, so the question cannot be asked.
+ */
+const toMidSide = (buffer: AudioBuffer): { mid: Float32Array; side: Float32Array | null } => {
+    const left = buffer.getChannelData(0);
+    if (buffer.numberOfChannels < 2) return { mid: Float32Array.from(left), side: null };
+
+    const right = buffer.getChannelData(1);
+    const mid = new Float32Array(buffer.length);
+    const side = new Float32Array(buffer.length);
+    for (let index = 0; index < mid.length; index += 1) {
+        mid[index] = (left[index] + right[index]) / 2;
+        side[index] = (left[index] - right[index]) / 2;
     }
-    if (buffer.numberOfChannels > 1) {
-        for (let index = 0; index < mono.length; index += 1) mono[index] /= buffer.numberOfChannels;
-    }
-    return mono;
+    return { mid, side };
 };
 
 /**
@@ -204,8 +216,12 @@ export const ensureTrackProfile = async (request: ProfileRequest): Promise<void>
             skipped.delete(songKey);
 
             const buffer = await decodeAtProfileRate(result.bytes);
-            const profile = buffer
-                ? await analyseTrack(toMono(buffer), buffer.sampleRate, { partial: result.partial })
+            const channels = buffer ? toMidSide(buffer) : null;
+            const profile = buffer && channels
+                ? await analyseTrack(channels.mid, buffer.sampleRate, {
+                    partial: result.partial,
+                    side: channels.side,
+                })
                 : null;
             remember(songKey, profile);
             if (profile) {
@@ -215,6 +231,7 @@ export const ensureTrackProfile = async (request: ProfileRequest): Promise<void>
                     + ` ${profile.bpm ? `${Math.round(profile.bpm)} BPM, ` : ''}`
                     + `${profile.loudness.toFixed(1)} dBFS,`
                     + ` lead-in ${profile.leadIn.toFixed(2)}s,`
+                    + ` ${profile.vocalStart === null ? 'no voice found' : `voice at ${profile.vocalStart.toFixed(2)}s`},`
                     + ` ${profile.startsHot ? 'starts hot' : 'has an intro'}`
                     + `${profile.endsHot === null ? '' : `, ${profile.endsHot ? 'ends hot' : 'decays out'}`}`,
                 );

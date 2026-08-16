@@ -6,7 +6,8 @@ import {
     type AutomixSessionPorts,
 } from '@/services/automix/automixSession';
 import type { TransitionTrack } from '@/services/automix/transitionPlanner';
-import { TRACK_PROFILE_VERSION, type TrackProfile } from '@/services/automix/trackProfile';
+import { type TrackProfile } from '@/services/automix/trackProfile';
+import { makeProfile } from './trackProfileFixture';
 import {
     asElement,
     createFakeChain,
@@ -26,9 +27,18 @@ const line = (startTime: number, endTime: number, fullText = 'la'): Line => ({
     words: [], startTime, endTime, fullText,
 });
 
-/** A pair with a six second instrumental outro and a five second instrumental intro. */
+/**
+ * A pair with a six second instrumental outro and a five second instrumental intro.
+ *
+ * The outro is read off the lyric timeline; the intro is measured off the audio, so it only exists
+ * on tracks that carry a profile - `withIntro` is how a test asks for one.
+ */
 const BLENDABLE_FROM: TransitionTrack = { duration: 100, lines: [line(10, 94)] };
 const BLENDABLE_TO: TransitionTrack = { duration: 100, lines: [line(5, 90)] };
+const withIntro = (overrides: Partial<TrackProfile> = {}): TransitionTrack => ({
+    ...BLENDABLE_TO,
+    profile: makeProfile({ duration: 100, vocalStart: 5, ...overrides }),
+});
 
 const createHarness = (readings: Partial<Record<AutomixDeckId, FakeAnalyserReadings>> = {}) => {
     // Deck A sits exactly on the planned outStart: a six second outro against a five second
@@ -194,7 +204,7 @@ describe('automix session', () => {
 
     it('lands the handover on a beat of the outgoing track', () => {
         const harness = createHarness({ A: { loudnessDb: -20, bpm: 120, nextBeatIn: 0.1 } });
-        harness.arm();
+        harness.arm({ to: withIntro() });
 
         harness.session.handleActiveDeckPlaying('local:next-song');
 
@@ -359,24 +369,8 @@ describe('automix session, transition styles', () => {
         vi.restoreAllMocks();
     });
 
-    const profile = (overrides: Partial<TrackProfile> = {}): TrackProfile => ({
-        version: TRACK_PROFILE_VERSION,
-        partial: false,
-        duration: 100,
-        leadIn: 0,
-        leadOut: 0,
-        startsHot: false,
-        endsHot: false,
-        introSlope: 0,
-        outroSlope: 0,
-        loudness: -14,
-        bpm: 120,
-        beatOffset: 0,
-        key: -1,
-        major: true,
-        keyConfidence: 0,
-        ...overrides,
-    });
+    const profile = (overrides: Partial<TrackProfile> = {}): TrackProfile =>
+        makeProfile({ duration: 100, ...overrides });
 
     it('does not read the arriving track\'s intro as a mastering imbalance', () => {
         // The incoming deck is measured a second into its own track, which is nearly always its
@@ -416,7 +410,7 @@ describe('automix session, transition styles', () => {
         // fall is still the tap's answer - the profile's phase has drifted by the end of a track.
         const harness = createHarness({ A: { loudnessDb: -20, bpm: 160, nextBeatIn: 0.1 } });
         // 80 BPM rounds the six-second window down to six beats, so the blend starts at 95.5s.
-        harness.arm({ time: 96, from: { ...BLENDABLE_FROM, profile: profile({ bpm: 80 }) } });
+        harness.arm({ time: 96, from: { ...BLENDABLE_FROM, profile: profile({ bpm: 80 }) }, to: withIntro() });
 
         harness.session.handleActiveDeckPlaying('local:next-song');
 
@@ -430,7 +424,7 @@ describe('automix session, transition styles', () => {
         const harness = createHarness({ A: { loudnessDb: -20 } });
         harness.arm({
             from: { ...BLENDABLE_FROM, profile: profile({ outroSlope: -3 }) },
-            to: { ...BLENDABLE_TO, profile: profile({ leadIn: 2 }) },
+            to: withIntro({ leadIn: 2 }),
         });
 
         harness.session.handleActiveDeckPlaying('local:next-song');
@@ -446,7 +440,7 @@ describe('automix session, transition styles', () => {
         const harness = createHarness();
         harness.arm({
             from: { ...BLENDABLE_FROM, profile: profile({ outroSlope: -3 }) },
-            to: { ...BLENDABLE_TO, profile: profile({ leadIn: 2 }) },
+            to: withIntro({ leadIn: 2 }),
         });
         harness.session.handleActiveDeckPlaying('local:next-song');
 

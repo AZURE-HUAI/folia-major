@@ -47,6 +47,72 @@ describe('keyFromChroma', () => {
     });
 });
 
+/** Splits a stereo pair the way profileService does, so the test feeds what production feeds. */
+const midSide = (left: Float32Array, right: Float32Array) => {
+    const mid = new Float32Array(left.length);
+    const side = new Float32Array(left.length);
+    for (let index = 0; index < left.length; index += 1) {
+        mid[index] = (left[index] + right[index]) / 2;
+        side[index] = (left[index] - right[index]) / 2;
+    }
+    return { mid, side };
+};
+
+/** Sums signals into one channel. */
+const mix = (...parts: Float32Array[]) => {
+    const out = new Float32Array(parts[0].length);
+    for (const part of parts) {
+        for (let index = 0; index < out.length; index += 1) out[index] += part[index];
+    }
+    return out;
+};
+
+describe('analyseTrack, finding the voice', () => {
+    // A stereo mix with the two hands panned apart, and a centred tone arriving partway through.
+    // Panned content lands equally in mid and side and cancels to nothing; the centred tone lands
+    // only in mid and survives. That difference is the whole mechanism.
+    const INTRO_SEC = 6;
+    const buildTrack = (vocalHz = 500) => {
+        const leftOnly = join(tone(INTRO_SEC, 700, 0.4), tone(6, 700, 0.4));
+        const rightOnly = join(tone(INTRO_SEC, 1100, 0.4), tone(6, 1100, 0.4));
+        const centred = join(silence(INTRO_SEC), tone(6, vocalHz, 0.4));
+        return midSide(mix(leftOnly, centred), mix(rightOnly, centred));
+    };
+
+    it('reports where the centred sound starts, not where the track starts', async () => {
+        const { mid, side } = buildTrack();
+        const profile = await analyseTrack(mid, RATE, { side });
+
+        expect(profile?.leadIn).toBeCloseTo(0, 1);
+        expect(profile?.vocalStart).toBeCloseTo(INTRO_SEC, 0);
+    });
+
+    it('answers null for a mono file, where there is nothing to cancel', async () => {
+        // Every measurement below the vocal band still works; only this one cannot be made.
+        const { mid } = buildTrack();
+        const profile = await analyseTrack(mid, RATE, { side: null });
+
+        expect(profile?.vocalStart).toBeNull();
+        expect(profile?.bpm === null || profile.bpm > 0).toBe(true);
+    });
+
+    it('answers null when nothing centred ever arrives', async () => {
+        const leftOnly = tone(12, 700, 0.4);
+        const rightOnly = tone(12, 1100, 0.4);
+        const { mid, side } = midSide(leftOnly, rightOnly);
+
+        expect((await analyseTrack(mid, RATE, { side }))?.vocalStart).toBeNull();
+    });
+
+    it('ignores centred content outside the vocal band', async () => {
+        // A centred bass line is not a voice. Without the band limit it reads as one, and every
+        // track with a bass guitar reports its intro as zero seconds.
+        const { mid, side } = buildTrack(80);
+
+        expect((await analyseTrack(mid, RATE, { side }))?.vocalStart).toBeNull();
+    });
+});
+
 describe('analyseTrack', () => {
     it('finds the silence at each end without being told what silence is', () => {
         // The threshold is relative to the track's own peak: an absolute dBFS floor would call a

@@ -78,33 +78,6 @@ export const AUTOMIX_DEFAULT_OVERLAP_SEC = 5;
  */
 export const AUTOMIX_DEFAULT_OVERLAP_BEATS = 8;
 
-/**
- * A "label : value" line - the credit block every online lyric file opens with.
- *
- * Matched by the shape of the line and not by a list of role names, because 作词/作曲, 작사,
- * Lyricist, Compositor are one platform's and one language's vocabulary and wrong for the next
- * file. What every one of them shares is the format: a short label, a separator, a name.
- *
- * The timing cannot do this job, which took three attempts and three real files to establish. For
- * ONE track (老番茄 - 反正) the three sources lay the same three credit lines out as:
- *
- *   QQ       0.000-1.000, 1.000-2.000, 2.000-7.000     then singing at 9.81  (a 2.8s gap)
- *   Kugou    0.000-3.272, 3.272-6.545, 6.545-9.817     then singing at 9.818 (a 1ms gap)
- *   NetEase  every line stamped 0.000                  then singing
- *
- * Kugou spreads them evenly across the whole intro and ends flush against the first sung line, QQ
- * uses round seconds and leaves a gap too short to require, NetEase stacks them all on zero. There
- * is no stamp, no gap and no duration common to the three - only the text.
- */
-const CREDIT_LINE = /^\s*[^\s:：]{1,10}\s*[:：]\s*\S/;
-/**
- * How far into a track the credit block can still be running.
- *
- * It is always inside the intro, so this only bounds the damage if a song genuinely opens on a
- * line that reads like a credit - it can cost the first few lines, never the whole song.
- */
-const CREDIT_BLOCK_MAX_SEC = 20;
-
 const beatSec = (bpm: number | null | undefined) =>
     (bpm && Number.isFinite(bpm) && bpm > 0 ? 60 / bpm : null);
 
@@ -113,28 +86,20 @@ const toWholeBeats = (seconds: number, beat: number | null) =>
     (beat === null ? seconds : Math.max(1, Math.floor(seconds / beat)) * beat);
 
 /**
- * First and last moment a voice is present, from the lyric timeline.
+ * Last moment a voice is present, from the lyric timeline.
+ *
+ * The END of a track only. Where the singing STARTS is measured from the audio instead - see
+ * `vocalStart` in trackProfile - because a lyric file's opening is not the song's opening: every
+ * online source prepends a credit block, and the three of them format it three incompatible ways.
+ * The end of the file carries no such block, so the timeline is trustworthy there.
  *
  * Interlude placeholders are dropped, and that is load-bearing rather than tidy: attachInterludes
- * prepends a '......' line at 0.5s to every track whose singing starts after 0:03, so counting it
- * as a voice reports an intro of half a second for almost every song in existence and vetoes the
- * blend. Blank lines go for the same reason - some sources use those as the placeholder instead.
+ * prepends a '......' line at 0.5s to every track whose singing starts after 0:03. Blank lines go
+ * for the same reason - some sources use those as the placeholder instead.
  */
-const vocalBounds = (lines: Line[] | null | undefined): { start: number; end: number } | null => {
+const lastSungMoment = (lines: Line[] | null | undefined): number | null => {
     const sung = lines?.filter(line => line.fullText.trim().length > 0 && !isInterludeLine(line));
-    if (!sung?.length) return null;
-
-    // Walk off the credit block the file opens with. Reading it as the first sung moment reported
-    // an intro of zero seconds for very nearly every online track, which threw the vocal-free
-    // window away on all of them - in the app, every blend landing in the last couple of seconds.
-    // Only ever a leading run, and it stops at the first line that is not shaped like a credit,
-    // which is the song starting.
-    let first = 0;
-    while (first < sung.length - 1
-        && sung[first].startTime <= CREDIT_BLOCK_MAX_SEC
-        && CREDIT_LINE.test(sung[first].fullText)) first += 1;
-
-    return { start: sung[first].startTime, end: sung[sung.length - 1].endTime };
+    return sung?.length ? sung[sung.length - 1].endTime : null;
 };
 
 const hardCut = (reason: string): TransitionPlan => ({
@@ -200,10 +165,11 @@ export const planTransition = (
     }
 
     const beat = beatSec(bpm);
-    const outVocals = vocalBounds(from.lines);
-    const inVocals = vocalBounds(to.lines);
-    const tail = outVocals ? from.duration - outVocals.end : null;   // instrumental outro
-    const intro = inVocals ? inVocals.start : null;                   // instrumental intro
+    const lastSung = lastSungMoment(from.lines);
+    const tail = lastSung === null ? null : from.duration - lastSung;  // instrumental outro
+    // Measured off the audio, not read off the incoming lyric file. The two ends of a transition
+    // are asymmetric: a lyric timeline's END is trustworthy, its BEGINNING is a credit block.
+    const intro = to.profile?.vocalStart ?? null;                      // instrumental intro
     const vocalFree = tail !== null && intro !== null ? Math.min(tail, intro) : null;
     const usesVocalFree = vocalFree !== null && vocalFree >= AUTOMIX_MIN_OVERLAP_SEC;
 
@@ -224,15 +190,18 @@ export const planTransition = (
         return hardCut(`track too short to fade across (${round(from.duration)}s)`);
     }
 
-    // Worth separating: a track with no lyric file and a track whose lyric file holds nothing
-    // sung - an instrumental interlude, say - look identical in a blend but mean different things
-    // when the question is why a window could not be proven.
-    const missing = (lines: Line[] | null, side: string) =>
-        (lines?.length ? `nothing sung in the ${side} lyrics` : `no lyrics for the ${side} track`);
+    // Each end fails for its own reason and they want telling apart: the outgoing side can only
+    // fail on its lyric file, the incoming side only on its analysis.
+    const outroMissing = from.lines?.length
+        ? 'nothing sung in the outgoing lyrics'
+        : 'no lyrics for the outgoing track';
+    const introMissing = to.profile
+        ? 'no voice found in the incoming track'
+        : 'the incoming track was never analysed';
     const window = tail === null
-        ? missing(from.lines, 'outgoing')
+        ? outroMissing
         : intro === null
-            ? missing(to.lines, 'incoming')
+            ? introMissing
             : `outro ${round(tail)}s, intro ${round(intro)}s`;
     const length = usesVocalFree
         ? 'vocal-free'
