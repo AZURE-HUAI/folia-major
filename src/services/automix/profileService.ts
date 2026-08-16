@@ -20,6 +20,15 @@ import { analyseTrack, PROFILE_SAMPLE_RATE, TRACK_PROFILE_VERSION, type TrackPro
 
 const profiles = new Map<string, TrackProfile | null>();
 const inFlight = new Set<string>();
+/**
+ * Tracks whose bytes were not reachable this time round.
+ *
+ * Deliberately NOT stored as a null profile: "no bytes yet" is a passing condition - the media
+ * cache fills up as tracks finish playing - while a failed decode is permanent. Recording the two
+ * the same way meant a track skipped once was never looked at again for the rest of the session.
+ * Kept only to log the reason once per track instead of on every prefetch pass.
+ */
+const skipped = new Map<string, string>();
 /** Same order of magnitude as the prefetch cache; each entry is a couple of hundred bytes. */
 const MAX_PROFILES = 200;
 
@@ -83,16 +92,21 @@ interface ProfileRequest {
     enableMediaCache: boolean;
 }
 
-const readBytes = async ({ song, audioUrl, enableMediaCache }: ProfileRequest): Promise<ArrayBuffer | null> => {
-    const cached = await getCachedSongAudioBlob(song);
-    if (cached) return cached.arrayBuffer();
+/** Either the bytes, or the reason there are none - which is the more useful answer most days. */
+type BytesResult = { bytes: ArrayBuffer } | { skipped: string };
 
-    if (!audioUrl) return null;
+const readBytes = async ({ song, audioUrl, enableMediaCache }: ProfileRequest): Promise<BytesResult> => {
+    const cached = await getCachedSongAudioBlob(song);
+    if (cached) return { bytes: await cached.arrayBuffer() };
+
+    if (!audioUrl) return { skipped: 'not cached yet and no URL to read it from' };
     // A blob: or file: URL is already on this machine, so reading it is free whatever the setting
     // says. Anything else is a real download and needs the cache to justify it.
     const isLocal = audioUrl.startsWith('blob:') || audioUrl.startsWith('file:')
         || getPlaybackSourceRef(song).kind !== 'online';
-    if (!isLocal && !enableMediaCache) return null;
+    if (!isLocal && !enableMediaCache) {
+        return { skipped: 'song caching is off, so analysing would mean an extra download' };
+    }
 
     try {
         const blob = await (await fetch(audioUrl)).blob();
@@ -101,10 +115,10 @@ const readBytes = async ({ song, audioUrl, enableMediaCache }: ProfileRequest): 
             // feeding both is the whole reason this is allowed to run at all.
             await saveAudioBlob(getSongResourceCacheKey('audio', song), blob);
         }
-        return await blob.arrayBuffer();
+        return { bytes: await blob.arrayBuffer() };
     } catch (error) {
         console.warn('[Automix] could not read a track for analysis', error);
-        return null;
+        return { skipped: 'the download failed' };
     }
 };
 
@@ -127,13 +141,20 @@ export const ensureTrackProfile = async (request: ProfileRequest): Promise<void>
                 return;
             }
 
-            const bytes = await readBytes(request);
-            if (!bytes) {
-                remember(songKey, null);
+            const result = await readBytes(request);
+            if ('skipped' in result) {
+                // Once per track, not once per prefetch pass. Without this the feature can sit
+                // completely inert - every transition falling through to the plain crossfade -
+                // and print nothing at all to say why.
+                if (skipped.get(songKey) !== result.skipped) {
+                    skipped.set(songKey, result.skipped);
+                    console.log(`[Automix] not analysing "${request.song.name}": ${result.skipped}`);
+                }
                 return;
             }
+            skipped.delete(songKey);
 
-            const buffer = await decodeAtProfileRate(bytes);
+            const buffer = await decodeAtProfileRate(result.bytes);
             const profile = buffer ? await analyseTrack(toMono(buffer), buffer.sampleRate) : null;
             remember(songKey, profile);
             if (profile) {
@@ -162,4 +183,5 @@ export const ensureTrackProfile = async (request: ProfileRequest): Promise<void>
 export const clearTrackProfileRuntime = () => {
     profiles.clear();
     inFlight.clear();
+    skipped.clear();
 };

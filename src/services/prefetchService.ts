@@ -388,11 +388,12 @@ export const prefetchNearbySongs = async (
     console.log(`[Prefetch] Will prefetch ${songsToPrefetch.length} songs near index ${currentIndex}`);
 
     // The track playing right now is the other half of every transition it is about to be in, and
-    // it is not in the prefetch set. Its bytes are already in the media cache if they are anywhere,
-    // so this is free whenever it is possible at all.
+    // it is not in the prefetch set, so it would otherwise only ever be analysed on a second
+    // listen. Its own prefetch entry usually still holds the URL it was resolved from.
+    const currentUrl = prefetchCache.get(currentSongKey)?.audioUrl ?? null;
     void ensureTrackProfile({
         song: currentSong,
-        audioUrl: null,
+        audioUrl: currentUrl === 'CACHED_IN_DB' ? null : currentUrl,
         enableMediaCache: useSettingsUiStore.getState().enableMediaCache,
     });
 

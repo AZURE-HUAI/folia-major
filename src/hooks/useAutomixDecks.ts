@@ -48,6 +48,16 @@ const ANALYSER_INTERVAL_MS = 25;
  * stalled. Long enough for the audio bridge's own autoplay, which waits on the lyrics fetch.
  */
 const STALL_GRACE_MS = 2_500;
+/**
+ * How long to keep watching after that, and how often.
+ *
+ * A single check was not enough. When the next track's URL is slow to resolve, the deck that is
+ * about to hold it still has no source at all at the 2.5s mark - so the check found nothing to
+ * start, gave up, and the app stayed silent for exactly the case the check existed for. It has to
+ * keep looking until a source turns up.
+ */
+const STALL_RETRY_MS = 1_000;
+const STALL_ATTEMPTS = 10;
 
 /**
  * The track the queue would advance to, mirroring handleNextTrack's own index maths.
@@ -125,13 +135,25 @@ export function useAutomixDecks({
      * against a pause the listener asked for.
      */
     const scheduleStallCheck = useCallback(() => {
-        window.setTimeout(() => {
-            const element = elementsRef.current[sessionRef.current!.getActiveDeck()];
-            if (!element?.src || !element.paused) return;
+        let attempts = 0;
+        const check = () => {
+            attempts += 1;
+            // A pause the listener asked for is not a stall, and resuming it would be worse than
+            // any silence this guards against.
             if (playerStateRef.current === PlayerState.PAUSED) return;
-            console.log('[Automix] the deck holding the next track was never started, starting it');
-            void element.play().catch(() => { });
-        }, STALL_GRACE_MS);
+
+            const element = elementsRef.current[sessionRef.current!.getActiveDeck()];
+            if (element?.src) {
+                if (!element.paused) return;
+                console.log('[Automix] the deck holding the next track was never started, starting it');
+                void element.play().catch(() => { });
+                return;
+            }
+            // No source yet: the next track is still resolving. Keep looking rather than
+            // concluding there is nothing wrong.
+            if (attempts < STALL_ATTEMPTS) window.setTimeout(check, STALL_RETRY_MS);
+        };
+        window.setTimeout(check, STALL_GRACE_MS);
     }, []);
 
     const sessionRef = useRef<AutomixSession | null>(null);
