@@ -4,8 +4,8 @@
 // every rule here is exercised without an audio device.
 
 /** Slowest and fastest tempo worth looking for; outside this a "beat" is an artefact. */
-export const MIN_BPM = 60;
-export const MAX_BPM = 180;
+const MIN_BPM = 60;
+const MAX_BPM = 180;
 /** Below this the autocorrelation peak is not distinguishable from its own noise floor. */
 export const MIN_TEMPO_CONFIDENCE = 0.35;
 
@@ -13,11 +13,11 @@ export const MIN_TEMPO_CONFIDENCE = 0.35;
 export const SILENCE_DB = -90;
 
 /** A dense, loud outro: it will bury whatever starts underneath it, so hand over early. */
-export const LOUD_OUTRO_DB = -14;
+const LOUD_OUTRO_DB = -14;
 /** A decaying tail: letting it breathe sounds better than shouldering it aside. */
-export const QUIET_OUTRO_DB = -30;
+const QUIET_OUTRO_DB = -30;
 /** Below this the track has already finished in every sense that matters; waiting is a hole. */
-export const SILENT_TAIL_DB = -45;
+const SILENT_TAIL_DB = -45;
 export const CROSSOVER_EARLY = 0.35;
 export const CROSSOVER_LATE = 0.55;
 

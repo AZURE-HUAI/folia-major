@@ -91,6 +91,7 @@ import { BASE_DUAL_THEME, DAYLIGHT_THEME, DEFAULT_THEME } from './services/baseT
 import { initializeSyncCoordinator } from './services/sync/syncCoordinator';
 import { applyLocalLibraryEntityDisplay } from './services/playbackAdapters';
 import { clearPrefetchRuntime } from './services/prefetchService';
+import { clearTrackProfileRuntime } from './services/automix/profileService';
 import { buildLocalLibraryIndex, followEntityRedirect } from './utils/localLibraryIndex';
 import type { PlayerChromeVisibilityMode } from './types/remoteControl';
 
@@ -924,6 +925,10 @@ export default function App() {
         setIsFmMode(false);
         setPlayerState(PlayerState.IDLE);
         clearPrefetchRuntime();
+        // The measurements are keyed by playback key, so the outgoing provider's are unreachable
+        // from here on. Dropped alongside the prefetch cache they were gathered with, rather than
+        // sitting in memory until the tab is closed.
+        clearTrackProfileRuntime();
         useSearchNavigationStore.getState().resetRuntime(nextProviderId);
         useCollectionNavigationStore.getState().clear();
 

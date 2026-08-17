@@ -24,7 +24,7 @@ export type TransitionStyle =
 export type KeyRelation = 'compatible' | 'neutral' | 'clashing' | 'unknown';
 
 /** Below this the key estimate is a coin flip and is treated as no answer at all. */
-export const MIN_KEY_CONFIDENCE = 0.25;
+const MIN_KEY_CONFIDENCE = 0.25;
 /** Steeper than this over the last ten seconds is a produced fade-out, not a musical ending. */
 const FADE_OUT_SLOPE_DB_PER_SEC = -1.5;
 /** A lead-in shorter than this is not an intro, it is the file's own leading silence. */

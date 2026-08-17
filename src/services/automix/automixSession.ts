@@ -33,7 +33,7 @@ import type { TrackProfile } from './trackProfile';
 export type AutomixDeckId = 'A' | 'B';
 export type AutomixPhase = 'idle' | 'armed' | 'fading';
 
-export const otherDeck = (deck: AutomixDeckId): AutomixDeckId => (deck === 'A' ? 'B' : 'A');
+const otherDeck = (deck: AutomixDeckId): AutomixDeckId => (deck === 'A' ? 'B' : 'A');
 
 /** Long enough for the last scheduled curve point to be consumed before the deck is torn down. */
 const FADE_CLEANUP_MARGIN_MS = 150;

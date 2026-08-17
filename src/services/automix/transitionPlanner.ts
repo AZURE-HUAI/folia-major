@@ -65,7 +65,7 @@ export const AUTOMIX_MIN_OVERLAP_SEC = 0.8;
  * floor would throw away every cut whose incoming deck happened to load slowly, and replace it
  * with the abrupt stop that floor exists to prevent.
  */
-export const AUTOMIX_MIN_CUT_ROOM_SEC = 0.15;
+const AUTOMIX_MIN_CUT_ROOM_SEC = 0.15;
 /** Used whenever neither the lyrics nor a tempo can point at a better length. */
 export const AUTOMIX_DEFAULT_OVERLAP_SEC = 5;
 /**
@@ -76,7 +76,7 @@ export const AUTOMIX_DEFAULT_OVERLAP_SEC = 5;
  * next. Every DJ tool counts transitions in bars for this reason; eight beats is two bars of 4/4,
  * the shortest span that still reads as a phrase.
  */
-export const AUTOMIX_DEFAULT_OVERLAP_BEATS = 8;
+const AUTOMIX_DEFAULT_OVERLAP_BEATS = 8;
 
 const beatSec = (bpm: number | null | undefined) =>
     (bpm && Number.isFinite(bpm) && bpm > 0 ? 60 / bpm : null);
