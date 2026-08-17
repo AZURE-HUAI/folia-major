@@ -8,6 +8,7 @@ import {
     resolveOverlap,
     type TransitionTrack,
 } from '../../../src/services/automix/transitionPlanner';
+import { GAPLESS_SPLICE_SEC, shapeBlend } from '../../../src/services/automix/transitionChooser';
 import { makeProfile } from './trackProfileFixture';
 
 const line = (startTime: number, endTime: number, fullText = 'la'): Line => ({
@@ -171,5 +172,64 @@ describe('resolveOverlap', () => {
 
     it('treats an unreadable remaining time as no room at all', () => {
         expect(resolveOverlap(fadePlan, NaN)).toBe(0);
+    });
+});
+
+/**
+ * The handoff between deciding a join and performing it.
+ *
+ * Both halves read correctly on their own, and every gapless join chosen on a real song change was
+ * still thrown away between them: the planner asked for a second and a half of room, and the
+ * shaper refuses to wait longer than the incoming track's own leading silence, which on a
+ * commercial master is a fraction of that. The log said `bassSwap (planned gapless)` every time.
+ */
+describe('a join has to survive the step that performs it', () => {
+    const consecutiveAlbumTracks = (leadIn: number) => ({
+        from: {
+            duration: 200,
+            lines: null,
+            profile: makeProfile({ endsHot: true }),
+        },
+        to: {
+            duration: 200,
+            lines: null,
+            profile: makeProfile({ startsHot: true, leadIn }),
+        },
+    });
+
+    /** What automixSession does at the instant the incoming deck starts. */
+    const perform = (plan: ReturnType<typeof planTransition>, incomingLeadIn: number) => shapeBlend({
+        style: plan.style,
+        room: plan.overlap,
+        overlap: plan.overlap,
+        crossover: 0.5,
+        nextBeatIn: null,
+        periodSec: null,
+        incomingLeadIn,
+    });
+
+    it('places a gapless join in the silence the next track actually has', () => {
+        // 0.30s, measured off a real master. Nothing commercial opens after a second and a half.
+        const { from, to } = consecutiveAlbumTracks(0.3);
+        const plan = planTransition(from, to, 120, { sameAlbum: true });
+
+        expect(plan.style).toBe('gapless');
+        // The room asked for is now something the wait can be paid for, not GAPLESS_LEAD_SEC.
+        expect(plan.overlap).toBeLessThanOrEqual(0.35);
+
+        const shaped = perform(plan, 0.3);
+        expect(shaped.style).toBe('gapless');
+        expect(shaped.overlap).toBe(GAPLESS_SPLICE_SEC);
+    });
+
+    it('still refuses one it cannot place, rather than pretending', () => {
+        // A track that opens on its first sample has no silence to wait in at all.
+        const { from, to } = consecutiveAlbumTracks(0);
+        const plan = planTransition(from, to, 120, { sameAlbum: true });
+        expect(plan.style).toBe('gapless');
+        expect(perform(plan, 0).style).toBe('gapless');
+
+        // But hand that same plan a deck whose track turned out to have none, and it downgrades.
+        expect(perform({ ...plan, overlap: 1.5 }, 0).style).toBe('bassSwap');
     });
 });

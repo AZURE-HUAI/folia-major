@@ -5,6 +5,7 @@ import {
     CUT_LEAD_SEC,
     GAPLESS_LEAD_SEC,
     GAPLESS_SPLICE_SEC,
+    HEAD_BUDGET_SEC,
     type KeyRelation,
     type TransitionStyle,
 } from './transitionChooser';
@@ -149,7 +150,20 @@ export const planTransition = (
     // when the handover lands is cut off.
     if (choice.style === 'gapless' || choice.style === 'beatCut') {
         const lead = choice.style === 'gapless' ? GAPLESS_LEAD_SEC : CUT_LEAD_SEC;
-        const room = Math.min(lead, from.duration / 4);
+        // Never ask for more room than the join can actually be placed in.
+        //
+        // Room is spent waiting, and the wait comes out of the incoming track's own leading
+        // silence - shapeBlend will not spend a millisecond more than that, and abandons the style
+        // outright when the room it was handed needs more. So asking for a second and a half of it
+        // on a track that opens after a fifth of one produces a plan that is guaranteed to be
+        // thrown away, which is exactly how a gapless join came to be chosen on real song changes
+        // and then never once performed.
+        //
+        // The lead is what a deck starting cold would need; these decks have been buffering since
+        // the top of the transition window, so the only thing still to pay for is the moment
+        // between letting go and hearing it - which RELEASE_MARGIN_SEC already covers.
+        const placeable = to.profile ? to.profile.leadIn + HEAD_BUDGET_SEC : lead;
+        const room = Math.min(lead, from.duration / 4, placeable);
         const floor = choice.style === 'gapless' ? GAPLESS_SPLICE_SEC * 4 : AUTOMIX_MIN_CUT_ROOM_SEC;
         if (room < floor) return hardCut(`track too short to place a join in (${round(from.duration)}s)`);
         return {

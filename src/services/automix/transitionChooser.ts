@@ -46,7 +46,7 @@ export const CUT_LEAD_SEC = 1.5;
  * leading silence comes out of its first notes, and a missing downbeat is far more audible than a
  * handover landing slightly off the grid - so the budget is tight.
  */
-const HEAD_BUDGET_SEC = 0.05;
+export const HEAD_BUDGET_SEC = 0.05;
 
 /** Length multipliers by how well the two keys sit together. Unknown must not be a penalty. */
 const LENGTH_SCALE: Record<KeyRelation, number> = {

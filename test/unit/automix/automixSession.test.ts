@@ -573,7 +573,7 @@ describe('automix session, transition styles', () => {
         expect(harness.chains.A.lowCutParam.events).toHaveLength(0);
     });
 
-    it('overlaps instead when a splice would eat the start of the next track', () => {
+    it('still joins a track that opens on its first sample, and takes almost nothing from it', () => {
         const harness = createHarness();
         harness.arm({
             time: 99,
@@ -584,9 +584,15 @@ describe('automix session, transition styles', () => {
 
         harness.session.handleActiveDeckPlaying('local:next-song');
 
-        // No leading silence to wait in, so the join would have to cut into the first notes.
-        expect(lastCurve(harness.chains.A.fadeNode)?.duration).toBeGreaterThan(1);
-        expect(finalTarget(harness.chains.A.lowCutParam)).toBe(250);
+        // No leading silence at all, and the join happens anyway - because the room asked for is
+        // now only as long as the wait can be paid for, so the incoming deck is released to start
+        // at the splice rather than a second and a half before it. All the wait costs here is the
+        // 50ms of grace shapeBlend allows on top of a track's own silence.
+        const splice = lastCurve(harness.chains.A.fadeNode);
+        expect(splice?.duration).toBeCloseTo(0.006, 4);
+        expect(splice?.time).toBeLessThanOrEqual(0.05);
+        // A join is not an overlap: the two tracks are never both audible, so nothing is filtered.
+        expect(harness.chains.A.lowCutParam.events).toHaveLength(0);
     });
 
     it('cuts rather than fades into a track that starts at full level', () => {
