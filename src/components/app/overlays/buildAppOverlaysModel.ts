@@ -30,7 +30,6 @@ type BuildAppOverlaysModelParams = {
     handleSearchResultAddToQueue: (track: UnifiedSong) => void;
     handleSearchResultArtistOpen: SearchOverlayProps['onOpenArtist'];
     handleSearchResultAlbumOpen: SearchOverlayProps['onOpenAlbum'];
-    isDev: boolean;
     isDevDebugOverlayVisible: boolean;
     devDebugSnapshot: any;
     currentTime: MotionValue<number>;
@@ -71,7 +70,6 @@ export const buildAppOverlaysModel = ({
     handleSearchResultAddToQueue,
     handleSearchResultArtistOpen,
     handleSearchResultAlbumOpen,
-    isDev,
     isDevDebugOverlayVisible,
     devDebugSnapshot,
     currentTime,
@@ -111,7 +109,7 @@ export const buildAppOverlaysModel = ({
             onOpenAlbum: handleSearchResultAlbumOpen,
         }
         : null,
-    debugOverlay: isDev && currentView === 'player' && isDevDebugOverlayVisible
+    debugOverlay: currentView === 'player' && isDevDebugOverlayVisible && devDebugSnapshot
         ? {
             snapshot: devDebugSnapshot,
             currentTime,

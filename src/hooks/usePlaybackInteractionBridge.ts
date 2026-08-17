@@ -31,7 +31,6 @@ export const resolvePlayerEscapeAction = ({
 };
 
 type UsePlaybackInteractionBridgeParams = {
-    isDev: boolean;
     currentSong: SongResult | null;
     currentView: string;
     audioSrc: string | null;
@@ -66,7 +65,6 @@ type UsePlaybackInteractionBridgeParams = {
 
 // Bridges playback-related keyboard and click interactions without leaving them inline in App.tsx.
 export function usePlaybackInteractionBridge({
-    isDev,
     currentSong,
     currentView,
     audioSrc,
@@ -167,7 +165,10 @@ export function usePlaybackInteractionBridge({
                 document.querySelector('[data-folia-keyboard-window="true"]')
             );
 
-            if (isDev && event.altKey && event.shiftKey && event.code === 'KeyD') {
+            // Not gated on dev: the packaged desktop build has no DevTools to fall back on - the
+            // window is frameless, so there is no menu to toggle them from and they only open
+            // automatically under ELECTRON_DEV. This chord is the only console it has.
+            if (event.altKey && event.shiftKey && event.code === 'KeyD') {
                 event.preventDefault();
                 setIsDevDebugOverlayVisible(prev => !prev);
                 return;
@@ -290,7 +291,6 @@ export function usePlaybackInteractionBridge({
         duration,
         handleNextTrack,
         handlePrevTrack,
-        isDev,
         isNowPlayingStageActive,
         isPanelOpen,
         navigateBackFromPlayer,

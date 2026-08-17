@@ -1,7 +1,14 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { MotionValue, useMotionValueEvent } from 'framer-motion';
 import type { ThemeMode, DualTheme, LyricData, LyricAlternateText, LyricBackgroundVocal, LyricSyllable } from '../types';
 import { sonnetDebugState, type SonnetDebugShotInfo } from './visualizer/sonnet/sonnetDebug';
+import {
+    clearConsoleLog,
+    formatConsoleLog,
+    getConsoleLogEntries,
+    subscribeToConsoleLog,
+    type ConsoleLevel,
+} from '../utils/consoleLogBuffer';
 
 export interface DevDebugLineSnapshot {
     text: string | null;
@@ -595,13 +602,81 @@ const TabButton: React.FC<{
     );
 };
 
+/**
+ * Everything the app has logged this session, with a way to get it back out.
+ *
+ * Copy exists because reading a log is rarely the point - handing it to someone else is, and on the
+ * desktop build there is no console to select text in. Clear exists so a problem can be reproduced
+ * against an empty buffer instead of being hunted for inside a session's worth of history.
+ */
+const ConsoleDebugPanel: React.FC<{ isDaylight: boolean; panelClass: string; }> = ({ isDaylight, panelClass }) => {
+    const entries = useSyncExternalStore(subscribeToConsoleLog, getConsoleLogEntries);
+    const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
+
+    const handleCopy = async () => {
+        try {
+            await navigator.clipboard.writeText(formatConsoleLog());
+            setCopyState('copied');
+        } catch {
+            setCopyState('failed');
+        }
+        window.setTimeout(() => setCopyState('idle'), 1500);
+    };
+
+    const levelClass = (level: ConsoleLevel) => {
+        if (level === 'error') return isDaylight ? 'text-rose-700' : 'text-rose-300';
+        if (level === 'warn') return isDaylight ? 'text-amber-700' : 'text-amber-300';
+        return 'opacity-75';
+    };
+
+    return (
+        <section className={panelClass}>
+            <div className="flex items-center justify-between gap-2 px-3 pt-3">
+                <div className="text-[10px] uppercase tracking-[0.16em] opacity-60">
+                    Console ({entries.length})
+                </div>
+                <div className="flex gap-2">
+                    <TabButton
+                        label={copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Failed' : 'Copy'}
+                        isActive={false}
+                        onClick={() => { void handleCopy(); }}
+                        isDaylight={isDaylight}
+                    />
+                    <TabButton label="Clear" isActive={false} onClick={clearConsoleLog} isDaylight={isDaylight} />
+                </div>
+            </div>
+            {entries.length === 0 ? (
+                <div className="px-3 pb-3 pt-2 text-[11px] opacity-70">
+                    Nothing logged yet.
+                </div>
+            ) : (
+                // column-reverse over a reversed list, so the newest line is pinned to the bottom by
+                // the scroll container itself. Scrolling up to read then stays put as lines arrive,
+                // which no amount of scrollTop bookkeeping manages reliably.
+                <div className="mt-2 flex max-h-[26rem] flex-col-reverse overflow-y-auto overscroll-contain px-1 pb-2">
+                    {entries.slice().reverse().map(entry => (
+                        <div key={entry.id} className={`flex gap-2 px-2 py-[3px] text-[10px] leading-4 ${levelClass(entry.level)}`}>
+                            <span className="shrink-0 tabular-nums opacity-50">
+                                {new Date(entry.at).toLocaleTimeString()}
+                            </span>
+                            <span className="whitespace-pre-wrap break-all">{entry.text}</span>
+                        </div>
+                    ))}
+                </div>
+            )}
+        </section>
+    );
+};
+
 const DevDebugOverlay: React.FC<DevDebugOverlayProps> = ({
     snapshot,
     currentTime,
     lyricCurrentTime,
     isDaylight,
 }) => {
-    const [activeTab, setActiveTab] = useState<'memory' | 'playback' | 'lyrics' | 'theme' | 'sonnet'>('memory');
+    // Console first: on the desktop build this overlay is the only console there is, so reading it
+    // is what the shortcut is pressed for.
+    const [activeTab, setActiveTab] = useState<'console' | 'memory' | 'playback' | 'lyrics' | 'theme' | 'sonnet'>('console');
     const [liveCurrentTime, setLiveCurrentTime] = useState(() => currentTime.get());
     const [liveLyricCurrentTime, setLiveLyricCurrentTime] = useState(() => lyricCurrentTime?.get() ?? currentTime.get());
     const [memoryHistory, setMemoryHistory] = useState<MemorySample[]>([]);
@@ -743,12 +818,19 @@ const DevDebugOverlay: React.FC<DevDebugOverlayProps> = ({
                 </div>
 
                 <div className="mt-3 flex flex-wrap gap-2">
+                    <TabButton label="Console" isActive={activeTab === 'console'} onClick={() => setActiveTab('console')} isDaylight={isDaylight} />
                     <TabButton label="Memory" isActive={activeTab === 'memory'} onClick={() => setActiveTab('memory')} isDaylight={isDaylight} />
                     <TabButton label="Playback" isActive={activeTab === 'playback'} onClick={() => setActiveTab('playback')} isDaylight={isDaylight} />
                     <TabButton label="Lyrics" isActive={activeTab === 'lyrics'} onClick={() => setActiveTab('lyrics')} isDaylight={isDaylight} />
                     <TabButton label="Theme" isActive={activeTab === 'theme'} onClick={() => setActiveTab('theme')} isDaylight={isDaylight} />
                     <TabButton label="Sonnet" isActive={activeTab === 'sonnet'} onClick={() => setActiveTab('sonnet')} isDaylight={isDaylight} />
                 </div>
+
+                {activeTab === 'console' && (
+                    <div className="mt-3 grid gap-3">
+                        <ConsoleDebugPanel isDaylight={isDaylight} panelClass={panelClass} />
+                    </div>
+                )}
 
                 {activeTab === 'memory' && (
                     <div className="mt-3 grid gap-3">

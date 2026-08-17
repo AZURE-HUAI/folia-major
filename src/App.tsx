@@ -1658,7 +1658,6 @@ export default function App() {
         handleContainerClick,
         handleFmTrash,
     } = usePlaybackInteractionBridge({
-        isDev,
         currentSong,
         currentView,
         audioSrc,
@@ -2172,8 +2171,12 @@ export default function App() {
         return BASE_DUAL_THEME;
     }, [bgMode, customTheme, aiTheme]);
 
+    // Built while the overlay is open even outside dev, because the packaged desktop build has no
+    // console of its own and this overlay is the only way to read one. Still gated rather than
+    // unconditional: nothing here is worth computing on every render of a session nobody is
+    // debugging.
     const devDebugSnapshot = useMemo(() => (
-        isDev
+        isDev || isDevDebugOverlayVisible
             ? buildDebugSnapshot({
                 shortcutLabel: DEV_DEBUG_SHORTCUT_LABEL,
                 currentSong,
@@ -2198,6 +2201,7 @@ export default function App() {
         currentTime,
         currentView,
         isDev,
+        isDevDebugOverlayVisible,
         nowPlayingDebugSnapshot,
         playerState,
         lyrics,
@@ -2831,7 +2835,6 @@ export default function App() {
         handleSearchResultAddToQueue,
         handleSearchResultArtistOpen,
         handleSearchResultAlbumOpen,
-        isDev,
         isDevDebugOverlayVisible,
         devDebugSnapshot,
         currentTime,
@@ -2875,7 +2878,6 @@ export default function App() {
         handleSearchOverlaySubmit,
         handleSearchResultPlay,
         isDaylight,
-        isDev,
         isDevDebugOverlayVisible,
         isNowPlayingControlDisabled,
         isSearchOpen,
