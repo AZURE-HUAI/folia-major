@@ -202,6 +202,12 @@ const prefetchSong = async (
             if (cachedLyrics) {
                 console.log(`[Prefetch] Lyrics in IndexedDB for: ${song.name}`);
                 data.lyrics = cachedLyrics;
+                // The same stamp the fetched path leaves below. Without it a track whose lyrics came
+                // from the cache can never satisfy the "already cached" test at the top of this
+                // function, so every prefetch pass re-enters the whole thing for it.
+                data.lyricPreferenceSource = currentSettings.autoUseBestLyric
+                    ? currentSettings.preferredAlternativeLyricSource
+                    : null;
             } else if (!signal.aborted) {
                 const lyricResult = await omni.getLyrics(song, { userId });
                 const processed = {
