@@ -3,7 +3,7 @@ import { saveToCache } from './db';
 import { PrefetchedSongData, isUrlValid, updatePrefetchedAudioUrl } from './prefetchService';
 import { isPureMusicLyricText } from '../utils/lyrics/pureMusic';
 import { migrateLyricDataRenderHints } from '../utils/lyrics/renderHints';
-import { loadOnlineLyricsState, resolveOnlineLyrics, saveOnlineLyricsState } from '../utils/onlineLyricsState';
+import { loadOnlineLyricsState, markOnlineLyricsPureMusic, resolveOnlineLyrics, saveOnlineLyricsState } from '../utils/onlineLyricsState';
 import { useSettingsUiStore } from '../stores/useSettingsUiStore';
 import { autoMatchBestLyric } from '../utils/lyrics/autoMatchBestLyric';
 import { createSafeObjectUrl } from '../utils/blobGuards';
@@ -212,9 +212,16 @@ export async function loadOnlineSongLyrics(
                 resolvedLyrics = bestMatch.lyrics;
                 finalState = overrideState;
                 onStateChange?.(overrideState);
-            } else if (bestMatch && 'isPureMusic' in bestMatch) {
+            } else if (bestMatch?.isPureMusic) {
+                // Checked against `true`, not with `in`: a MATCH object also carries
+                // `isPureMusic: false`, so `'isPureMusic' in bestMatch` was true for it too - and
+                // a best match from the track's own provider (which fails the branch above) then
+                // landed here and had its perfectly good lyrics thrown away as instrumental.
+                const pureMusic = markOnlineLyricsPureMusic(onlineLyricsState);
+                await saveOnlineLyricsState(song, pureMusic);
                 resolvedLyrics = null;
-                onPureMusicChange?.(true);
+                finalState = pureMusic;
+                onStateChange?.(pureMusic);
             }
         } catch (error) {
             console.warn('[OnlinePlayback] Failed to auto-match best lyric:', error);

@@ -10,7 +10,7 @@ import { migrateLyricDataRenderHints } from '../utils/lyrics/renderHints';
 import { isPureMusicLyricText } from '../utils/lyrics/pureMusic';
 import { useSettingsUiStore } from '../stores/useSettingsUiStore';
 import { autoMatchBestLyric } from '../utils/lyrics/autoMatchBestLyric';
-import { loadOnlineLyricsState, resolveOnlineLyrics, saveOnlineLyricsState } from '../utils/onlineLyricsState';
+import { loadOnlineLyricsState, markOnlineLyricsPureMusic, resolveOnlineLyrics, saveOnlineLyricsState } from '../utils/onlineLyricsState';
 import type { AudioQualityPreference, MediaId } from '../types/onlineMusic';
 import { getPlaybackSourceRef } from '../utils/appPlaybackGuards';
 import { omni } from './onlineMusic/omni';
@@ -263,7 +263,11 @@ const prefetchSong = async (
                             };
                             await saveOnlineLyricsState(song, overrideState);
                             finalLyrics = bestMatch.lyrics;
-                        } else if (bestMatch && 'isPureMusic' in bestMatch) {
+                        } else if (bestMatch?.isPureMusic) {
+                            // Same discriminator fix as in onlinePlayback: a MATCH object carries
+                            // `isPureMusic: false`, so the old `'isPureMusic' in bestMatch` also
+                            // caught a best match from the track's own provider and discarded it.
+                            await saveOnlineLyricsState(song, markOnlineLyricsPureMusic(onlineLyricsState));
                             finalLyrics = null;
                             if (data.lyricRaw) data.lyricRaw.isPureMusic = true;
                         }
