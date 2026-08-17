@@ -87,6 +87,14 @@ type UseAutomixDecksParams = {
     audioContextRef: MutableRefObject<AudioContext | null>;
     audioSrc: string | null;
     currentSong: SongResult | null;
+    /**
+     * Playback key of the track the app has committed to, updated synchronously by playSong.
+     *
+     * Separate from `currentSong` on purpose. See handleActiveDeckPlaying: the state and the ref
+     * disagree for exactly as long as it takes React to commit, and the deck can start playing
+     * inside that window.
+     */
+    currentSongKeyRef: MutableRefObject<string | number | null>;
     lyrics: LyricData | null;
     duration: number;
     playQueue: SongResult[];
@@ -104,6 +112,7 @@ export function useAutomixDecks({
     audioContextRef,
     audioSrc,
     currentSong,
+    currentSongKeyRef,
     lyrics,
     duration,
     playQueue,
@@ -142,10 +151,17 @@ export function useAutomixDecks({
             // any silence this guards against.
             if (playerStateRef.current === PlayerState.PAUSED) return;
 
-            const element = elementsRef.current[sessionRef.current!.getActiveDeck()];
+            const deck = sessionRef.current!.getActiveDeck();
+            const element = elementsRef.current[deck];
             if (element?.src) {
                 if (!element.paused) return;
-                console.log('[Automix] the deck holding the next track was never started, starting it');
+                // currentTime tells the two failures apart, and they have different causes: zero
+                // means nothing ever pressed play on this deck, non-zero means it DID play and
+                // something paused it again. Without it this line just says "it was silent".
+                console.log(
+                    '[Automix] the deck holding the next track was never started, starting it',
+                    { deck, at: element.currentTime, readyState: element.readyState, ended: element.ended },
+                );
                 void element.play().catch(() => { });
                 return;
             }
@@ -282,9 +298,23 @@ export function useAutomixDecks({
         }
     }, [audioQuality, audioSrc, currentSong, duration, isEnabled, loopMode, lyrics, playQueue, report, session]);
 
+    /**
+     * Reads the ref rather than the `currentSong` prop, and that is the whole correctness of it.
+     *
+     * The session checks this key against the one it planned for, to catch a queue that moved
+     * after planning - a manual skip, an auto-skip past an unavailable track. But `currentSong` is
+     * React state: playSong commits to the next track and only later does React render it. The
+     * incoming deck can fire `playing` inside that window - it does whenever the next track was
+     * already buffered - and then the state still names the PREVIOUS song. The session reads that
+     * as "the queue moved" and drops a blend nobody moved anything under.
+     *
+     * playSong sets the ref synchronously, at the moment it commits to the track, so the ref and
+     * the deck can never disagree the way the state and the deck can.
+     */
     const handleActiveDeckPlaying = useCallback(() => {
-        session.handleActiveDeckPlaying(currentSong ? getPlaybackSongKey(currentSong) : null);
-    }, [currentSong, session]);
+        const key = currentSongKeyRef.current;
+        session.handleActiveDeckPlaying(typeof key === 'string' ? key : null);
+    }, [currentSongKeyRef, session]);
 
     const handleTailEnded = useCallback(() => session.handleTailEnded(), [session]);
 

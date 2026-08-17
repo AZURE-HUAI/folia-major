@@ -1409,6 +1409,7 @@ export default function App() {
         audioContextRef,
         audioSrc,
         currentSong,
+        currentSongKeyRef: currentSongRef,
         lyrics,
         duration,
         playQueue,

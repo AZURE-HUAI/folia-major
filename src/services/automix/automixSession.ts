@@ -282,7 +282,13 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         phase = 'fading';
 
         if (refusal) {
-            console.log(`[Automix] dropping blend, ${refusal}`);
+            // Both keys, always: "the queue moved" is a claim about two strings, and when it is
+            // wrong it is wrong silently - a perfectly good blend becomes a hard cut and the log
+            // reads exactly the same as a real skip.
+            console.log(
+                `[Automix] dropping blend, ${refusal}`
+                + (currentKey === plannedNextKey ? '' : ` (deck has "${currentKey}", planned "${plannedNextKey}")`),
+            );
             rampGain(context, tailChain.fade, 0, CUT_SECONDS);
             rampGain(context, activeChain.fade, 1, CUT_SECONDS);
             cleanupTimer = setTimeout(
