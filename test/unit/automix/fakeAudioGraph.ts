@@ -122,7 +122,6 @@ export const createFakeChain = (readings: FakeAnalyserReadings = {}): FakeDeckCh
             delay: { delayTime: createFakeGainNode().gain } as unknown as DelayNode,
             feedback: createFakeGainNode() as unknown as GainNode,
         },
-        bend: null,
         analyser: {
             tick: () => { },
             loudnessDb: () => readings.loudnessDb ?? null,

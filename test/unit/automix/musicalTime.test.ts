@@ -3,6 +3,7 @@ import {
     alignEntry,
     barGrid,
     quantiseToMusic,
+    settledBpm,
     snapToGrid,
     tempoMatch,
     BEATS_PER_PHRASE,
@@ -11,6 +12,33 @@ import {
 // test/unit/automix/musicalTime.test.ts
 // The units music is counted in, and the one relationship between two tracks that a gain curve
 // cannot stand in for.
+
+describe('settledBpm', () => {
+    it('prefers the tail, which is the half a transition is laid against', () => {
+        expect(settledBpm(120, 118)).toBe(118);
+    });
+
+    it('answers null when the two readings of one track disagree', () => {
+        // Not "take the later one". Two measurements of one quantity that disagree by a third mean
+        // the quantity was not measured - no song slows by a third into its last chorus, that is a
+        // beat tracker on the wrong harmonic. Both of these are verbatim from a real log.
+        expect(settledBpm(92, 123)).toBe(null);
+        expect(settledBpm(136, 86)).toBe(null);
+        expect(settledBpm(117, 136)).toBe(null);
+    });
+
+    it('still folds the octave, because that disagreement is not one', () => {
+        // 88 against 176 is the same pulse counted twice, and the tail reading is usable.
+        expect(settledBpm(88, 176)).toBe(176);
+    });
+
+    it('falls back rather than inventing, when only one end was measured', () => {
+        expect(settledBpm(120, null)).toBe(120);
+        expect(settledBpm(null, 120)).toBe(120);
+        expect(settledBpm(null, null)).toBe(null);
+        expect(settledBpm(0, 0)).toBe(null);
+    });
+});
 
 describe('tempoMatch', () => {
     it('treats half time and double time as the same tempo', () => {
@@ -23,20 +51,29 @@ describe('tempoMatch', () => {
 
     it('grades a difference by what could honestly be done about it', () => {
         expect(tempoMatch(120, 120.5).relation).toBe('locked');
-        // Under a semitone of pitch: a rate change alone is enough.
         expect(tempoMatch(120, 125).relation).toBe('near');
-        // Past a semitone, so the pitch has to be put back.
-        expect(tempoMatch(120, 138).relation).toBe('stretchable');
-        // Past what any stretch should be asked to hide.
-        expect(tempoMatch(90, 128).relation).toBe('far');
+        expect(tempoMatch(120, 128).relation).toBe('stretchable');
+        // Past a turntable's pitch fader, which is where a record stops sounding like itself.
+        expect(tempoMatch(120, 138).relation).toBe('far');
+    });
+
+    it('refuses the ratios a mis-measured tempo produces', () => {
+        // The reason the limit is 8% and not 25%. A beat tracker that locks onto the wrong harmonic
+        // returns 5:4, 4:3 or 3:2 of the true period, so those exact ratios are far more often a
+        // measurement error than a real pair of tempos - and bending to meet one is maximum damage
+        // for no benefit. Every one of these appeared in a real log.
+        expect(tempoMatch(123, 92).relation).toBe('far');   // 3:4, logged as "92 BPM (123 at the end)"
+        expect(tempoMatch(136, 102).relation).toBe('far');  // 3:4 again
+        expect(tempoMatch(117, 89).relation).toBe('far');   // 4:3
+        expect(tempoMatch(123, 92).stretch).toBe(1);
     });
 
     it('bends the outgoing track onto the incoming one, never the other way', () => {
         // The departing track has seconds left and no future to be wrong in; the arriving one is
         // about to be listened to for three minutes.
-        const match = tempoMatch(100, 110);
-        expect(match.stretch).toBeCloseTo(1.1, 6);
-        expect(match.ratio).toBeCloseTo(1.1, 6);
+        const match = tempoMatch(100, 105);
+        expect(match.stretch).toBeCloseTo(1.05, 6);
+        expect(match.ratio).toBeCloseTo(1.05, 6);
     });
 
     it('does nothing at all when the two are too far apart', () => {

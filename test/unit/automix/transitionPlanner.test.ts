@@ -136,7 +136,7 @@ describe('planTransition', () => {
     it('cuts only when the track is too short to fade across at all', () => {
         const plan = planTransition(track(2, null), track(100, null));
         expect(plan.kind).toBe('hardCut');
-        expect(plan.reason).toContain('too short');
+        expect(plan.reason).toContain('no room to fade');
     });
 
     it('measures the default blend in beats once a tempo is known', () => {

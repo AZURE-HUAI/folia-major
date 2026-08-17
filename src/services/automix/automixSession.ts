@@ -9,9 +9,9 @@ import {
     type AutomixDeckChain,
 } from './crossfadeGraph';
 import { createDeckClock, type DeckClock } from './deckClock';
-import { barGrid, type Grid } from './musicalTime';
+import { barGrid, settledBpm, type Grid } from './musicalTime';
 import { planBlendShape, trimForBalance, BEATS_PER_BAR } from './signalAnalysis';
-import { applyTempoBend, ensureTempoBendModule, insertTempoBend, resetTempoBend } from './tempoBend';
+import { applyTempoBend, resetTempoBend } from './tempoBend';
 import { shapeBlend } from './transitionChooser';
 import {
     AUTOMIX_MIN_OVERLAP_SEC,
@@ -179,29 +179,6 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
     };
 
     /**
-     * Splices the pitch corrector into a deck, once, while that deck is silent.
-     *
-     * Never while it is sounding: the node carries a fixed twenty milliseconds of latency, and
-     * putting it into a live chain repeats exactly that much audio. The two moments a deck is
-     * reliably silent are while it is armed and after it has been let go of, and between them every
-     * deck is covered inside one transition.
-     */
-    const ensureBend = (deck: AutomixDeckId) => {
-        const context = ports.getContext();
-        const chain = ports.getChain(deck);
-        if (!context || !chain || chain.bend) return;
-        void ensureTempoBendModule(context).then(ready => {
-            const target = ports.getChain(deck);
-            const element = ports.getElement(deck);
-            if (!ready || !target || target.bend) return;
-            // The module usually resolves in a few milliseconds, but "usually" is not a guarantee,
-            // and by the time it does the deck may have started. Then it waits for the next one.
-            if (element && !element.paused && target.fade.gain.value > 0.01) return;
-            target.bend = insertTempoBend(context, target.trim, target.tone.low);
-        });
-    };
-
-    /**
      * Seconds of WALL time from a media position to the next line of that track's own grid.
      *
      * Both halves of the conversion in one place: the grid is in the track's own seconds, the
@@ -327,16 +304,12 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
                 rampGain(context, chain.trim, 1, 0.03);
                 resetTone(context, chain.tone);
                 resetThrow(context, chain.throw);
-                resetTempoBend(ports.getElement(deck), chain.bend, context.currentTime);
+                resetTempoBend(ports.getElement(deck));
             });
         }
         // The tail deck is about to be paused or handed a different track; either way the line
         // fitted to its position describes a track nobody is listening to any more.
         clocks[tailDeck].reset();
-        // The tail deck has just been let go of, so this is the one moment it is reliably silent -
-        // the only moment the pitch corrector can be put into its chain without repeating its own
-        // latency out loud. The other deck gets the same treatment while it is armed.
-        ensureBend(tailDeck);
 
         phase = 'idle';
         plan = null;
@@ -384,8 +357,6 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         // Silence the incoming deck before it is allowed to make a sound, so the blend owns its
         // first sample instead of the track punching in at full level.
         rampGain(context, incomingChain.fade, 0);
-        // Silent and loaded is exactly the state the pitch corrector has to be added in.
-        ensureBend(incoming);
         seekTo(incomingElement, nextPlan.inStart);
         // Its old readings describe wherever this deck was left after the last transition.
         clocks[incoming].reset();
@@ -527,16 +498,17 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         // two swap places, and its beat grid decides where that swap lands.
         const tempo = tailChain.analyser.tempo();
         const outgoingDb = tailChain.analyser.loudnessDb();
-        // The tail's own tempo where it was measured separately - a track that slows into its last
-        // chorus has two, and this is the one the transition is laid against.
-        const outgoingBpm = plannedFrom?.outroBpm ?? plannedFrom?.bpm ?? null;
+        // The tail's own tempo where the track's two readings of it agree - a track that slows into
+        // its last chorus has two tempos, and one whose readings are a third apart has none. Null
+        // falls through to the live tap, which is the only thing that actually heard the tail.
+        const outgoingBpm = settledBpm(plannedFrom?.bpm, plannedFrom?.outroBpm);
         const periodSec = outgoingBpm ? 60 / outgoingBpm : tempo?.periodSec ?? null;
 
         // The rate is set before the wait is measured, because the wait is spent AT that rate.
         const stretch = plan.style === 'beatCut' || overlap < AUTOMIX_MIN_OVERLAP_SEC
             ? 1
             : plan.stretch;
-        const applied = applyTempoBend(tailElement, tailChain.bend, stretch, now);
+        const applied = applyTempoBend(tailElement, stretch);
         const alignHold = Math.max(0, (startMedia - position) / (tailRate * applied));
 
         // Where the beats are, from the file rather than from the last few seconds of it.
@@ -592,7 +564,7 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             + `${shape.shapeBands ? ', three bands' : ''}`
             + `${shape.sweepOut ? ', swept out' : ''}`
             + `${plan.echoThrow ? ', thrown' : ''}`
-            + `${applied === 1 ? '' : `, outgoing at ${applied.toFixed(3)}x${tailChain.bend ? ' in tune' : ''}`}`
+            + `${applied === 1 ? '' : `, outgoing at ${applied.toFixed(3)}x`}`
             + `${fade.snappedToBeat && shape.style === plan.style ? ` on a beat (${periodSec ? Math.round(60 / periodSec) : '?'} BPM)` : ''}`
             + `${outgoingDb === null ? '' : `, outgoing ${outgoingDb.toFixed(1)} LUFS`}`
             + `${tailClock.fit() === null ? ', position estimated' : ''}`,

@@ -144,6 +144,20 @@ describe('chooseTransitionStyle', () => {
         const fits = chooseTransitionStyle({ from: inKey(0, true), to: inKey(7, true) });
         expect(clash.lengthScale).toBeLessThan(fits.lengthScale);
     });
+
+    it('never lets penalties multiply a blend out of existence', () => {
+        // Every penalty at once: keys a tritone apart, tempos past what a fader can pull, and an
+        // incoming track that opens at full level. Each says "shorter" and each is right; their
+        // product said 0.12, which is not shorter but a hard cut nobody chose. The floor is one bar
+        // out of a phrase - the shortest span that still reads as a join.
+        const worst = chooseTransitionStyle({
+            from: profile({ key: 0, major: true, keyConfidence: 0.8, bpm: 90, outroBpm: 90 }),
+            to: profile({ key: 6, major: true, keyConfidence: 0.8, bpm: 150, startsHot: true, leadIn: 0.1 }),
+        });
+        expect(worst.relation).toBe('clashing');
+        expect(worst.tempo.relation).toBe('far');
+        expect(worst.lengthScale).toBeGreaterThanOrEqual(0.25);
+    });
 });
 
 describe('shapeBlend', () => {

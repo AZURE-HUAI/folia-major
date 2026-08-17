@@ -7,7 +7,6 @@ import {
     TONE_EDGE_HZ,
     TONE_MID_HZ,
 } from './signalAnalysis';
-import type { TempoBendHandle } from './tempoBend';
 
 // src/services/automix/crossfadeGraph.ts
 // The Web Audio half of automix: two identical deck chains feeding one mix point, and the ramp
@@ -42,16 +41,6 @@ export interface AutomixDeckChain {
     fade: GainNode;
     /** The echo throw. Silent unless a transition asks for it. */
     throw: AutomixThrow;
-    /**
-     * Pitch correction for a deck running at a different rate. Null until it has been spliced in.
-     *
-     * Mutable, and filled in later rather than at connect time, because registering the worklet is
-     * asynchronous and inserting a node adds its latency at the moment of insertion - which is a
-     * repeated twenty milliseconds if the deck is sounding. So it goes in while a deck is silent,
-     * which every deck is twice per transition. Until then the deck simply has no tempo matching,
-     * which is a smaller transition rather than a broken one.
-     */
-    bend: TempoBendHandle | null;
     /** Measures this deck ahead of the fade, so it reads the track and not the blend. */
     analyser: DeckAnalyser;
 }
@@ -144,7 +133,6 @@ export const connectAutomixDeck = (
         tone,
         fade,
         throw: { send, delay, feedback },
-        bend: null,
         analyser: createDeckAnalyser(context, replayGain, output),
     };
 };

@@ -23,19 +23,31 @@ export type TempoRelation = 'locked' | 'near' | 'stretchable' | 'far' | 'unknown
 /** Inside this the two tempos are the same number measured twice. */
 const LOCKED_DEVIATION = 0.015;
 /**
- * A semitone is 5.946%. Under it a raw playbackRate change shifts pitch by less than the smallest
- * interval Western music uses, which on a track that is on its way out nobody identifies as wrong.
+ * Small enough that the stretch is doing no work worth hearing about, either way.
+ *
+ * A semitone is 5.946%, and this used to be that number on the grounds that under a semitone the
+ * pitch error is inaudible. Pitch is no longer moving at all - the element preserves it - so what
+ * the boundary now separates is how long the pair may be held together, not whether a correction is
+ * needed.
  */
 export const RAW_RATE_LIMIT = 0.0594;
 /**
- * Past this the correction is worse than the problem.
+ * Past this the two tracks are not at nearly the same tempo, and forcing them makes it worse.
  *
- * A quarter is roughly a major third of pitch shift, or - once pitch is corrected - a quarter of
- * every window in the stretcher being invented rather than played. Two tracks this far apart do not
- * want to be forced onto one grid; they want a shorter overlap or no overlap at all, which is what
- * `far` routes to.
+ * Eight percent is where a turntable's pitch fader stops, and that is not an arbitrary piece of
+ * hardware trivia: it is the widest a record can be pulled before the room hears it as a different
+ * record rather than the same one, arrived at over decades of people doing exactly this in front of
+ * an audience. A stretcher moves the artefact from pitch to texture but does not raise that limit.
+ *
+ * The number this replaces was 0.25, and it was wrong twice. Loud: at a quarter, a fifth of every
+ * window a stretcher emits is invented rather than played. Quiet, and worse: 0.25 is 5:4 and 0.33
+ * is 4:3, which are exactly the ratios an autocorrelation returns when it locks onto the wrong
+ * harmonic of the beat. So the widest bends were not the pairs that most needed matching - they
+ * were disproportionately the pairs where one of the two tempos had been measured wrong, and the
+ * bend was maximum damage for no benefit at all. Below 8% no harmonic error can reach, so what is
+ * left in the band is real.
  */
-const STRETCH_LIMIT = 0.25;
+const STRETCH_LIMIT = 0.08;
 
 export interface TempoMatch {
     relation: TempoRelation;
@@ -81,6 +93,35 @@ export const tempoMatch = (
     if (deviation <= RAW_RATE_LIMIT) return { relation: 'near', stretch: ratio, ratio };
     if (deviation <= STRETCH_LIMIT) return { relation: 'stretchable', stretch: ratio, ratio };
     return { relation: 'far', stretch: 1, ratio };
+};
+
+/**
+ * The tempo of a track's END, or null when its two measurements do not agree about it.
+ *
+ * A track is measured twice - once whole, once over its last half minute - and the second is
+ * preferred, because a song that slows into its final chorus has two tempos and only one of them is
+ * the one a transition is laid against. That preference is right and it was being applied without
+ * the check that makes it safe.
+ *
+ * Two measurements of one quantity that disagree do not mean the later one is correct. They mean
+ * the quantity was not measured. Real logs carry "92 BPM, 123 at the end" and "136 BPM, 86 at the
+ * end" - a third and a half apart, which no song does; those are the beat tracker locking onto a
+ * 3:2 or a 4:3 of the true period in one window and not the other. Taking the tail number on faith
+ * then bends a track by a third to meet a tempo that was never there.
+ *
+ * So: agree within a real tempo drift and the tail wins, as it should. Disagree past that and the
+ * answer is null - which routes to the live tap for a grid, and to no bend at all, both of which
+ * are what "we do not know this track's tempo" should do.
+ */
+export const settledBpm = (
+    whole: number | null | undefined,
+    outro: number | null | undefined,
+): number | null => {
+    const wholeOk = whole && whole > 0 ? whole : null;
+    const outroOk = outro && outro > 0 ? outro : null;
+    if (!outroOk) return wholeOk;
+    if (!wholeOk) return outroOk;
+    return Math.abs(foldRatio(outroOk / wholeOk) - 1) <= RAW_RATE_LIMIT ? outroOk : null;
 };
 
 /**

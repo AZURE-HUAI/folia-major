@@ -1,4 +1,4 @@
-import { tempoMatch, TEMPO_LENGTH_SCALE, type TempoMatch } from './musicalTime';
+import { settledBpm, tempoMatch, TEMPO_LENGTH_SCALE, type TempoMatch } from './musicalTime';
 import { toneTilt } from './signalAnalysis';
 import type { KeyEstimate, TrackProfile } from './trackProfile';
 
@@ -179,9 +179,11 @@ export const chooseTransitionStyle = (input: {
 }): StyleChoice => {
     const { from, to } = input;
     const relation = keyRelation(from, to);
-    // The tail's own tempo where it was measured. A track that slows into its last chorus has two
-    // tempos, and only one of them is the one a transition is laid against.
-    const tempo = tempoMatch(from?.outroBpm ?? from?.bpm, to?.bpm);
+    // The tail's own tempo where the two measurements of it agree. A track that slows into its last
+    // chorus has two tempos and only one of them is the one a transition is laid against; a track
+    // whose two readings are a third apart has no measured tempo at all, and `settledBpm` is the
+    // difference between those two cases. Null lands on `unknown`, which bends nothing.
+    const tempo = tempoMatch(settledBpm(from?.bpm, from?.outroBpm), to?.bpm);
     const tilt = toneTilt(from?.outroTone, to?.introTone);
 
     // How far apart the two ends sit in level, in either direction. Both directions want the same
@@ -195,8 +197,15 @@ export const chooseTransitionStyle = (input: {
         style,
         relation,
         tempo,
-        lengthScale: LENGTH_SCALE[relation] * STYLE_SCALE[style] * extraScale
-            * TEMPO_LENGTH_SCALE[tempo.relation] * (style === 'beatCut' ? 1 : energyScale),
+        // Floored, because these five numbers were each reasoned about ALONE and are applied
+        // together. Clashing keys say 0.4, tempos too far apart say 0.5, an incoming track at full
+        // level says 0.6 - each a defensible "make this shorter" - and multiplied they say 0.12,
+        // which is not shorter, it is a hard cut arrived at by arithmetic no one wrote down. That is
+        // the gapless mistake in a different costume: a heuristic may choose HOW two songs join and
+        // may not decide the feature does not apply. A quarter of a phrase is one bar, which is the
+        // shortest span that still reads as a join rather than as a stop.
+        lengthScale: Math.max(0.25, LENGTH_SCALE[relation] * STYLE_SCALE[style] * extraScale
+            * TEMPO_LENGTH_SCALE[tempo.relation] * (style === 'beatCut' ? 1 : energyScale)),
         // Nothing to match against on a cut: the two tracks are never both sounding.
         tiltDb: style === 'beatCut' || style === 'plainBlend' ? [0, 0] : tilt,
         // A track that stops at full level has an edge on it either way; a delay is what turns that

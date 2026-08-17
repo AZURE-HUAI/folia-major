@@ -360,9 +360,16 @@ export const planTransition = (
     // phrases, bars or beats rather than as the gap.
     const overlap = quantiseToMusic(Math.min(wanted, ceiling), beat, ceiling);
 
-    // Only a track of a few seconds can land here, and there is no fade to be had in it.
+    // Only a genuinely tiny ceiling can land here now that the scales are floored - and the message
+    // has to name WHICH ceiling, because the one it used to print was the track's own length, the
+    // single quantity that is almost never the reason. A 187 second track logged itself as "too
+    // short to fade across (186.73s)", which reads as a fact about the track and was a fact about
+    // three length penalties multiplying together.
     if (overlap < AUTOMIX_MIN_OVERLAP_SEC) {
-        return hardCut(`track too short to fade across (${round(end)}s)`);
+        const bound = usesVocalFree && vocalFree !== null && vocalFree <= end / 4
+            ? `only ${round(vocalFree)}s before the next track sings`
+            : `a ${round(end)}s track leaves only ${round(end / 4)}s to fade across`;
+        return hardCut(`no room to fade - ${bound}`);
     }
 
     // Each end fails for its own reason and they want telling apart: the outgoing side can only
