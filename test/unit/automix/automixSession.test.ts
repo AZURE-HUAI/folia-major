@@ -309,8 +309,8 @@ describe('automix session', () => {
         harness.session.handleActiveDeckPlaying('local:next-song');
 
         // Beats every half second from 0.1s in. At -20dBFS the handover sits at 42.5% of the
-        // blend, so the length moves until that lands on the beat at 2.1s.
-        expect(lastCurve(harness.chains.A.fadeNode)?.duration).toBeCloseTo(2.1 / 0.425, 5);
+        // blend, so the length moves until that lands on the beat at 1.6s.
+        expect(lastCurve(harness.chains.A.fadeNode)?.duration).toBeCloseTo(1.6 / 0.425, 5);
     });
 
     it('drops the blend when the queue moved to a song it never measured', () => {

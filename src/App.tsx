@@ -3043,7 +3043,11 @@ export default function App() {
                 // Ordinarily the warm load happens seconds before the deck roles move and this is
                 // never reached; entering the last few seconds abruptly, by seeking, collapses the
                 // two into one pass and made this cry wolf.
-                if (automix.isTransitionAudible()) return;
+                // Nor with no current source to contradict: between songs audioSrc is briefly null
+                // while a deck is already loading the next one, and "differs from nothing" is not
+                // a drift. The state this watches for is the opposite one - a source we are on
+                // that some deck never picked up.
+                if (automix.isTransitionAudible() || !audioSrc) return;
                 if (automix.isActiveDeck(e.currentTarget) && e.currentTarget.getAttribute('src') !== audioSrc) {
                     console.error('[Audio] the active deck is loading something other than the current source', {
                         deck,

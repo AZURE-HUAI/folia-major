@@ -195,17 +195,23 @@ export const planTransition = (
     const vocalFree = tail !== null && intro !== null ? Math.min(tail, intro) : null;
     const usesVocalFree = vocalFree !== null && vocalFree >= AUTOMIX_MIN_OVERLAP_SEC;
 
-    const wanted = usesVocalFree
-        // The gap the lyrics prove is the better evidence, trimmed back to whole beats.
-        ? toWholeBeats(vocalFree, beat)
-        // Everything else is eight beats of the outgoing track, then scaled: longer when the two
-        // keys sit together or the tail wants riding, shorter when they clash. A clash is not
-        // removed, it is denied the time to be noticed.
-        : (beat === null ? AUTOMIX_DEFAULT_OVERLAP_SEC : beat * AUTOMIX_DEFAULT_OVERLAP_BEATS)
+    // Eight beats of the outgoing track, then scaled: longer when the two keys sit together or the
+    // tail wants riding, shorter when they clash. A clash is not removed, it is denied the time to
+    // be noticed.
+    const wanted = (beat === null ? AUTOMIX_DEFAULT_OVERLAP_SEC : beat * AUTOMIX_DEFAULT_OVERLAP_BEATS)
         * choice.lengthScale;
+    // The proven window is a CEILING on that length, never the length itself.
+    //
+    // It answers "where may a handover go", not "how long should one be", and spending all of it
+    // conflates the two: a track with a 26s outro into an 11s intro would take the whole ceiling,
+    // so every generously-spaced pair came out as an eight-second crossfade - twenty-three beats
+    // at 185 BPM - which is precisely the "it just fades" this file exists to answer. Tempo sets
+    // the length; the window can only shorten it, trimmed back to whole beats so a blend forced
+    // into a narrow gap still ends on a pulse.
+    const bounded = usesVocalFree ? Math.min(wanted, toWholeBeats(vocalFree, beat)) : wanted;
 
     // Quarter-length cap so a very short track is not half crossfade.
-    const overlap = Math.min(wanted, AUTOMIX_MAX_OVERLAP_SEC, from.duration / 4);
+    const overlap = Math.min(bounded, AUTOMIX_MAX_OVERLAP_SEC, from.duration / 4);
 
     // Only a track of a few seconds can land here, and there is no fade to be had in it.
     if (overlap < AUTOMIX_MIN_OVERLAP_SEC) {
@@ -225,9 +231,8 @@ export const planTransition = (
         : intro === null
             ? introMissing
             : `outro ${round(tail)}s, intro ${round(intro)}s`;
-    const length = usesVocalFree
-        ? 'vocal-free'
-        : beat === null ? 'default' : `${round(overlap / beat)} beats`;
+    const length = `${beat === null ? 'default' : `${round(overlap / beat)} beats`}`
+        + (bounded < wanted ? ', capped by the vocal-free window' : '');
     const key = choice.relation === 'unknown' ? '' : `, ${choice.relation} keys`;
     // Four of the five joins are decided on how the OUTGOING track ends, and a head-only profile
     // knows nothing about that - so they cannot be reached at all and every song change comes out

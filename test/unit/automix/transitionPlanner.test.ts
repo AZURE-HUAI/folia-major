@@ -38,9 +38,21 @@ describe('planTransition', () => {
         expect(plan.inStart).toBe(0);
     });
 
-    it('caps the overlap so a long outro does not swallow the next song', () => {
+    it('does not stretch a blend just because the gap is generous', () => {
+        // A 30s outro into a 30s intro is room, not an instruction. Spending it produced the
+        // eight-second crossfade that reads as "the app is just fading" - the length comes from
+        // the default, and the window is only ever allowed to shorten it.
         const plan = planTransition(track(100, [line(10, 70)]), track(100, null, 30));
-        expect(plan.overlap).toBe(AUTOMIX_MAX_OVERLAP_SEC);
+        expect(plan.overlap).toBe(AUTOMIX_DEFAULT_OVERLAP_SEC);
+        expect(plan.reason).not.toContain('capped by');
+    });
+
+    it('keeps a fast track to a phrase rather than the ceiling', () => {
+        // The bug as heard: 185 BPM, a 26s outro into an 11s intro, and the blend took the whole
+        // eight-second cap - twenty-three beats, long past where two songs still sound like two.
+        const plan = planTransition(track(200, [line(10, 173.66)]), track(200, null, 11), 185);
+        expect(plan.overlap).toBeCloseTo(8 * 60 / 185, 2);
+        expect(plan.overlap).toBeLessThan(AUTOMIX_MAX_OVERLAP_SEC);
     });
 
     it('still blends at the default length when the vocals leave no gap', () => {
@@ -73,7 +85,7 @@ describe('planTransition', () => {
     it('ignores blank interlude lines when locating the last sung moment', () => {
         // a trailing placeholder line must not read as singing, or the outro collapses to 5s
         const plan = planTransition(track(100, [line(10, 20), line(90, 95, '   ')]), track(100, null, 30));
-        expect(plan.overlap).toBe(AUTOMIX_MAX_OVERLAP_SEC);
+        expect(plan.reason).toContain('outro 80s');
     });
 
     it('does not read the parser\'s own interlude placeholder as singing', () => {
@@ -132,9 +144,11 @@ describe('planTransition', () => {
     });
 
     it('trims a proven vocal-free window back to whole beats', () => {
-        // The gap is 6s; at 95 BPM that is nine beats and a half, so the blend takes the nine.
-        const plan = planTransition(track(100, [line(10, 94)]), track(100, null, 6), 95);
-        expect(plan.overlap).toBeCloseTo(9 * 60 / 95, 2);
+        // A 3s gap is narrower than the eight beats wanted, so it binds - and at 95 BPM it is four
+        // beats and three quarters, so the blend takes the four rather than ending mid-pulse.
+        const plan = planTransition(track(100, [line(10, 97)]), track(100, null, 3), 95);
+        expect(plan.overlap).toBeCloseTo(4 * 60 / 95, 2);
+        expect(plan.reason).toContain('capped by the vocal-free window');
     });
 
     it('still caps a beat-derived length at the ceiling', () => {
@@ -152,8 +166,8 @@ describe('resolveOverlap', () => {
     const fadePlan = planTransition(track(100, [line(10, 94)]), track(100, null, 6));
 
     it('keeps the planned overlap when the track still has the room', () => {
-        expect(fadePlan.overlap).toBe(6);
-        expect(resolveOverlap(fadePlan, 10)).toBe(6);
+        expect(fadePlan.overlap).toBe(5);
+        expect(resolveOverlap(fadePlan, 10)).toBe(5);
     });
 
     it('shrinks to the time actually left when the incoming track was slow to load', () => {
