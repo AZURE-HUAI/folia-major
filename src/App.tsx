@@ -1426,6 +1426,29 @@ export default function App() {
 
     automixRef.current = automix;
 
+    // The duration normally arrives on `loadedmetadata`, which fires when an element is given a
+    // source. A warmed deck breaks that: it is handed the next track seconds early, fires the event
+    // while it is still idle - where every handler here ignores it - and then never fires again,
+    // because the whole point of warming is that its src string does not change when it takes over.
+    // Meanwhile playSong has reset the duration to 0 for the new track.
+    //
+    // So a source the element already knows about needs reading directly. Keyed on `audioSrc`
+    // rather than on the deck role, because the role swaps a moment BEFORE playSong zeroes the
+    // duration and reading first would simply be overwritten.
+    //
+    // Left at zero this is not only a wrong progress bar: checkTransitionPoint needs a duration to
+    // schedule against, so the track after a blend would get no transition at all.
+    useEffect(() => {
+        const element = audioRef.current;
+        // currentSrc, not the src attribute: it only names a resource the element has actually
+        // selected, so a deck one tick into loading something new cannot answer with the old
+        // track's duration.
+        if (!audioSrc || element?.currentSrc !== audioSrc) return;
+        if (Number.isFinite(element.duration) && element.duration > 0) {
+            setDuration(element.duration);
+        }
+    }, [audioSrc, audioRef, setDuration]);
+
     const { setupAudioAnalyzer, cacheSongAssets } = usePlaybackAudioBridge({
         audioRef,
         audioSrc,

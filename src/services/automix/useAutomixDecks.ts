@@ -327,7 +327,13 @@ export function useAutomixDecks({
      */
     const checkTransitionPoint = useCallback((time: number) => {
         if (!currentSong || !audioSrc) return;
-        if (!Number.isFinite(duration) || duration <= 0) return;
+        // Never silent: a blend is scheduled backwards from the end of the track, so without a
+        // duration this function can only do nothing - and doing nothing is indistinguishable from
+        // the planner deciding against a transition. That is exactly how a duration left at zero
+        // went unnoticed while it removed every second song change's transition.
+        if (!Number.isFinite(duration) || duration <= 0) {
+            return report(`${audioSrc}:no-duration`, 'no duration for this track yet, nothing to schedule a blend against');
+        }
         // The longest blend, plus the lead it is armed ahead of. Everything this function does
         // happens inside that window, warming included - which gives the idle deck the better part
         // of ten seconds to buffer before anything is asked of it.
