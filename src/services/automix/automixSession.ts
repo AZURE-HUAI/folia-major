@@ -42,19 +42,21 @@ const otherDeck = (deck: AutomixDeckId): AutomixDeckId => (deck === 'A' ? 'B' : 
 /**
  * How early a blend is set up, ahead of the moment it is due to start sounding.
  *
- * Requesting the next track and hearing it are separated by a URL resolve, a few cache reads, a
- * React commit and however long the media element needs to buffer. That gap used to come straight
- * out of the blend: the transition armed at the exact instant the fade should begin, so the ramp
- * started whenever loading happened to finish and the realised length was always the planned
- * length minus the load. Since the load cost is roughly constant on a given machine, so was the
- * result - a planner that asks for anything between 1.5 and 8 seconds was heard as a flat three.
+ * Arming does two things at once and only one of them is cheap. It starts the queue's advance -
+ * which is what puts the next track's name, lyrics and progress bar on screen - and it is also
+ * what used to begin loading the audio. Loading takes seconds; the handover does not.
  *
- * The lead pays for the load out of its own budget instead. Whatever is left over is waited out
- * with the incoming deck loaded but silent, so the fade still begins exactly where it was planned.
- * A load slower than the lead is not an error - it just spends the whole lead and the blend is
- * clipped the way it always was, which is logged.
+ * So the audio is loaded somewhere else entirely: the idle deck is handed the next track's source
+ * seconds earlier, with nothing else moving (see `deckSrc` in useAutomixDecks). By the time this
+ * lead starts, the bytes are already buffered and all that is left to pay for is `playSong`'s own
+ * cache reads, a React commit and `play()`.
+ *
+ * Which is why this is a second rather than the three it started at: a three second lead meant
+ * three seconds of the next track's name on screen against a progress bar stuck at 0:00 while the
+ * previous track was still playing - and on a short blend the frozen window was longer than the
+ * transition it was protecting.
  */
-export const AUTOMIX_ARM_LEAD_SEC = 3;
+export const AUTOMIX_ARM_LEAD_SEC = 1;
 
 /**
  * How early the hold is lifted, to pay for the round trip between letting go and hearing it.
@@ -447,6 +449,12 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
 
     /** The non-active deck reached its end, or failed to load. */
     const handleTailEnded = () => {
+        // Outside a transition the non-active deck is not a tail at all - it is the idle deck,
+        // holding the next track's source so it can buffer ahead. If that source fails to load
+        // there is no transition to end, and settling one that was never started would pause a
+        // deck and fire the stall check for nothing.
+        if (phase === 'idle') return;
+
         // Mid-blend this is just the outgoing track running out on schedule. Leave it to the
         // scheduled ramp, which still owns the incoming deck's fade-in; resetting gains here
         // would jump that fade to full a fraction early.

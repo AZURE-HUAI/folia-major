@@ -87,6 +87,45 @@ const resolveNextQueueSong = (
     return next && getPlaybackSongKey(next) !== currentKey ? next : null;
 };
 
+export interface DeckSrcInput {
+    deck: AutomixDeckId;
+    activeDeck: AutomixDeckId;
+    /** The source the app has committed to. Lags behind the deck roles while a blend is arming. */
+    audioSrc: string | null;
+    /** The outgoing track, pinned to the deck it started on; null outside a transition. */
+    tailSrc: string | null;
+    /** The next track, given to the idle deck to buffer before anything else moves. */
+    warmSrc: string | null;
+}
+
+/**
+ * Which source each deck renders. Pure, because getting it wrong is silent in both directions -
+ * a deck blanked at the wrong moment loses everything it buffered, and a deck given a source
+ * another deck is already sounding loads the same track twice over the top of itself.
+ *
+ * The invariant that makes the swap seamless: the outgoing deck's src string does not change when
+ * it stops being active, so React never touches its src attribute and its playback is never
+ * interrupted. `warmSrc` is that same invariant applied one step earlier - the idle deck is handed
+ * the next track's source before anything else moves, and because that string is the one `playSong`
+ * will eventually put in `audioSrc`, the handover changes nothing and the buffered bytes survive.
+ *
+ * The cases are ordered by how committed the app is to each source, and the fallthrough at the end
+ * is load-bearing: while armed, `audioSrc` still names the track the OTHER deck is finishing, so
+ * the active deck has to keep rendering what it was warmed with. Returning nothing there would
+ * blank the src of the deck that is about to play.
+ */
+export const resolveDeckSrc = ({
+    deck, activeDeck, audioSrc, tailSrc, warmSrc,
+}: DeckSrcInput): string | undefined => {
+    // Never hand a deck something another deck is already sounding.
+    const warm = warmSrc && warmSrc !== tailSrc && warmSrc !== audioSrc ? warmSrc : undefined;
+    // The track being faded out, pinned to the deck it started on.
+    if (deck !== activeDeck) return tailSrc ?? warm;
+    // The track the app has actually moved to.
+    if (audioSrc && audioSrc !== tailSrc) return audioSrc;
+    return warm;
+};
+
 type UseAutomixDecksParams = {
     audioRef: MutableRefObject<HTMLAudioElement | null>;
     audioContextRef: MutableRefObject<AudioContext | null>;
@@ -129,6 +168,15 @@ export function useAutomixDecks({
 }: UseAutomixDecksParams) {
     const [activeDeck, setActiveDeck] = useState<AutomixDeckId>('A');
     const [tailSrc, setTailSrc] = useState<string | null>(null);
+    /**
+     * The next track's source, handed to the idle deck so it can buffer before it is needed.
+     *
+     * This is the half of a transition that takes real time, and separating it from the advance is
+     * what lets the advance happen late. While this is set the app has not moved on in any other
+     * sense: the queue, the now-playing song and the progress bar all still belong to the track
+     * that is playing.
+     */
+    const [warmSrc, setWarmSrc] = useState<string | null>(null);
     // State rather than a ref on purpose: lifting the hold has to re-run the audio bridge's
     // autoplay effect, and only a render does that.
     const [autoplayHeld, setAutoplayHeld] = useState(false);
@@ -197,7 +245,14 @@ export function useAutomixDecks({
             onTailSrcChange: src => {
                 setTailSrc(src);
                 // Null is the last thing every settle does, whichever way the transition ended.
-                if (src === null) scheduleStallCheck();
+                if (src === null) {
+                    // The deck that was fading out is idle again, and the source it is about to be
+                    // offered is whatever was warmed for the transition that just finished - which
+                    // the OTHER deck is now playing. Dropping it here stops that deck from loading
+                    // the current track a second time.
+                    setWarmSrc(null);
+                    scheduleStallCheck();
+                }
             },
             onAutoplayHoldChange: setAutoplayHeld,
             advanceTrack: () => advanceRef.current(),
@@ -222,19 +277,10 @@ export function useAutomixDecks({
     const registerDeckA = useCallback((element: HTMLAudioElement | null) => bindDeck('A', element), [bindDeck]);
     const registerDeckB = useCallback((element: HTMLAudioElement | null) => bindDeck('B', element), [bindDeck]);
 
-    /**
-     * Which source each deck renders.
-     *
-     * The invariant that makes the swap seamless: the outgoing deck's src string does not change
-     * when it stops being active, so React never touches its src attribute and its playback is
-     * never interrupted. While armed, the active deck is deliberately left without a source -
-     * audioSrc still names the track the other deck is finishing, and handing it over would
-     * restart the very song we are fading out of.
-     */
-    const deckSrc = useCallback((deck: AutomixDeckId): string | undefined => {
-        if (deck !== activeDeck) return tailSrc ?? undefined;
-        return audioSrc && audioSrc !== tailSrc ? audioSrc : undefined;
-    }, [activeDeck, audioSrc, tailSrc]);
+    const deckSrc = useCallback(
+        (deck: AutomixDeckId) => resolveDeckSrc({ deck, activeDeck, audioSrc, tailSrc, warmSrc }),
+        [activeDeck, audioSrc, tailSrc, warmSrc],
+    );
 
     const isActiveDeck = useCallback(
         (element: HTMLAudioElement | null) => Boolean(element) && element === audioRef.current,
@@ -282,8 +328,9 @@ export function useAutomixDecks({
     const checkTransitionPoint = useCallback((time: number) => {
         if (!currentSong || !audioSrc) return;
         if (!Number.isFinite(duration) || duration <= 0) return;
-        // The longest blend, plus the lead it is armed ahead of. Anything earlier than that cannot
-        // arm whatever the plan says, so there is nothing to evaluate yet.
+        // The longest blend, plus the lead it is armed ahead of. Everything this function does
+        // happens inside that window, warming included - which gives the idle deck the better part
+        // of ten seconds to buffer before anything is asked of it.
         if (duration - time > AUTOMIX_MAX_OVERLAP_SEC + AUTOMIX_ARM_LEAD_SEC) return;
 
         if (!isEnabled) return report('disabled', 'off - the Blend icon at the end of the volume row switches it on');
@@ -291,6 +338,15 @@ export function useAutomixDecks({
 
         const nextSong = resolveNextQueueSong(playQueue, currentSong, loopMode);
         if (!nextSong) return report(`${audioSrc}:queue-end`, 'nothing queued after this track');
+
+        const prefetched = getPrefetchedData(nextSong, audioQuality);
+        // Buffer ahead, well before anything arms. 'CACHED_IN_DB' is the prefetcher's sentinel for
+        // "the bytes are in the media cache", and there is nothing to warm with in that case -
+        // playSong mints a fresh blob URL for those, a different string every time, so handing the
+        // deck this one would only make it load the track twice. It is also the fast case.
+        setWarmSrc(
+            prefetched?.audioUrl && prefetched.audioUrl !== 'CACHED_IN_DB' ? prefetched.audioUrl : null,
+        );
 
         // Queue neighbours already, so one shared album name is the whole test for a segue.
         const album = getSongAlbumLabel(currentSong);
@@ -303,7 +359,7 @@ export function useAutomixDecks({
                 // Already in memory for online tracks: the queue prefetcher fetches the next few
                 // songs' lyrics on every song change. Local files have no such cache, so they get
                 // the planner's default-length blend instead of a vocal-placed one.
-                lines: getPrefetchedData(nextSong, audioQuality)?.lyrics?.lines ?? null,
+                lines: prefetched?.lyrics?.lines ?? null,
                 profile: getTrackProfile(nextSong),
             },
             sameAlbum: Boolean(album) && album === getSongAlbumLabel(nextSong),
