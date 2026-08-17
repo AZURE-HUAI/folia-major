@@ -165,6 +165,16 @@ export async function loadOnlineSongLyrics(
     const shouldAutoMatch = settings.autoUseBestLyric && !onlineLyricsState?.hasOnlineOverride;
 
     if (shouldAutoMatch) {
+        // The lyrics in hand are already displayable, so hand them over and report done BEFORE the
+        // search below. `onDone` is what releases the audio: playback waits on it, and this search
+        // asks every provider for a better lyric file - seconds when it finds none, which is
+        // exactly what an instrumental interlude does. Holding the audio for an OPTIONAL upgrade
+        // is what turned a song change into several seconds of silence, and with blended changes
+        // the outgoing track has already ended by then, so the silence is all the listener gets.
+        // A better match, if one turns up, replaces these below.
+        if (resolvedLyrics) onLyrics(resolvedLyrics);
+        onDone();
+
         try {
             onAutoMatchStart?.();
             const metadata = getProviderSongMetadata(song);

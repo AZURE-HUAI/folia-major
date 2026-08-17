@@ -180,4 +180,46 @@ describe('online QQ lyric candidate plumbing', () => {
         }));
         expect(saveLyricsStateMock).not.toHaveBeenCalled();
     });
+
+    it('reports done before the auto-match search finishes, so audio never waits on it', async () => {
+        // onDone is what releases playback. Auto-match asks every provider for a BETTER lyric file
+        // and takes seconds when it finds none - an instrumental interlude matches nothing
+        // anywhere. Holding the audio for an optional upgrade turned every such song change into
+        // seconds of silence, and with a blended change the outgoing track has already ended by
+        // then, so silence is all that is left.
+        const lyrics = {
+            lines: [{ startTime: 0, endTime: 1, fullText: 'line', words: [] }],
+            isWordByWord: false,
+        };
+        lyricsMock.mockResolvedValue({
+            lyrics,
+            mainText: '[00:00.00]line',
+            wordByWordText: null,
+            translationText: null,
+            isPureMusic: false,
+            chorusRanges: [],
+        });
+
+        let finishAutoMatch = () => { };
+        autoMatchMock.mockReturnValue(new Promise(resolve => {
+            finishAutoMatch = () => resolve(null);
+        }));
+
+        const onDone = vi.fn();
+        const onLyrics = vi.fn();
+        const pending = loadOnlineSongLyrics(song, null, null, {
+            isCurrent: () => true,
+            onLyrics,
+            onDone,
+        });
+
+        await vi.waitFor(() => expect(autoMatchMock).toHaveBeenCalled());
+
+        // Still inside the search, and playback has already been let go.
+        expect(onDone).toHaveBeenCalled();
+        expect(onLyrics).toHaveBeenCalledWith(lyrics);
+
+        finishAutoMatch();
+        await pending;
+    });
 });
