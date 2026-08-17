@@ -239,11 +239,16 @@ export const ensureTrackProfile = async (request: ProfileRequest): Promise<void>
                 console.log(
                     `[Automix] analysed "${request.song.name}"`
                     + `${profile.partial ? ` (head only, ${profile.duration.toFixed(1)}s of it)` : ''}:`
-                    + ` ${profile.bpm ? `${Math.round(profile.bpm)} BPM, ` : ''}`
-                    + `${profile.loudness.toFixed(1)} dBFS,`
+                    + ` ${profile.bpm ? `${Math.round(profile.bpm)} BPM` : ''}`
+                    + `${profile.outroBpm && profile.bpm && Math.abs(profile.outroBpm - profile.bpm) > 1
+                        ? ` (${Math.round(profile.outroBpm)} at the end)` : ''}`
+                    + `${profile.bpm ? `, ${profile.downbeatOffset === null
+                        ? 'no bar line found' : `bar line at ${profile.downbeatOffset.toFixed(2)}s`}, ` : ''}`
+                    + `${profile.loudness.toFixed(1)} LUFS,`
                     + ` lead-in ${profile.leadIn.toFixed(2)}s,`
                     + ` lead-out ${at(profile.leadOut)}, body ends ${at(profile.bodyOut)} early,`
-                    + ` section ${at(profile.sectionStart)}, voice ${at(profile.vocalStart)},`
+                    + ` section ${at(profile.sectionStart)} of ${profile.sections.length},`
+                    + ` voice ${at(profile.vocalStart)},`
                     + ` ${profile.startsHot ? 'starts hot' : 'has an intro'}`
                     + `${profile.endsHot === null ? '' : `, ${profile.endsHot ? 'ends hot' : 'decays out'}`}`,
                 );
@@ -313,6 +318,14 @@ export const recordPlayedTail = (
         outroSlope: edges.outroSlope,
         // Measured over the whole track rather than the head, so it supersedes the stored one.
         loudness: edges.loudness,
+        tailDb: edges.tailDb,
+        // Everything the tap cannot answer stays null rather than being filled with the head's
+        // value. A level series says how loud the end was; it says nothing about what key it is in,
+        // how bright it is or whether it slowed down, and a head-shaped guess at those would be
+        // indistinguishable from a measurement to everything downstream.
+        outroTone: null,
+        outroKey: null,
+        outroBpm: null,
     };
     remember(songKey, profile);
     void saveToCache(storageKey(songKey), profile);

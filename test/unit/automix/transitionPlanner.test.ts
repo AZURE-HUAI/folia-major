@@ -10,6 +10,7 @@ import {
     type TransitionTrack,
 } from '../../../src/services/automix/transitionPlanner';
 import { BEAT_CUT_SEC, shapeBlend } from '../../../src/services/automix/transitionChooser';
+import { BEATS_PER_PHRASE } from '../../../src/services/automix/musicalTime';
 import { makeProfile } from './trackProfileFixture';
 
 const line = (startTime: number, endTime: number, fullText = 'la'): Line => ({
@@ -50,9 +51,10 @@ describe('planTransition', () => {
 
     it('keeps a fast track to a phrase rather than the ceiling', () => {
         // The bug as heard: 185 BPM, a 26s outro into an 11s intro, and the blend took the whole
-        // eight-second cap - twenty-three beats, long past where two songs still sound like two.
+        // cap rather than a musical length. A phrase of a fast track is short, and that is the
+        // right answer - the window says where a handover MAY go, never how long one should be.
         const plan = planTransition(track(200, [line(10, 173.66)]), track(200, null, 11), 185);
-        expect(plan.overlap).toBeCloseTo(8 * 60 / 185, 2);
+        expect(plan.overlap).toBeCloseTo(BEATS_PER_PHRASE * 60 / 185, 2);
         expect(plan.overlap).toBeLessThan(AUTOMIX_MAX_OVERLAP_SEC);
     });
 
@@ -139,23 +141,29 @@ describe('planTransition', () => {
 
     it('measures the default blend in beats once a tempo is known', () => {
         // Five seconds is two bars of a ballad and nearly four of a fast track, so the same
-        // number reads as leisurely on one song and frantic on the next. Eight beats does not.
-        expect(planTransition(track(100, null), track(100, null), 90).overlap).toBeCloseTo(5.33, 2);
-        expect(planTransition(track(100, null), track(100, null), 160).overlap).toBeCloseTo(3, 2);
+        // number reads as leisurely on one song and frantic on the next. A phrase does not.
+        expect(planTransition(track(100, null), track(100, null), 90).overlap)
+            .toBeCloseTo(BEATS_PER_PHRASE * 60 / 90, 2);
+        expect(planTransition(track(100, null), track(100, null), 160).overlap)
+            .toBeCloseTo(BEATS_PER_PHRASE * 60 / 160, 2);
     });
 
-    it('trims a proven vocal-free window back to whole beats', () => {
-        // A 3s gap is narrower than the eight beats wanted, so it binds - and at 95 BPM it is four
+    it('trims a proven vocal-free window back to whole bars', () => {
+        // A 3s gap is narrower than the phrase wanted, so it binds - and at 95 BPM it is four
         // beats and three quarters, so the blend takes the four rather than ending mid-pulse.
         const plan = planTransition(track(100, [line(10, 97)]), track(100, null, 3), 95);
         expect(plan.overlap).toBeCloseTo(4 * 60 / 95, 2);
-        expect(plan.reason).toContain('capped by the vocal-free window');
+        expect(plan.reason).toContain('capped by what the pair has room for');
     });
 
-    it('still caps a beat-derived length at the ceiling', () => {
-        // Eight beats of a very slow track would run to eleven seconds.
-        expect(planTransition(track(200, null), track(100, null), 45).overlap)
-            .toBe(AUTOMIX_MAX_OVERLAP_SEC);
+    it('never goes past the ceiling, however long the music would like to be', () => {
+        // A phrase of a 30 BPM track is thirty-two seconds. The ceiling refuses it, and what comes
+        // back is a shorter whole number of BARS rather than the ceiling itself - twenty-five
+        // seconds is not a length any music has, and the point of counting in bars is lost if the
+        // cap is allowed to be the answer.
+        const overlap = planTransition(track(200, null), track(100, null), 30).overlap;
+        expect(overlap).toBeLessThanOrEqual(AUTOMIX_MAX_OVERLAP_SEC);
+        expect(overlap).toBeCloseTo(12 * 2, 2);
     });
 
     it('cuts when the outgoing duration is unknown', () => {
@@ -247,10 +255,13 @@ describe('a blend aims at where the music stops', () => {
         // and the fade then plays out underneath the incoming one.
         const from: TransitionTrack = {
             duration: 100,
-            lines: null,
+            // Sung to 80s against a six second window, so the blend is short enough for the top of
+            // the decay to be EARLIER than where it would otherwise start. That is the only case
+            // the ride exists for: a long blend already begins in front of the decay.
+            lines: [line(10, 80)],
             profile: makeProfile({ duration: 100, leadOut: 1, bodyOut: 8 }),
         };
-        const plan = planTransition(from, track(100, null, 10), 120);
+        const plan = planTransition(from, track(100, null, 6), 120);
         expect(plan.outStart).toBeCloseTo(92, 6);
         expect(plan.reason).toContain('to ride the fade-out');
     });
@@ -272,10 +283,12 @@ describe('a blend aims at where the music stops', () => {
         // would start the next track while this one still had a third of itself to play.
         const from: TransitionTrack = {
             duration: 200,
-            lines: null,
+            lines: [line(10, 150)],
             profile: makeProfile({ duration: 200, leadOut: 0, bodyOut: 120 }),
         };
-        expect(planTransition(from, track(100, null, 10), 120).outStart).toBeCloseTo(190, 6);
+        // Ten seconds back from the end, which is where the clamp puts it - not eighty, which is
+        // where a two-minute decay would put it if it were taken at its word.
+        expect(planTransition(from, track(100, null, 6), 120).outStart).toBeCloseTo(190, 6);
     });
 
     it('places a cut before the silence too', () => {

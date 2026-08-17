@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { analyseTrack, keyFromChroma, measureEdges } from '@/services/automix/trackProfile';
+import { LUFS_OFFSET_DB } from '@/services/automix/signalAnalysis';
 
 // test/unit/automix/trackProfile.test.ts
 
@@ -137,6 +138,66 @@ describe('analyseTrack, finding the structure', () => {
         expect((await analyseTrack(join(chord(2, VERSE), chord(2, CHORUS)), RATE))?.sectionStart)
             .toBeNull();
     });
+
+    it('keeps every boundary, not only the first', async () => {
+        // The first one answers "where does the intro end". The rest answer "where may a handover
+        // go", which is the larger of the two questions and the one the outgoing track asks.
+        const profile = await analyseTrack(
+            join(chord(8, VERSE), chord(8, CHORUS), chord(10, VERSE)), RATE,
+        );
+
+        expect(profile!.sections.length).toBeGreaterThanOrEqual(2);
+        expect(profile!.sections[0]).toBe(profile!.sectionStart);
+        expect(profile!.sections.some(at => Math.abs(at - 16) <= 2)).toBe(true);
+    });
+
+    it('reads the two ends for their own key rather than averaging the whole track', async () => {
+        // A song that modulates has more than one key, and a transition only ever touches twenty
+        // seconds of it. Averaging four minutes to answer a question about twenty is a different
+        // question, cheaply asked.
+        const profile = await analyseTrack(join(chord(22, VERSE), chord(22, CHORUS)), RATE);
+
+        expect(profile!.introKey.key).not.toBe(profile!.outroKey!.key);
+        expect(profile!.introKey.confidence).toBeGreaterThan(0);
+    });
+});
+
+describe('analyseTrack, the fields a transition reads', () => {
+    const track = () => join(silence(0.5), tone(30, 220), silence(0.5));
+
+    it('reports a tone as three shares that add up to one', async () => {
+        // Shares rather than levels, because loudness is matched elsewhere. What is left after
+        // that is the SHAPE, and a share is what a shape is.
+        const profile = await analyseTrack(track(), RATE);
+
+        expect(profile!.introTone).toHaveLength(3);
+        expect(profile!.introTone.reduce((sum, share) => sum + share, 0)).toBeCloseTo(1, 6);
+        // 220Hz is under the first edge, so nearly all of it belongs to the low band.
+        expect(profile!.introTone[0]).toBeGreaterThan(0.8);
+        expect(profile!.outroTone).not.toBeNull();
+    });
+
+    it('states the bar length rather than leaving three files to assume it', async () => {
+        expect((await analyseTrack(track(), RATE))!.beatsPerBar).toBe(4);
+    });
+
+    it('leaves every answer about the end null when only the head was read', async () => {
+        const profile = await analyseTrack(track(), RATE, { partial: true });
+
+        expect(profile!.outroKey).toBeNull();
+        expect(profile!.outroTone).toBeNull();
+        expect(profile!.outroBpm).toBeNull();
+        expect(profile!.tailDb).toBeNull();
+        // The head half is still answered - that is the whole point of reading a prefix.
+        expect(profile!.introTone).toHaveLength(3);
+        expect(profile!.headDb).toBeLessThan(0);
+    });
+
+    it('has no bar line to offer in music with no low end to read one from', async () => {
+        // Naming a downbeat from a signal that carries no pattern would be inventing evidence, and
+        // a wrong bar line is worse than none: everything downstream would land a beat out.
+        expect((await analyseTrack(track(), RATE))!.downbeatOffset).toBeNull();
+    });
 });
 
 describe('analyseTrack', () => {
@@ -251,7 +312,11 @@ describe('measureEdges', () => {
         expect(edges!.leadIn).toBeCloseTo(2, 1);
         expect(edges!.soundingEnd).toBeCloseTo(32, 1);
         // Averaged over the sounding part alone: the trailing silence must not drag it down.
-        expect(edges!.loudness).toBeCloseTo(-12, 1);
+        // Reported in LUFS, so the readings carry BS.1770's own -0.691 offset.
+        expect(edges!.loudness).toBeCloseTo(-12 + LUFS_OFFSET_DB, 1);
+        // Both ends of a level track are the level: the step is what these exist to measure.
+        expect(edges!.headDb).toBeCloseTo(-12 + LUFS_OFFSET_DB, 1);
+        expect(edges!.tailDb).toBeCloseTo(-12 + LUFS_OFFSET_DB, 1);
     });
 
     it('has no answer for silence, or for no readings at all', () => {

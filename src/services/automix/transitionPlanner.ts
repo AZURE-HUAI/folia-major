@@ -1,6 +1,15 @@
 import type { Line } from '../../types';
 import { isInterludeLine } from '../../utils/lyrics/parserCore';
 import {
+    alignEntry,
+    barGrid,
+    quantiseToMusic,
+    snapToGrid,
+    BEATS_PER_PHRASE,
+    type Grid,
+    type TempoRelation,
+} from './musicalTime';
+import {
     chooseTransitionStyle,
     CUT_LEAD_SEC,
     HEAD_BUDGET_SEC,
@@ -35,6 +44,20 @@ export interface TransitionPlan {
     style: TransitionStyle;
     /** How the two keys sit together. Reported so a length can be argued with. */
     relation: KeyRelation;
+    /** How the two tempos sit together. */
+    tempo: TempoRelation;
+    /**
+     * Rate the OUTGOING deck runs at across the transition, to meet the incoming one's tempo.
+     *
+     * One, unless the two tempos are far enough apart to hear and close enough to reconcile. This
+     * is the lever nothing else in the plan can stand in for: two tracks a tenth apart drift a beat
+     * over six seconds of overlap, and no gain curve, band split or key rule touches that.
+     */
+    stretch: number;
+    /** Mid and top correction for the incoming deck, so it arrives in the outgoing track's tone. */
+    tiltDb: [number, number];
+    /** The outgoing track is thrown into a delay as it leaves rather than simply stopping. */
+    echoThrow: boolean;
     /** Seconds into the outgoing track where the incoming one starts and the fade begins. */
     outStart: number;
     /** Seconds into the incoming track to start playback from. */
@@ -53,8 +76,20 @@ export interface TransitionPlan {
     reason: string;
 }
 
-/** Longest blend we ever ask for. Beyond this a transition stops reading as one song ending. */
-export const AUTOMIX_MAX_OVERLAP_SEC = 8;
+/**
+ * Longest blend we ever ask for.
+ *
+ * This used to be eight seconds, with a comment claiming that past it a transition stops reading as
+ * one song ending. That was a taste, not a measurement, and it was the binding constraint far more
+ * often than anything measured: real logs carry a 63 second instrumental outro against an 8 second
+ * intro, a pair with room for a proper mix, cut to eight by a constant.
+ *
+ * Twenty-five is where the OTHER limits start to bind instead - a quarter of a short track, the
+ * proven vocal-free window, the phrase count the tempo produces - which is the state this number
+ * should be in. It was raised only once the two things that make a long overlap survivable were
+ * built: loudness measured the way the ear hears it, and headroom while both masters are stacked.
+ */
+export const AUTOMIX_MAX_OVERLAP_SEC = 25;
 /** Floor for a blend to be one. Below this there is no time left to fade across, only a cut. */
 export const AUTOMIX_MIN_OVERLAP_SEC = 0.8;
 /**
@@ -70,12 +105,32 @@ export const AUTOMIX_DEFAULT_OVERLAP_SEC = 5;
 /**
  * The length a blend really wants, in beats rather than seconds.
  *
- * A fixed number of seconds is the wrong unit: five seconds is two bars of a ballad and nearly
- * four of a fast track, so the same setting reads as leisurely on one song and frantic on the
- * next. Every DJ tool counts transitions in bars for this reason; eight beats is two bars of 4/4,
- * the shortest span that still reads as a phrase.
+ * A fixed number of seconds is the wrong unit: five seconds is two bars of a ballad and nearly four
+ * of a fast track, so the same setting reads as leisurely on one song and frantic on the next.
+ *
+ * One phrase - four bars - rather than the two bars this started at. Two bars is the shortest span
+ * that reads as a phrase at all, which made it the right floor and the wrong default: it is the
+ * length of a fill, not of a mix. A phrase is the unit the arrangement itself is built in, and it
+ * is what the scales below are multiplying against.
  */
-const AUTOMIX_DEFAULT_OVERLAP_BEATS = 8;
+const AUTOMIX_DEFAULT_OVERLAP_BEATS = BEATS_PER_PHRASE;
+
+/**
+ * How far a handover may be moved to land on a bar line of the outgoing track.
+ *
+ * One beat. Enough to reach a bar line from anywhere inside the beat it is already in, and not
+ * enough to become a different handover: past this the transition is no longer where the evidence
+ * put it, it is where the grid put it.
+ */
+const BAR_SNAP_BEATS = 1;
+/**
+ * How far a handover may be moved to land on a structural boundary instead.
+ *
+ * Two seconds, and it takes priority over the bar line because it is a stronger claim: a bar line
+ * says the count restarts, a section boundary says the music does. The literature is consistent
+ * that transitions placed on section edges are the ones listeners rate highest.
+ */
+const SECTION_SNAP_SEC = 2;
 
 /**
  * Longest run at the end of a track a transition may take as being "the ending".
@@ -121,9 +176,33 @@ const endsOf = (track: TransitionTrack) => {
     return { sounding: back(profile?.leadOut), body: back(profile?.bodyOut) };
 };
 
-/** Rounds a length down to whole beats, so a blend never ends mid-pulse. */
-const toWholeBeats = (seconds: number, beat: number | null) =>
-    (beat === null ? seconds : Math.max(1, Math.floor(seconds / beat)) * beat);
+/**
+ * A little of the incoming track's leading silence is kept rather than skipped.
+ *
+ * The measurement says where the file stops being silent, to within one analysis frame. Landing the
+ * playhead exactly there risks starting inside the first transient instead of in front of it, and a
+ * clipped attack is far more audible than a tenth of a second of silence.
+ */
+const ENTRY_MARGIN_SEC = 0.1;
+
+/** Seconds from a moment to the next line of a grid. */
+const barPhase = (grid: Grid, seconds: number) =>
+    ((grid.offset - seconds) % grid.period + grid.period) % grid.period;
+
+/** The closest of a set of moments, if one is close enough and lands somewhere usable. */
+const nearestWithin = (
+    moments: readonly number[] | null | undefined,
+    target: number,
+    tolerance: number,
+    usable: (value: number) => boolean,
+): number | null => {
+    let best: number | null = null;
+    for (const moment of moments ?? []) {
+        if (Math.abs(moment - target) > tolerance || !usable(moment)) continue;
+        if (best === null || Math.abs(moment - target) < Math.abs(best - target)) best = moment;
+    }
+    return best;
+};
 
 /**
  * Last moment a voice is present, from the lyric timeline.
@@ -146,6 +225,10 @@ const hardCut = (reason: string): TransitionPlan => ({
     kind: 'hardCut',
     style: 'plainBlend',
     relation: 'unknown',
+    tempo: 'unknown',
+    stretch: 1,
+    tiltDb: [0, 0],
+    echoThrow: false,
     outStart: 0,
     inStart: 0,
     overlap: 0,
@@ -215,7 +298,16 @@ export const planTransition = (
             kind: 'fade',
             style: choice.style,
             relation: choice.relation,
+            tempo: choice.tempo.relation,
+            // Nothing to lock to: a cut never has the two tracks sounding at once, so there is no
+            // drift to remove and no reason to spend an artefact removing it.
+            stretch: 1,
+            tiltDb: [0, 0],
+            echoThrow: choice.echoThrow,
             outStart: round(end - room),
+            // Deliberately not the incoming track's lead-in, which is what every other style skips.
+            // Here that silence is not waste, it is the budget: waiting is the only way to place a
+            // cut on a beat, and the wait can only be paid for out of it.
             inStart: 0,
             overlap: round(room),
             minOverlap: AUTOMIX_MIN_CUT_ROOM_SEC,
@@ -243,28 +335,30 @@ export const planTransition = (
     const vocalFree = tail !== null && intro !== null ? Math.min(tail, intro) : null;
     const usesVocalFree = vocalFree !== null && vocalFree >= AUTOMIX_MIN_OVERLAP_SEC;
 
-    // Eight beats of the outgoing track, then scaled: longer when the two keys sit together or the
-    // tail wants riding, shorter when they clash. A clash is not removed, it is denied the time to
-    // be noticed.
-    // Back to whole beats after scaling, or the point of counting in beats is lost on the way out:
-    // eight beats shortened by 0.6 is 4.8 of them, which is not a length any music has.
-    const wanted = toWholeBeats(
-        (beat === null ? AUTOMIX_DEFAULT_OVERLAP_SEC : beat * AUTOMIX_DEFAULT_OVERLAP_BEATS)
-        * choice.lengthScale,
-        beat,
-    );
-    // The proven window is a CEILING on that length, never the length itself.
-    //
-    // It answers "where may a handover go", not "how long should one be", and spending all of it
-    // conflates the two: a track with a 26s outro into an 11s intro would take the whole ceiling,
-    // so every generously-spaced pair came out as an eight-second crossfade - twenty-three beats
-    // at 185 BPM - which is precisely the "it just fades" this file exists to answer. Tempo sets
-    // the length; the window can only shorten it, trimmed back to whole beats so a blend forced
-    // into a narrow gap still ends on a pulse.
-    const bounded = usesVocalFree ? Math.min(wanted, toWholeBeats(vocalFree, beat)) : wanted;
+    // One phrase of the outgoing track, then scaled by everything that was measured about the pair:
+    // longer when the keys sit together, when the tempos are locked, when the tail wants riding, or
+    // when there is a level step for the ear to walk across; shorter when they clash, when the
+    // tempos are too far apart to hold, or when the next track opens at full tilt. A clash is not
+    // removed, it is denied the time to be noticed.
+    const wanted = (beat === null ? AUTOMIX_DEFAULT_OVERLAP_SEC : beat * AUTOMIX_DEFAULT_OVERLAP_BEATS)
+        * choice.lengthScale;
 
-    // Quarter-length cap so a very short track is not half crossfade.
-    const overlap = Math.min(bounded, AUTOMIX_MAX_OVERLAP_SEC, end / 4);
+    // Everything that can bind, in one number - and it is a CEILING, not the length.
+    //
+    // The distinction is the whole of why this reads as a mix rather than a fade. The proven window
+    // answers "where may a handover go", not "how long should one be", and spending all of it
+    // conflates the two: a track with a 26s outro into an 11s intro would take the whole ceiling.
+    // What sets the length is the music - a phrase of it, scaled by the evidence - and the ceiling
+    // only ever shortens that.
+    const ceiling = Math.min(
+        AUTOMIX_MAX_OVERLAP_SEC,
+        // Quarter-length cap so a very short track is not half crossfade.
+        end / 4,
+        usesVocalFree ? vocalFree : Infinity,
+    );
+    // Quantised last, so a blend forced into a narrow gap still comes out as a whole number of
+    // phrases, bars or beats rather than as the gap.
+    const overlap = quantiseToMusic(Math.min(wanted, ceiling), beat, ceiling);
 
     // Only a track of a few seconds can land here, and there is no fade to be had in it.
     if (overlap < AUTOMIX_MIN_OVERLAP_SEC) {
@@ -285,7 +379,7 @@ export const planTransition = (
             ? introMissing
             : `outro ${round(tail)}s, intro ${round(intro)}s`;
     const length = `${beat === null ? 'default' : `${round(overlap / beat)} beats`}`
-        + (bounded < wanted ? ', capped by the vocal-free window' : '');
+        + (overlap < wanted - 0.05 ? ', capped by what the pair has room for' : '');
     // Three clauses, and the order between them is the whole decision.
     //
     // Latest: where the blend sits when the track just stops - flush against the last sounding
@@ -295,9 +389,42 @@ export const planTransition = (
     // lines stacked on each other is the one thing that makes an overlap sound wrong, and moving
     // the anchor earlier is exactly the way to cause it.
     const latest = end - overlap;
-    const outStart = Math.min(latest, Math.max(body, lastSung ?? 0));
-    const rode = latest - outStart;
+    const anchor = Math.min(latest, Math.max(body, lastSung ?? 0));
+    const rode = latest - anchor;
     const fadeOut = rode > 0.05 ? `, started ${round(rode)}s early to ride the fade-out` : '';
+
+    // Everything above decides WHERE a handover belongs by level and by voice. The two below move
+    // it onto a line the music itself draws, but only within a beat or two - past that it would no
+    // longer be the handover the evidence chose, only the one the grid preferred.
+    const lowest = Math.min(anchor, latest);
+    const withinRange = (value: number) => value >= lowest - 1e-6 && value <= latest + 1e-6;
+
+    // A structural boundary first, because it is the stronger claim: a bar line says the count
+    // restarts, a section edge says the music does.
+    const boundary = nearestWithin(from.profile?.sections, anchor, SECTION_SNAP_SEC, withinRange);
+    const grid = barGrid(bpm, from.profile?.downbeatOffset);
+    const snapped = snapToGrid(boundary ?? anchor, grid, beat === null ? 0 : beat * BAR_SNAP_BEATS);
+    const outStart = withinRange(snapped) ? snapped : boundary ?? anchor;
+    const placed = boundary !== null
+        ? ', on a section edge'
+        : Math.abs(outStart - anchor) > 0.01 ? ', on a bar line' : '';
+
+    // Where the incoming track is started from. Two separate reasons to move it off zero, and they
+    // compose: its own leading silence is not music and should not be faded through, and once that
+    // is skipped the entry can be walked forward to whichever of its bar lines lands on one of the
+    // outgoing track's. That second half is the part a gain curve can never stand in for - two
+    // tracks whose bars are a quarter note apart stay a quarter note apart however the levels move.
+    const entryFloor = Math.min(
+        MAX_TRIMMED_TAIL_SEC,
+        Math.max(0, (to.profile?.leadIn ?? 0) - ENTRY_MARGIN_SEC),
+    );
+    const inStart = alignEntry(
+        entryFloor,
+        barGrid(to.profile?.bpm, to.profile?.downbeatOffset),
+        // In WALL seconds, not the outgoing track's own: if it is being bent to meet the incoming
+        // tempo, its bars arrive that much sooner than its media clock says they will.
+        grid === null ? null : barPhase(grid, outStart) / choice.tempo.stretch,
+    );
 
     const key = choice.relation === 'unknown' ? '' : `, ${choice.relation} keys`;
     // Four of the five joins are decided on how the OUTGOING track ends, and a head-only profile
@@ -308,16 +435,25 @@ export const planTransition = (
         ? ', outgoing never analysed'
         : from.profile.partial ? ', outgoing tail not analysed' : '';
 
+    const bend = choice.tempo.stretch !== 1
+        ? `, outgoing bent ${((choice.tempo.stretch - 1) * 100).toFixed(1)}% onto the next tempo`
+        : choice.tempo.relation === 'far' ? ', tempos too far apart to hold' : '';
+    const entry = inStart > 0.05 ? `, entering the next track at ${round(inStart)}s` : '';
+
     return {
         kind: 'fade',
         style: choice.style,
         relation: choice.relation,
+        tempo: choice.tempo.relation,
+        stretch: choice.tempo.stretch,
+        tiltDb: choice.tiltDb,
+        echoThrow: choice.echoThrow,
         outStart: round(outStart),
-        inStart: 0,
+        inStart: round(inStart),
         overlap: round(overlap),
         minOverlap: AUTOMIX_MIN_OVERLAP_SEC,
         reason: `${choice.style} ${round(overlap)}s ${length}`
-            + ` (${window}${key}${outgoingTail}${silence}${fadeOut})`,
+            + ` (${window}${key}${outgoingTail}${silence}${fadeOut}${placed}${bend}${entry})`,
     };
 };
 

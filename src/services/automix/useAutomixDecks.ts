@@ -465,9 +465,14 @@ export function useAutomixDecks({
             if (!context) return;
             const now = context.currentTime;
             (['A', 'B'] as const).forEach(deck => chainsRef.current[deck]?.analyser.tick(now));
+            // The same tick, one property read wider: each deck's own position against the audio
+            // clock. Forty of these a second is what lets a line be fitted through the staircase
+            // `currentTime` reports, and that line is the difference between placing a handover
+            // near a bar and placing it on one. See deckClock.
+            session.sampleDecks(now);
         }, ANALYSER_INTERVAL_MS);
         return () => clearInterval(timer);
-    }, [audioContextRef, isEnabled, playerState, tailSrc]);
+    }, [audioContextRef, isEnabled, playerState, session, tailSrc]);
 
     // Any pause, from the UI, a media key or the OS, ends a transition. Watching player state
     // rather than the element's pause event matters: while armed the active deck is the silent

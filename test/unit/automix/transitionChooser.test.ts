@@ -28,7 +28,26 @@ describe('keyRelation', () => {
     });
 
     it('leaves everything else alone rather than inventing a grade for it', () => {
-        expect(keyRelation(inKey(0, true), inKey(2, true))).toBe('neutral');
+        expect(keyRelation(inKey(0, true), inKey(4, true))).toBe('neutral');
+    });
+
+    it('knows the two relations that are neither the same seven notes nor a clash', () => {
+        // Two steps round the circle of fifths - one accidental apart - and the parallel major and
+        // minor, which share a tonic. Both are on every DJ's wheel and neither is a full match.
+        expect(keyRelation(inKey(0, true), inKey(2, true))).toBe('adjacent');
+        expect(keyRelation(inKey(0, true), inKey(10, true))).toBe('adjacent');
+        expect(keyRelation(inKey(0, true), inKey(0, false))).toBe('adjacent');
+    });
+
+    it('asks about the two ends of the tracks, not their averages', () => {
+        // A song that modulates has more than one key, and a transition only ever touches twenty
+        // seconds of it. The whole-track figure is the fallback for an end too percussive to read.
+        const modulating = profile({
+            key: 0, major: true, keyConfidence: 0.9,
+            outroKey: { key: 6, major: true, confidence: 0.9 },
+        });
+        expect(keyRelation(modulating, inKey(0, true))).toBe('clashing');
+        expect(keyRelation(inKey(0, true), modulating)).toBe('compatible');
     });
 
     it('treats a low-confidence estimate as no answer', () => {
@@ -143,7 +162,7 @@ describe('shapeBlend', () => {
         });
         expect(shape.hold).toBe(0);
         expect(shape.overlap).toBe(BEAT_CUT_SEC);
-        expect(shape.bassSwap).toBe(false);
+        expect(shape.shapeBands).toBe(false);
     });
 
     it('takes the latest beat that fits inside the next track\'s own silence', () => {
@@ -153,9 +172,15 @@ describe('shapeBlend', () => {
         expect(shape.hold).toBeCloseTo(0.7, 6);
     });
 
-    it('leaves an overlapping style alone, and only swaps bass where a swap makes sense', () => {
-        expect(shapeBlend({ ...base, style: 'bassSwap' })).toMatchObject({ hold: 0, overlap: 4, bassSwap: true });
-        expect(shapeBlend({ ...base, style: 'tailRide' })).toMatchObject({ bassSwap: true });
-        expect(shapeBlend({ ...base, style: 'plainBlend' })).toMatchObject({ bassSwap: false });
+    it('leaves an overlapping style alone, and only shapes bands where shaping makes sense', () => {
+        expect(shapeBlend({ ...base, style: 'bassSwap' }))
+            .toMatchObject({ hold: 0, overlap: 4, shapeBands: true, sweepOut: true });
+        // A decaying tail is already leaving of its own accord; taking the top off it as well
+        // removes the shimmer that is the entire reason to come up underneath one.
+        expect(shapeBlend({ ...base, style: 'tailRide' }))
+            .toMatchObject({ shapeBands: true, sweepOut: false });
+        // The fallback stays what it always was: one gain curve for the whole spectrum.
+        expect(shapeBlend({ ...base, style: 'plainBlend' }))
+            .toMatchObject({ shapeBands: false, sweepOut: false });
     });
 });

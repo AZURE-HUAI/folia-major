@@ -1,4 +1,14 @@
-import { estimateTempo, rmsDb, spectralFlux, SILENCE_DB } from './signalAnalysis';
+import {
+    estimateDownbeat,
+    estimateTempo,
+    kWeight,
+    rmsDb,
+    spectralFlux,
+    BEATS_PER_BAR,
+    LUFS_OFFSET_DB,
+    SILENCE_DB,
+    TONE_EDGE_HZ,
+} from './signalAnalysis';
 
 // src/services/automix/trackProfile.ts
 // One pass over a decoded track, producing the couple of hundred bytes a transition needs to know
@@ -10,7 +20,7 @@ import { estimateTempo, rmsDb, spectralFlux, SILENCE_DB } from './signalAnalysis
 // are loud or decaying, the beat grid, the key - is about the *incoming* song.
 
 /** Bumped whenever the maths changes, so stored profiles from an older build are re-measured. */
-export const TRACK_PROFILE_VERSION = 3;
+export const TRACK_PROFILE_VERSION = 4;
 
 /**
  * What the analysis runs at.
@@ -67,6 +77,33 @@ const VOCAL_SMOOTH_SEC = 0.5;
  */
 const VOCAL_RISE = 0.5;
 
+/**
+ * Ceiling for the onset envelope the downbeat is read off.
+ *
+ * The bar line is marked by the kick drum on essentially all of this music, and the kick is the only
+ * thing down here. Including anything above it lets the snare - which marks the BACKbeat, the exact
+ * phase we are trying to rule out - vote on where the "one" is.
+ */
+const DOWNBEAT_CEILING_HZ = 150;
+/** How much of each end gets its own key. Long enough to be a section, short enough to be an end. */
+const ENDPOINT_CHROMA_SEC = 20;
+/**
+ * How much of the tail is re-measured for its own tempo.
+ *
+ * Mandarin and Cantonese pop routinely ritardando into the last chorus, and a whole-track average
+ * then puts the grid systematically late exactly where a transition needs it. Thirty seconds is
+ * three periods of the slowest tempo the estimator will look for, which is its own floor.
+ */
+const OUTRO_TEMPO_SEC = 30;
+/**
+ * Frames whose spectrum is this flat are noise, and noise is not a chord.
+ *
+ * A kick and a snare are broadband: they pour energy into all twelve chroma bins evenly, which
+ * drags every key template's correlation towards the same middling number. Dropping the flattest
+ * frames is the cheapest thing that can be done about the low confidences the key estimate reports.
+ */
+const CHROMA_MAX_FLATNESS = 0.28;
+
 /** Feature rate for the structural analysis. Sections are tens of seconds; frames are wasted here. */
 const NOVELTY_BIN_SEC = 1;
 /** Half the checkerboard kernel, in bins. Eight seconds total is about two bars either side. */
@@ -119,6 +156,15 @@ export interface TrackProfile {
      * out as a boundary at all.
      */
     sectionStart: number | null;
+    /**
+     * Every boundary the novelty curve found, in seconds. `sectionStart` is the first of them.
+     *
+     * The whole sequence rather than one edge, because "where does the intro end" and "where are
+     * the seams in this arrangement" are the same measurement asked twice, and a handover placed on
+     * a section edge of the OUTGOING track is the single largest quality lever the literature
+     * reports. Empty when the window analysed was too short to hold the kernel.
+     */
+    sections: number[];
     /** Seconds of near-silence after it stops. Null when only the head was read. */
     leadOut: number | null;
     /**
@@ -139,14 +185,57 @@ export interface TrackProfile {
     outroSlope: number | null;
     /** RMS of the sounding part, dBFS. */
     loudness: number;
+    /** K-weighted level of the opening EDGE_WINDOW_SEC of sound, LUFS. */
+    headDb: number;
+    /** The same for the closing window. Null when only the head was read. */
+    tailDb: number | null;
+    /**
+     * Share of the energy in each of the three regions a blend treats separately, over the opening
+     * window: [below 250Hz, 250Hz to 4kHz, above 4kHz]. Sums to one.
+     *
+     * This is what "how bright is this master" reduces to once loudness has been matched, and the
+     * step between two of them at a handover is the timbre step that makes an otherwise clean
+     * transition sound like two records.
+     */
+    introTone: number[];
+    /** The same for the closing window. Null when only the head was read. */
+    outroTone: number[] | null;
     bpm: number | null;
+    /**
+     * Tempo of the last OUTRO_TEMPO_SEC of the track. Null with only the head, or nothing periodic.
+     *
+     * A track has one tempo only if nobody slowed down at the end, and a transition only ever cares
+     * about the end.
+     */
+    outroBpm: number | null;
     /** Seconds from the start of the track to a beat of the grid. Meaningless without bpm. */
     beatOffset: number;
+    /**
+     * Seconds from the start of the track to a DOWNbeat - the first beat of a bar.
+     *
+     * The beat grid says when the pulses are. It does not say which of them a bar starts on, and a
+     * handover on the wrong one of the four is out by a quarter note for its entire length however
+     * accurately it was scheduled. Null when there is no grid, or when the low end carries no
+     * pattern to read a bar line off.
+     */
+    downbeatOffset: number | null;
+    /** Beats to the bar. Four; stated rather than assumed silently in three different files. */
+    beatsPerBar: number;
     /** Tonic as a pitch class, 0 = C. -1 when nothing correlated well enough. */
     key: number;
     major: boolean;
     /** 0..1, from how far the winning key stands above the runner-up. */
     keyConfidence: number;
+    /**
+     * The key of the opening and closing windows, measured separately from the whole-track one.
+     *
+     * Songs change key, and a transition is a statement about two ENDS - how this one finishes
+     * against how the next one starts. Averaging the chroma over four minutes to answer a question
+     * about twenty seconds is the wrong question, cheaply asked. `outroKey` is null with only the
+     * head, like everything else about the end of a file.
+     */
+    introKey: KeyEstimate;
+    outroKey: KeyEstimate | null;
 }
 
 /**
@@ -322,9 +411,9 @@ const firstSustained = (centre: readonly number[], hopSec: number): number | nul
  * finished mix - "did this just become a different piece of music" - rather than "is that a
  * human", which needs a separated stem to do honestly.
  */
-const firstBoundary = (bins: readonly Float64Array[], binSec: number): number | null => {
+const findBoundaries = (bins: readonly Float64Array[], binSec: number): number[] => {
     const half = NOVELTY_HALF_KERNEL;
-    if (bins.length < half * 2 + 3) return null;
+    if (bins.length < half * 2 + 3) return [];
 
     const unit = bins.map(bin => {
         let energy = 0;
@@ -356,7 +445,7 @@ const firstBoundary = (bins: readonly Float64Array[], binSec: number): number | 
     const scored = novelty.slice(half, bins.length - half);
     // Music that never changes scores a flat zero (the kernel's two halves cancel), and a flat
     // curve has no peaks - only floating-point noise, which a sigma test would happily promote.
-    if (Math.max(...scored) - Math.min(...scored) < 1e-6) return null;
+    if (Math.max(...scored) - Math.min(...scored) < 1e-6) return [];
 
     const mean = scored.reduce((sum, value) => sum + value, 0) / scored.length;
     const variance = scored.reduce((sum, value) => sum + (value - mean) ** 2, 0) / scored.length;
@@ -366,11 +455,12 @@ const firstBoundary = (bins: readonly Float64Array[], binSec: number): number | 
     // scored bin has a zero to its left and wins "is a local maximum" by default. Measured on real
     // tracks that artefact put four songs out of six at exactly the same boundary.
     const earliest = Math.max(half + 1, Math.ceil(NOVELTY_MIN_SEC / binSec));
+    const boundaries: number[] = [];
     for (let index = earliest; index < bins.length - half - 1; index += 1) {
         const isPeak = novelty[index] > novelty[index - 1] && novelty[index] >= novelty[index + 1];
-        if (isPeak && novelty[index] > threshold) return index * binSec;
+        if (isPeak && novelty[index] > threshold) boundaries.push(index * binSec);
     }
-    return null;
+    return boundaries;
 };
 
 /** Least-squares slope of a dB series, per second. */
@@ -412,6 +502,16 @@ export interface TrackEdges {
     introSlope: number;
     outroSlope: number;
     loudness: number;
+    /**
+     * Level of the opening and closing EDGE_WINDOW_SEC of sound, in the same unit as `loudness`.
+     *
+     * A whole-track average cannot answer the question a song change actually asks: going from a
+     * hushed outro into a track that opens on its chorus is a step up, and the reverse is a hole,
+     * and both want a longer overlap for the ear to walk across. Two averages of the two ends is
+     * the cheapest thing that answers it, and the frames were already being read.
+     */
+    headDb: number;
+    tailDb: number;
 }
 
 /**
@@ -481,6 +581,15 @@ export const measureEdges = (
         counted += 1;
     }
 
+    // Mean power, not mean dB. Averaging decibels is averaging logarithms, which lets one silent
+    // frame drag a window down further than a loud one lifts it.
+    const integrated = (values: readonly number[]) => {
+        if (!values.length) return SILENCE_DB;
+        let sum = 0;
+        for (const value of values) sum += 10 ** (value / 10);
+        return Math.max(SILENCE_DB, 10 * Math.log10(sum / values.length) + LUFS_OFFSET_DB);
+    };
+
     return {
         leadIn: first * hopSec,
         soundingEnd: last * hopSec + frameSec,
@@ -491,7 +600,9 @@ export const measureEdges = (
         endsHot: mean(tail(hotFrames)) > average - HOT_EDGE_DB,
         introSlope: slopePerSec(head(edgeFrames), hopSec),
         outroSlope: slopePerSec(tail(edgeFrames), hopSec),
-        loudness: counted ? 10 * Math.log10(energy / counted) : SILENCE_DB,
+        loudness: counted ? 10 * Math.log10(energy / counted) + LUFS_OFFSET_DB : SILENCE_DB,
+        headDb: integrated(head(edgeFrames)),
+        tailDb: integrated(tail(edgeFrames)),
     };
 };
 
@@ -521,6 +632,12 @@ export const analyseTrack = async (
     const bins = FFT_SIZE / 2;
     const binHz = sampleRate / FFT_SIZE;
     const fluxBins = Math.max(8, Math.round(FLUX_CEILING_HZ / binHz));
+    const lowFluxBins = Math.max(4, Math.round(DOWNBEAT_CEILING_HZ / binHz));
+    const toneEdgeBins = TONE_EDGE_HZ.map(hz => Math.min(bins, Math.round(hz / binHz)));
+    // Levels only. The weighting is a statement about how loud something SOUNDS, which is the
+    // question every level here is asked; chroma, flux and the vocal ratio are asked different
+    // questions and are measured off the signal as it is.
+    const weighted = kWeight(mono, sampleRate);
     const real = new Float64Array(FFT_SIZE);
     const imag = new Float64Array(FFT_SIZE);
     const spectrum = new Float32Array(bins);
@@ -542,6 +659,9 @@ export const analyseTrack = async (
             ? ((Math.round(12 * Math.log2(hz / 440) + 69) % 12) + 12) % 12
             : -1;
     }
+    const chromaBinList: number[] = [];
+    for (let index = 0; index < bins; index += 1) if (binPitchClass[index] >= 0) chromaBinList.push(index);
+    const magnitudes = new Float64Array(bins);
 
     // The vocal band, as bin indices. Sums over it are the only thing the side channel is for.
     const side = options.side && options.side.length >= mono.length ? options.side : null;
@@ -552,20 +672,21 @@ export const analyseTrack = async (
 
     const levels: number[] = [];
     const envelope: number[] = [];
+    const lowEnvelope: number[] = [];
     const centre: number[] = [];
     const chroma = new Array<number>(12).fill(0);
-    // The same chroma again, but kept per second rather than summed over the track: one is the
-    // key, the other is the shape the structural analysis compares against itself.
-    const sectionBins: Float64Array[] = Array.from(
-        { length: Math.max(1, Math.ceil(duration / NOVELTY_BIN_SEC)) },
-        () => new Float64Array(12),
-    );
+    const binCount = Math.max(1, Math.ceil(duration / NOVELTY_BIN_SEC));
+    // The same chroma again, but kept per second rather than summed over the track. One is the
+    // key, the second is the shape the structural analysis compares against itself, and the third
+    // is what the two ENDS are in - which is the only part a transition ever asks about.
+    const sectionBins: Float64Array[] = Array.from({ length: binCount }, () => new Float64Array(12));
+    /** Energy in each of the three regions, per second. Summed over an end, that end's tone. */
+    const toneBins: Float64Array[] = Array.from({ length: binCount }, () => new Float64Array(3));
     let frames = 0;
 
     for (let start = 0; start + FFT_SIZE <= mono.length; start += HOP) {
         frame.set(mono.subarray(start, start + FFT_SIZE));
-        const level = rmsDb(frame);
-        levels.push(level);
+        levels.push(rmsDb(weighted.subarray(start, start + FFT_SIZE)));
 
         for (let index = 0; index < FFT_SIZE; index += 1) {
             real[index] = frame[index] * window[index];
@@ -573,22 +694,52 @@ export const analyseTrack = async (
         }
         fft(real, imag);
 
-        const sectionBin = sectionBins[Math.min(
-            sectionBins.length - 1,
-            Math.floor((start / sampleRate) / NOVELTY_BIN_SEC),
-        )];
+        const binIndex = Math.min(binCount - 1, Math.floor((start / sampleRate) / NOVELTY_BIN_SEC));
+        const sectionBin = sectionBins[binIndex];
+        const toneBin = toneBins[binIndex];
 
         let midBand = 0;
+        let peak = 0;
         for (let index = 0; index < bins; index += 1) {
             const magnitude = Math.hypot(real[index], imag[index]);
+            magnitudes[index] = magnitude;
             // dB domain, matching the live analyser's input so the same flux maths applies.
             spectrum[index] = magnitude > 0 ? Math.max(SILENCE_DB, 20 * Math.log10(magnitude)) : SILENCE_DB;
-            const pitchClass = binPitchClass[index];
-            if (pitchClass >= 0) {
-                chroma[pitchClass] += magnitude;
-                sectionBin[pitchClass] += magnitude;
+            const power = magnitude * magnitude;
+            if (index < toneEdgeBins[0]) toneBin[0] += power;
+            else if (index < toneEdgeBins[1]) toneBin[1] += power;
+            else toneBin[2] += power;
+            if (index >= vocalLowBin && index <= vocalHighBin) midBand += power;
+            if (binPitchClass[index] >= 0 && magnitude > peak) peak = magnitude;
+        }
+
+        // How noise-like this frame is over the chroma range: the geometric mean of the spectrum
+        // against its arithmetic mean. One for white noise, near zero for a held chord.
+        //
+        // Floored 60dB under the frame's own peak first, and that floor is what makes the number
+        // mean anything: without it the geometric mean is dominated by the hundreds of essentially
+        // empty bins, every frame reads as perfectly tonal, and the test never fires.
+        const floor = peak * 1e-3;
+        let arithmetic = 0;
+        let logSum = 0;
+        for (const index of chromaBinList) {
+            const magnitude = Math.max(magnitudes[index], floor);
+            arithmetic += magnitude;
+            logSum += Math.log(magnitude);
+        }
+        const flatness = arithmetic > 0 && chromaBinList.length
+            ? Math.exp(logSum / chromaBinList.length) / (arithmetic / chromaBinList.length)
+            : 1;
+        // Continuous rather than a cutoff: a chord played over a drum fill still counts, just for
+        // less than the same chord over nothing. A cutoff would make the answer depend on which
+        // side of one number a snare happened to land.
+        const tonality = Math.max(0, 1 - flatness / CHROMA_MAX_FLATNESS);
+        if (tonality > 0) {
+            for (const index of chromaBinList) {
+                const contribution = magnitudes[index] * tonality;
+                chroma[binPitchClass[index]] += contribution;
+                sectionBin[binPitchClass[index]] += contribution;
             }
-            if (index >= vocalLowBin && index <= vocalHighBin) midBand += magnitude * magnitude;
         }
 
         if (side) {
@@ -608,7 +759,12 @@ export const analyseTrack = async (
             centre.push(total > 0 ? midBand / total : 0.5);
         }
 
-        if (frames > 0) envelope.push(spectralFlux(spectrum, previous, fluxBins));
+        if (frames > 0) {
+            envelope.push(spectralFlux(spectrum, previous, fluxBins));
+            // The same measurement over the bottom of the spectrum only. That band is the kick
+            // drum and nothing else, which is what marks the bar line.
+            lowEnvelope.push(spectralFlux(spectrum, previous, lowFluxBins));
+        }
         previous.set(spectrum);
 
         frames += 1;
@@ -633,13 +789,66 @@ export const analyseTrack = async (
     // Everything about the end of a truncated file describes the truncation, not the music.
     const partial = options.partial === true;
 
+    // Which beat of the bar is the "one". Asked in the envelope's own time base and answered back
+    // in the track's, because every consumer of this counts from the start of the file.
+    const envelopeStartSec = FFT_SIZE / (2 * sampleRate);
+    const barSec = tempo && tempo.periodSec > 0 ? tempo.periodSec * BEATS_PER_BAR : 0;
+    const downbeat = tempo && barSec > 0
+        ? estimateDownbeat(
+            lowEnvelope,
+            hopSec,
+            tempo.periodSec,
+            ((beatOffset - envelopeStartSec) % tempo.periodSec + tempo.periodSec) % tempo.periodSec,
+            BEATS_PER_BAR,
+        )
+        : null;
+
+    // A second pass over the last half minute only. The same code, a different slice - which is
+    // the whole of what "a track has one tempo" was getting wrong.
+    const outroFrames = Math.round(OUTRO_TEMPO_SEC / hopSec);
+    const outroTempo = partial || envelope.length <= outroFrames
+        ? null
+        : estimateTempo(envelope.slice(-outroFrames), hopSec);
+
+    // The two ends, in the units they are compared in. Bin indices rather than seconds because the
+    // per-second accumulators are what both answers come out of.
+    const firstBin = Math.max(0, Math.floor(edges.leadIn / NOVELTY_BIN_SEC));
+    const lastBin = Math.min(binCount, Math.ceil(edges.soundingEnd / NOVELTY_BIN_SEC));
+    const overBins = (from: number, to: number, read: (bin: number) => void) => {
+        for (let index = Math.max(0, from); index < Math.min(binCount, to); index += 1) read(index);
+    };
+    const chromaOver = (from: number, to: number) => {
+        const total = new Array<number>(12).fill(0);
+        overBins(from, to, bin => {
+            for (let pitchClass = 0; pitchClass < 12; pitchClass += 1) {
+                total[pitchClass] += sectionBins[bin][pitchClass];
+            }
+        });
+        return keyFromChroma(total);
+    };
+    const toneOver = (from: number, to: number) => {
+        const total = [0, 0, 0];
+        overBins(from, to, bin => {
+            for (let band = 0; band < 3; band += 1) total[band] += toneBins[bin][band];
+        });
+        const all = total[0] + total[1] + total[2];
+        // An even split is the honest answer for a window with nothing in it: it says "no tilt",
+        // which is what a tone match should do when it cannot see a difference.
+        return all > 0 ? total.map(value => value / all) : [1 / 3, 1 / 3, 1 / 3];
+    };
+    const endpointBins = ENDPOINT_CHROMA_SEC / NOVELTY_BIN_SEC;
+    const toneWindow = EDGE_WINDOW_SEC / NOVELTY_BIN_SEC;
+
+    const sections = findBoundaries(sectionBins, NOVELTY_BIN_SEC);
+
     return {
         version: TRACK_PROFILE_VERSION,
         partial,
         duration,
         leadIn: edges.leadIn,
         vocalStart: side ? firstSustained(centre, hopSec) : null,
-        sectionStart: firstBoundary(sectionBins, NOVELTY_BIN_SEC),
+        sectionStart: sections[0] ?? null,
+        sections,
         leadOut: partial ? null : Math.max(0, duration - edges.soundingEnd),
         bodyOut: partial ? null : Math.max(0, duration - edges.bodyEnd),
         startsHot: edges.startsHot,
@@ -647,10 +856,21 @@ export const analyseTrack = async (
         introSlope: edges.introSlope,
         outroSlope: partial ? null : edges.outroSlope,
         loudness: edges.loudness,
+        headDb: edges.headDb,
+        tailDb: partial ? null : edges.tailDb,
+        introTone: toneOver(firstBin, firstBin + toneWindow),
+        outroTone: partial ? null : toneOver(lastBin - toneWindow, lastBin),
         bpm: tempo?.bpm ?? null,
+        outroBpm: outroTempo?.bpm ?? null,
         beatOffset,
+        downbeatOffset: downbeat === null
+            ? null
+            : ((downbeat + envelopeStartSec) % barSec + barSec) % barSec,
+        beatsPerBar: BEATS_PER_BAR,
         key: key.key,
         major: key.major,
         keyConfidence: key.confidence,
+        introKey: chromaOver(firstBin, firstBin + endpointBins),
+        outroKey: partial ? null : chromaOver(lastBin - endpointBins, lastBin),
     };
 };

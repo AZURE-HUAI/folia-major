@@ -63,13 +63,24 @@ export const lastCurve = (node: FakeGainNode) => {
     return null;
 };
 
-/** A biquad's frequency is an AudioParam too, so the same recorder describes the bass swap. */
-export const createFakeFilter = () => {
-    const frequency = createFakeGainNode();
+/**
+ * A biquad's gain is an AudioParam too, so the same recorder describes the per-band shaping.
+ *
+ * `gain` rather than `frequency`, because that is the parameter the three tone filters automate: a
+ * shelf pulled to -24dB removes a band as completely as a filter swept over it, and unlike a sweep
+ * it returns to exactly unity rather than to "far enough out of the way".
+ */
+export const createFakeFilter = (type: BiquadFilterType = 'peaking') => {
+    const gain = createFakeGainNode();
     return {
-        node: { type: 'highpass', frequency: frequency.gain, Q: { value: 1 } } as unknown as BiquadFilterNode,
-        events: frequency.events,
-        param: frequency,
+        node: {
+            type,
+            gain: gain.gain,
+            frequency: { value: 1000 },
+            Q: { value: 1 },
+        } as unknown as BiquadFilterNode,
+        events: gain.events,
+        param: gain,
     };
 };
 
@@ -77,7 +88,9 @@ export interface FakeDeckChain extends AutomixDeckChain {
     fadeNode: FakeGainNode;
     replayGainNode: FakeGainNode;
     trimNode: FakeGainNode;
-    lowCutParam: FakeGainNode;
+    /** The three band gains, in the order the curve builder produces them. */
+    toneParams: [FakeGainNode, FakeGainNode, FakeGainNode];
+    throwParam: FakeGainNode;
 }
 
 /** Measurements a deck can be told to report, so a blend's shape can be driven from a test. */
@@ -92,15 +105,24 @@ export const createFakeChain = (readings: FakeAnalyserReadings = {}): FakeDeckCh
     const fadeNode = createFakeGainNode();
     const replayGainNode = createFakeGainNode();
     const trimNode = createFakeGainNode();
-    const lowCut = createFakeFilter();
+    const low = createFakeFilter('lowshelf');
+    const mid = createFakeFilter('peaking');
+    const high = createFakeFilter('highshelf');
+    const throwSend = createFakeGainNode();
     const bpm = readings.bpm ?? null;
 
     return {
         source: {} as MediaElementAudioSourceNode,
         replayGain: replayGainNode as unknown as GainNode,
         trim: trimNode as unknown as GainNode,
-        lowCut: lowCut.node,
+        tone: { low: low.node, mid: mid.node, high: high.node },
         fade: fadeNode as unknown as GainNode,
+        throw: {
+            send: throwSend as unknown as GainNode,
+            delay: { delayTime: createFakeGainNode().gain } as unknown as DelayNode,
+            feedback: createFakeGainNode() as unknown as GainNode,
+        },
+        bend: null,
         analyser: {
             tick: () => { },
             loudnessDb: () => readings.loudnessDb ?? null,
@@ -114,7 +136,8 @@ export const createFakeChain = (readings: FakeAnalyserReadings = {}): FakeDeckCh
         fadeNode,
         replayGainNode,
         trimNode,
-        lowCutParam: lowCut.param,
+        toneParams: [low.param, mid.param, high.param],
+        throwParam: throwSend,
     };
 };
 
@@ -123,13 +146,22 @@ export const createFakeContext = (currentTime = 0) => ({ currentTime } as AudioC
 export interface FakeAudioElement {
     duration: number;
     currentTime: number;
+    playbackRate: number;
+    paused: boolean;
+    readyState: number;
     pause: ReturnType<typeof vi.fn>;
+    addEventListener: ReturnType<typeof vi.fn>;
 }
 
 export const createFakeElement = (duration = 100, currentTime = 0): FakeAudioElement => ({
     duration,
     currentTime,
+    playbackRate: 1,
+    paused: false,
+    // HAVE_METADATA: enough for a seek to land, which is what the entry point needs.
+    readyState: 1,
     pause: vi.fn(),
+    addEventListener: vi.fn(),
 });
 
 export const asElement = (element: FakeAudioElement) => element as unknown as HTMLAudioElement;

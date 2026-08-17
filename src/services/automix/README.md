@@ -8,17 +8,24 @@
 
 | 层 | 文件 | 回答的问题 |
 | --- | --- | --- |
-| 证据 | `trackProfile.ts` | 这个音频文件本身是什么样：BPM、响度、调性、前奏到哪结束、结尾是收还是断 |
-| | `signalAnalysis.ts` | 上下都要用的数学：RMS、自相关测速、交叉曲线、平衡修正 |
+| 证据 | `trackProfile.ts` | 这个音频文件本身是什么样：BPM（全曲 + 尾段）、小节线在哪、响度（LUFS）、两端各自的调、三段频谱占比、段落边界表、前奏到哪结束、结尾是收还是断 |
+| | `signalAnalysis.ts` | 上下都要用的数学：K 计权、自相关测速、重拍相位、交叉曲线、分频段曲线、平衡修正 |
 | | `profileService.ts` | 字节从哪来、什么时候允许下载、测完存哪。`trackProfile` 的不纯的那一半 |
-| | `deckAnalyser.ts` | 正在响的那一路此刻是什么样：实时电平、下一个拍点在哪 |
-| 决策 | `transitionChooser.ts` | 这两首歌该用四种接法里的哪一种（beatCut / bassSwap / tailRide / plainBlend） |
-| | `transitionPlanner.ts` | 这一次接多长、落在出场曲的哪个位置 |
+| | `deckAnalyser.ts` | 正在响的那一路此刻是什么样：实时电平（同样 K 计权）、下一个拍点在哪 |
+| | `deckClock.ts` | 这一路**此刻播到第几秒**——把 `currentTime` 的台阶拟合成直线，精度进到毫秒 |
+| 决策 | `musicalTime.ts` | 音乐的单位：拍/小节/乐句取整、两首歌速度关系（含二倍等价）、入场点对齐 |
+| | `transitionChooser.ts` | 这两首歌该用四种接法里的哪一种（beatCut / bassSwap / tailRide / plainBlend），以及音色差多少、要不要抛回声 |
+| | `transitionPlanner.ts` | 这一次接多长、落在出场曲的哪个位置、下一首从第几秒进 |
 | 执行 | `automixSession.ts` | 状态机 `idle → armed → fading`，以及每一步反悔的条件 |
-| | `crossfadeGraph.ts` | Web Audio 那一半：两路 deck 的节点链、增益曲线、低频交接 |
+| | `crossfadeGraph.ts` | Web Audio 那一半：两路 deck 的节点链、增益曲线、三段频谱各自的接缝、回声抛掷 |
+| | `tempoBend.ts` | 把出场曲拉到进场曲的速度上，同时把变速带来的音高改回去 |
+| | `tempoBendProcessor.js` | 上一条的 AudioWorklet 本体（WSOLA）。自足的 ES 模块，不 import 任何东西 |
 | 绑定 | `useAutomixDecks.ts` | React 外壳：两个 `<audio>`、当前是哪一路、每一路渲染什么 src |
 
-前八个文件不碰 React 也不碰 DOM，所以测试不需要音频设备。`useAutomixDecks.ts` 是唯一带 React 的一个。
+除 `useAutomixDecks.ts` 外都不碰 React 也不碰 DOM，所以测试不需要音频设备。
+`tempoBendProcessor.js` 故意是 `.js` 且无 import：它要被 `addModule` 丢进 AudioWorkletGlobalScope
+（那里没有 app 的 bundle），又要被单元测试直接 import（那里没有 `AudioWorkletProcessor`）。
+`registerProcessor` 那一段用 `typeof` 挡住，算法本体两边共用。
 
 ## 目录外的接线点
 
@@ -59,6 +66,33 @@ deck 照常拿到 src 并缓冲，只是先不出声，到点才放。把这两�
 null（尾巴下载不到），那时才退回文件末尾。超过 `MAX_TRIMMED_TAIL_SEC` 的空白或衰减不算尾巴——
 那是隐藏曲目或者写好的氛围尾奏，动它等于删歌。
 
+**过渡长度是算出来的，25 秒只是天花板。** `AUTOMIX_MAX_OVERLAP_SEC` 曾经是 8，注释写着「再长就不像
+一首歌在结束了」——那是品味不是测量，而且它比任何测出来的东西都更常成为瓶颈（日志里出现过 63 秒尾奏
+配 8 秒前奏被一刀切到 8 秒）。现在长度是「一个乐句（16 拍）× 各项系数 → 按乐句/小节/拍取整」，
+天花板只负责拦截，且拦截时是往下退整数个小节，不是把上限本身当答案。放开到 25 的前提是 E4（LUFS）
+和 E5（重叠期留 1.5dB 余量）都已经落地——长重叠撑得住，才敢放长。
+
+**「控制进场 deck 什么时候起播」是个假问题，真问题是「知道它现在播到哪」。** 这条推翻了文档里两版
+P10/P9 的方向。淡入淡出是排在 AudioContext 时钟上的，本来就是采样级精确；不精确的是「排的时候两首
+歌各自在第几秒」。`currentTime` 是个台阶，但台阶底下是一条**严格的直线**（斜率就是 playbackRate），
+所以拟合一秒的读数就能把相位压到毫秒以下——`deckClock.ts`。有了它，对齐不再需要 AudioBufferSourceNode、
+不需要整首解码进内存、不需要重写进度条/拖动/MediaSession，UI 和状态机一行没动。
+残留的半个量化步（约 10ms）是常数偏置，两路 deck 同样偏，做差就没了。
+
+**变速只弯出场曲，永远不弯进场曲。** DJ 的做法是反过来的（不能动全场正在跳的那张），但我们这里出场曲
+只剩几秒、没有未来可以错，而进场曲马上要被听三分钟——弯了它就得在它独自响着的时候把速度扳回来，
+那是整段过渡里唯一没有东西可以遮掩的时刻。速度差分三档：<6% 直接 `playbackRate`（音高偏差不到半音），
+6–25% 加 `tempoBend` 的 WSOLA 把音高改回去，>25% 不叠了——改走卡拍切或大幅缩短。
+
+**`tempoBend` 的节点只在 deck 静音时插进链里。** 它有固定约 20ms 延迟，插进正在出声的链等于重放
+20ms。一次过渡里每路 deck 都有两个可靠的静音时刻（待命时、settle 之后），所以插入排在那两处；
+在插进去之前那一路就是没有变速能力，过渡照跑，只是少一档。
+
 **证据层不认识 React，也不认识播放器。** 新增测量只加在 `trackProfile.ts` / `signalAnalysis.ts`，
 它们只接受数组和数字。要拿新数据做决策，改 `transitionChooser` 或 `transitionPlanner`，
 不要让执行层直接去读档案。
+
+**改 AudioParam 上正在跑的曲线要用 `cancelAndHoldAtTime`。** `cancelScheduledValues` 只删还没开始的
+事件，一条已经在跑的 `setValueCurveAtTime` 会活下来，接着往它的区间里写任何事件都是 NotSupportedError
+——而 `settle` 是所有结局的必经之路，中途暂停就会踩到。`crossfadeGraph` 里的 `releaseParam` 是唯一
+入口。曲线本身不要在 `startAt` 那一刻再补一个 `setValueAtTime`，引擎会判定重叠。

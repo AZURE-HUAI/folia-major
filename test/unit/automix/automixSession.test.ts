@@ -173,16 +173,19 @@ describe('automix session', () => {
         };
         const harness = createHarness();
 
-        const plan = harness.arm({ time: 91 - AUTOMIX_ARM_LEAD_SEC, from: padded });
-        expect(plan?.outStart).toBe(91);
+        const plan = harness.arm({ time: 87 - AUTOMIX_ARM_LEAD_SEC, from: padded });
+        // Whatever the length works out to, it finishes where the MUSIC does - 95s - and not
+        // where the file does.
+        expect(plan!.outStart + plan!.overlap).toBeCloseTo(95, 6);
+        expect(plan?.outStart).toBe(87);
         expect(harness.autoplayHolds).toEqual([true]);
 
         vi.advanceTimersByTime(HOLD_MS + 100);
         expect(harness.autoplayHolds).toEqual([true, false]);
 
-        harness.elements.A.currentTime = 91;
+        harness.elements.A.currentTime = 87;
         harness.session.handleActiveDeckPlaying('local:next-song');
-        expect(lastCurve(harness.chains.A.fadeNode)?.duration).toBe(4);
+        expect(lastCurve(harness.chains.A.fadeNode)?.duration).toBe(8);
     });
 
     it('holds nothing when the blend is already due as it arms', () => {
@@ -445,7 +448,7 @@ describe('automix session', () => {
     });
 
     it('sets the blend length in beats of the outgoing track rather than in seconds', () => {
-        // 90 BPM: eight beats is 5.33s, where a fixed five seconds would be five.
+        // 90 BPM: a phrase is 10.67s, where a fixed five seconds would be five.
         const harness = createHarness({ A: { bpm: 90 } });
 
         const plan = harness.arm({
@@ -453,8 +456,8 @@ describe('automix session', () => {
             to: { duration: 100, lines: [] },
         });
 
-        expect(plan?.overlap).toBeCloseTo(60 / 90 * 8, 2);
-        expect(plan?.reason).toContain('8 beats');
+        expect(plan?.overlap).toBeCloseTo(60 / 90 * 16, 2);
+        expect(plan?.reason).toContain('16 beats');
     });
 
     it('alternates the decks across consecutive transitions', () => {
@@ -531,14 +534,18 @@ describe('automix session, transition styles', () => {
         // The live tap heard a few seconds and called it 160; the file measured end to end is 80,
         // and 160 is exactly the double an autocorrelation has no way to rule out. Where the beats
         // fall is still the tap's answer - the profile's phase has drifted by the end of a track.
-        const harness = createHarness({ A: { loudnessDb: -20, bpm: 160, nextBeatIn: 0.1 } });
-        // 80 BPM rounds the six-second window down to six beats, so the blend starts at 95.5s.
-        harness.arm({ time: 96, from: { ...BLENDABLE_FROM, profile: profile({ bpm: 80 }) }, to: withIntro() });
+        const harness = createHarness({ A: { loudnessDb: -20, bpm: 160, nextBeatIn: 0.3 } });
+        harness.arm({
+            time: 96,
+            from: { ...BLENDABLE_FROM, profile: profile({ bpm: 80, outroBpm: 80 }) },
+            to: withIntro(),
+        });
 
         harness.session.handleActiveDeckPlaying('local:next-song');
 
-        // Beats every 0.75s from 0.1s in, handover at 42.5%: the length moves to put it on 1.6s.
-        expect(lastCurve(harness.chains.A.fadeNode)?.duration).toBeCloseTo(1.6 / 0.425, 5);
+        // Beats every 0.75s from 0.3s in, handover at 42.5%: the length moves to put it on 1.05s.
+        // At the tap's 160 the beats would be 0.375s apart and the answer would be a different one.
+        expect(lastCurve(harness.chains.A.fadeNode)?.duration).toBeCloseTo(1.05 / 0.425, 5);
     });
 
     it('takes the low end off the arriving track and gives it back at the handover', () => {
@@ -552,14 +559,17 @@ describe('automix session, transition styles', () => {
 
         harness.session.handleActiveDeckPlaying('local:next-song');
 
-        // The arriving deck opens filtered and ends open; the leaving deck does the opposite.
-        expect(finalTarget(harness.chains.B.lowCutParam)).toBe(20);
-        expect(harness.chains.B.lowCutParam.events[1]).toMatchObject({ type: 'set', value: 250 });
-        expect(finalTarget(harness.chains.A.lowCutParam)).toBe(250);
-        expect(harness.chains.A.lowCutParam.events[1]).toMatchObject({ type: 'set', value: 20 });
+        // The arriving deck opens with no low end and ends with all of it; the leaving deck does
+        // the opposite, and both are back at flat by the time the curve is over.
+        const arriving = lastCurve(harness.chains.B.toneParams[0])!.curve;
+        const leaving = lastCurve(harness.chains.A.toneParams[0])!.curve;
+        expect(arriving[0]).toBeLessThan(-12);
+        expect(arriving.at(-1)).toBeCloseTo(0, 5);
+        expect(leaving[0]).toBeCloseTo(0, 5);
+        expect(leaving.at(-1)!).toBeLessThan(-12);
     });
 
-    it('opens the low cut on both decks again when the transition settles', () => {
+    it('puts every band back to flat on both decks when the transition settles', () => {
         const harness = createHarness();
         harness.arm({
             from: { ...BLENDABLE_FROM, profile: profile({ outroSlope: -3 }) },
@@ -569,10 +579,11 @@ describe('automix session, transition styles', () => {
 
         vi.advanceTimersByTime(9_000);
 
-        // A deck left filtered would come back thin the next time it is used - the same failure
-        // mode the trim reset exists for.
-        expect(finalTarget(harness.chains.A.lowCutParam)).toBe(20);
-        expect(finalTarget(harness.chains.B.lowCutParam)).toBe(20);
+        // A deck left shelved would come back thin the next time it is used - the same failure
+        // mode the trim reset exists for, and now in three places rather than one.
+        for (const deck of ['A', 'B'] as const) {
+            for (const band of harness.chains[deck].toneParams) expect(finalTarget(band)).toBe(0);
+        }
     });
 
     it('blends a pair the record already runs together, instead of doing nothing', () => {
@@ -593,7 +604,7 @@ describe('automix session, transition styles', () => {
         const blend = lastCurve(harness.chains.A.fadeNode);
         expect(blend?.duration).toBeGreaterThanOrEqual(AUTOMIX_MIN_OVERLAP_SEC);
         // And it is a real overlap, so the low end is handed over rather than stacked.
-        expect(harness.chains.A.lowCutParam.events.length).toBeGreaterThan(0);
+        expect(harness.chains.A.toneParams[0].events.length).toBeGreaterThan(0);
     });
 
     it('cuts rather than fades into a track that starts at full level', () => {
@@ -618,6 +629,6 @@ describe('automix session, transition styles', () => {
 
         expect(plan?.style).toBe('plainBlend');
         harness.session.handleActiveDeckPlaying('local:next-song');
-        expect(harness.chains.A.lowCutParam.events).toHaveLength(0);
+        expect(harness.chains.A.toneParams[0].events).toHaveLength(0);
     });
 });

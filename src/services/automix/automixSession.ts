@@ -1,12 +1,17 @@
 import {
     rampGain,
     rampGainDb,
-    resetLowCut,
-    scheduleBassSwap,
+    resetThrow,
+    resetTone,
+    scheduleBandBlend,
     scheduleCrossfade,
+    scheduleEchoThrow,
     type AutomixDeckChain,
 } from './crossfadeGraph';
-import { planBlendShape, trimForBalance } from './signalAnalysis';
+import { createDeckClock, type DeckClock } from './deckClock';
+import { barGrid, type Grid } from './musicalTime';
+import { planBlendShape, trimForBalance, BEATS_PER_BAR } from './signalAnalysis';
+import { applyTempoBend, ensureTempoBendModule, insertTempoBend, resetTempoBend } from './tempoBend';
 import { shapeBlend } from './transitionChooser';
 import {
     AUTOMIX_MIN_OVERLAP_SEC,
@@ -79,6 +84,15 @@ const BALANCE_INTERVAL_MS = 100;
 const BALANCE_RAMP_SEC = 0.4;
 /** Nothing smaller than this is worth moving a gain for. */
 const BALANCE_STEP_DB = 0.75;
+/**
+ * Longest the incoming deck may be held silent to land the handover where it was planned.
+ *
+ * The hold is what turns "the deck started when it managed to" into "the blend starts where the
+ * plan said", and the gap it is closing is the release round trip - a tenth of a second or two.
+ * Capped because everything waited is taken off the outgoing track's remaining tail, so a hold that
+ * grew unbounded would shorten the blend it exists to place.
+ */
+const MAX_ALIGN_HOLD_SEC = 1;
 
 export interface AutomixSessionPorts {
     getContext: () => AudioContext | null;
@@ -111,6 +125,7 @@ export interface AutomixTransitionRequest {
 }
 
 export const createAutomixSession = (ports: AutomixSessionPorts) => {
+    const clocks: Record<AutomixDeckId, DeckClock> = { A: createDeckClock(), B: createDeckClock() };
     let activeDeck: AutomixDeckId = 'A';
     let phase: AutomixPhase = 'idle';
     let plan: TransitionPlan | null = null;
@@ -144,6 +159,78 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         if (holdingAutoplay === held) return;
         holdingAutoplay = held;
         ports.onAutoplayHoldChange(held);
+    };
+
+    /**
+     * One reading of each deck's position against the audio clock.
+     *
+     * Called from the same timer that feeds the level analysers, so it costs a property read. What
+     * it buys is the entire difference between "the incoming deck started at some point in a
+     * hundred millisecond window" and "the outgoing track is at 187.4213 seconds right now" - see
+     * deckClock. A paused or stalled deck is skipped rather than fitted, because a flat line
+     * through a stopped clock is a rate of zero and would be believed.
+     */
+    const sampleDecks = (contextTime: number) => {
+        (['A', 'B'] as const).forEach(deck => {
+            const element = ports.getElement(deck);
+            if (!element || element.paused || !Number.isFinite(element.currentTime)) return;
+            clocks[deck].sample(element.currentTime, contextTime);
+        });
+    };
+
+    /**
+     * Splices the pitch corrector into a deck, once, while that deck is silent.
+     *
+     * Never while it is sounding: the node carries a fixed twenty milliseconds of latency, and
+     * putting it into a live chain repeats exactly that much audio. The two moments a deck is
+     * reliably silent are while it is armed and after it has been let go of, and between them every
+     * deck is covered inside one transition.
+     */
+    const ensureBend = (deck: AutomixDeckId) => {
+        const context = ports.getContext();
+        const chain = ports.getChain(deck);
+        if (!context || !chain || chain.bend) return;
+        void ensureTempoBendModule(context).then(ready => {
+            const target = ports.getChain(deck);
+            const element = ports.getElement(deck);
+            if (!ready || !target || target.bend) return;
+            // The module usually resolves in a few milliseconds, but "usually" is not a guarantee,
+            // and by the time it does the deck may have started. Then it waits for the next one.
+            if (element && !element.paused && target.fade.gain.value > 0.01) return;
+            target.bend = insertTempoBend(context, target.trim, target.tone.low);
+        });
+    };
+
+    /** Seconds from `now` until a deck reaches the next line of one of its own grids. */
+    const gridWait = (deck: AutomixDeckId, grid: Grid | null, now: number): number | null => {
+        const rate = grid && clocks[deck].rate();
+        const position = grid && clocks[deck].positionAt(now);
+        if (!grid || position === null || !rate) return null;
+        const next = grid.offset + Math.ceil((position - grid.offset) / grid.period) * grid.period;
+        return (next - position) / rate;
+    };
+
+    /**
+     * Puts the incoming deck's playhead where the plan wants it to enter.
+     *
+     * Two reasons it is not zero, and they compose: the file's leading silence is not music, and
+     * once past it the entry can be walked to whichever of the track's bar lines lands on one of
+     * the outgoing track's. Applied twice - once on arming, once again just before the hold is
+     * lifted - because everything else in the app that touches a fresh element also touches
+     * currentTime, and the last write before play() is the one that counts.
+     */
+    const seekTo = (element: HTMLAudioElement, position: number) => {
+        if (!(position > 0.05)) return;
+        const apply = () => {
+            if (Math.abs(element.currentTime - position) < 0.02) return;
+            try {
+                element.currentTime = position;
+            } catch {
+                // Not seekable yet. The second attempt before release usually is.
+            }
+        };
+        if (element.readyState >= 1) apply();
+        else element.addEventListener('loadedmetadata', apply, { once: true });
     };
 
     /**
@@ -225,9 +312,9 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         }
 
         // Unity on both decks, always. A deck left at zero gain is silent playback: the one
-        // failure here a listener cannot work around by pressing anything. The trim and the low
-        // cut go with it, or a deck that was faded out would come back attenuated and thin the
-        // next time it is used.
+        // failure here a listener cannot work around by pressing anything. The trim, the three
+        // tone bands, the throw and the tempo go with it, or a deck that was faded out would come
+        // back attenuated, thin, and running at the wrong speed the next time it is used.
         const context = ports.getContext();
         if (context) {
             (['A', 'B'] as const).forEach(deck => {
@@ -235,9 +322,18 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
                 if (!chain) return;
                 rampGain(context, chain.fade, 1, 0.03);
                 rampGain(context, chain.trim, 1, 0.03);
-                resetLowCut(context, chain.lowCut);
+                resetTone(context, chain.tone);
+                resetThrow(context, chain.throw);
+                resetTempoBend(ports.getElement(deck), chain.bend, context.currentTime);
             });
         }
+        // The tail deck is about to be paused or handed a different track; either way the line
+        // fitted to its position describes a track nobody is listening to any more.
+        clocks[tailDeck].reset();
+        // The tail deck has just been let go of, so this is the one moment it is reliably silent -
+        // the only moment the pitch corrector can be put into its chain without repeating its own
+        // latency out loud. The other deck gets the same treatment while it is armed.
+        ensureBend(tailDeck);
 
         phase = 'idle';
         plan = null;
@@ -285,6 +381,11 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         // Silence the incoming deck before it is allowed to make a sound, so the blend owns its
         // first sample instead of the track punching in at full level.
         rampGain(context, incomingChain.fade, 0);
+        // Silent and loaded is exactly the state the pitch corrector has to be added in.
+        ensureBend(incoming);
+        seekTo(incomingElement, nextPlan.inStart);
+        // Its old readings describe wherever this deck was left after the last transition.
+        clocks[incoming].reset();
 
         phase = 'armed';
         plan = nextPlan;
@@ -312,7 +413,12 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         if (startIn > RELEASE_MARGIN_SEC) {
             setAutoplayHold(true);
             releaseTimer = setTimeout(
-                () => setAutoplayHold(false),
+                () => {
+                    // Last write before play(): whatever else touched this element during the
+                    // advance, the entry point is what it starts from.
+                    seekTo(incomingElement, nextPlan.inStart);
+                    setAutoplayHold(false);
+                },
                 (startIn - RELEASE_MARGIN_SEC) * 1000,
             );
         }
@@ -333,6 +439,7 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         // A deck that just started is playing something new; its old measurements describe a
         // track nobody is listening to any more.
         activeChain?.analyser.reset();
+        clocks[activeDeck].reset();
 
         if (phase !== 'armed') {
             // Whatever a cancelled blend left behind, a deck playing outside a transition sits at
@@ -356,7 +463,26 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         // which is the one place it must never land. Clamped by the element as well: the profile
         // and the media are two independent measurements of the same file and can disagree.
         const soundingLeft = Math.min(tailElement.duration, plan.outStart + plan.overlap);
-        const remaining = soundingLeft - tailElement.currentTime;
+
+        // Where the outgoing track really is, to a fraction of a millisecond, rather than to the
+        // tens of milliseconds `currentTime` reports. Everything below is placed against this.
+        const now = context.currentTime;
+        const tailClock = clocks[tailDeck];
+        const position = tailClock.positionAt(now) ?? tailElement.currentTime;
+        const tailRate = tailClock.rate() ?? 1;
+
+        // The handover starts where the plan put it, not where the incoming deck happened to make
+        // its first sound. The two differ by the release round trip - a tenth of a second or two -
+        // and closing that gap is what makes a bar line a bar line rather than a near miss. Never
+        // backwards: if the deck was late, the blend starts now and is shorter, as it always was.
+        // Clamped here rather than after the fact: everything below measures the blend from this
+        // moment, so a wait that was trimmed later would leave the length describing a start the
+        // transition never had.
+        const startMedia = Math.min(
+            Math.max(position, Math.min(plan.outStart, soundingLeft)),
+            position + MAX_ALIGN_HOLD_SEC,
+        );
+        const remaining = soundingLeft - startMedia;
         const overlap = resolveOverlap(plan, remaining);
         // The queue can move under us between planning and playing: a manual skip, or a track
         // that turned out to be unavailable and auto-skipped. Blending into a song we never
@@ -398,12 +524,20 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         // two swap places, and its beat grid decides where that swap lands.
         const tempo = tailChain.analyser.tempo();
         const outgoingDb = tailChain.analyser.loudnessDb();
-        const nextBeatIn = tailChain.analyser.nextBeatIn(context.currentTime);
-        // Two questions, each answered by whichever half knows it. The tap heard the last few
-        // seconds, so it knows WHERE the beats are right now. The profile measured the whole file
-        // with a tempo prior, so it knows how FAST the track runs - which is the half a live
-        // autocorrelation gets an octave wrong, and the half that decides the length.
-        const periodSec = plannedFrom?.bpm ? 60 / plannedFrom.bpm : tempo?.periodSec ?? null;
+        // The tail's own tempo where it was measured separately - a track that slows into its last
+        // chorus has two, and this is the one the transition is laid against.
+        const outgoingBpm = plannedFrom?.outroBpm ?? plannedFrom?.bpm ?? null;
+        const periodSec = outgoingBpm ? 60 / outgoingBpm : tempo?.periodSec ?? null;
+        // Where the beats are, from the file rather than from the last few seconds of it.
+        //
+        // This used to be a live autocorrelation, because nothing else could answer it: the offline
+        // profile knows where the beats sit in the FILE, and until the deck clock there was no way
+        // to say where the file was on the audio clock. There is now, and between the two the grid
+        // is exact rather than estimated. The tap stays as the fallback for anything unanalysed.
+        const beatGrid = periodSec !== null && plannedFrom
+            ? { offset: plannedFrom.beatOffset % periodSec, period: periodSec }
+            : null;
+        const nextBeatIn = gridWait(tailDeck, beatGrid, now) ?? tailChain.analyser.nextBeatIn(now);
         const fade = planBlendShape({
             overlap,
             outgoingDb,
@@ -422,27 +556,56 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             incomingLeadIn: plannedTo?.leadIn ?? null,
         });
 
-        const spans = shape.hold + shape.overlap;
+        // Everything above is in the outgoing track's own seconds. Everything below is on the audio
+        // clock, and the two stop being the same unit the moment that track is bent to meet the
+        // incoming tempo: eight of its seconds at 1.1x take seven and a bit to play. One division,
+        // in one place, is the whole of the conversion.
+        const stretch = shape.style === 'beatCut' || shape.overlap < AUTOMIX_MIN_OVERLAP_SEC
+            ? 1
+            : plan.stretch;
+        // Applied here rather than at the start of the fade, so the wait to the fade is measured in
+        // the same time base the wait is actually spent in. A tenth of a second of the outgoing
+        // track at the new tempo, before the incoming one is audible, is not something anyone hears
+        // - two time bases either side of a hold is something everyone hears.
+        const applied = applyTempoBend(tailElement, tailChain.bend, stretch, now);
+        const alignHold = Math.max(0, (startMedia - position) / (tailRate * applied));
+        const hold = alignHold + shape.hold;
+        const startAt = now + hold;
+        const wall = shape.overlap / applied;
+
         console.log(
             `[Automix] ${shape.style}${shape.style === plan.style ? '' : ` (planned ${plan.style})`}:`
-            + `${shape.hold > 0.01 ? ` waits ${shape.hold.toFixed(2)}s, then` : ''}`
-            + ` ${shape.overlap < 0.1 ? `${Math.round(shape.overlap * 1000)}ms` : `${shape.overlap.toFixed(2)}s`}`
+            + `${hold > 0.01 ? ` waits ${hold.toFixed(2)}s, then` : ''}`
+            + ` ${wall < 0.1 ? `${Math.round(wall * 1000)}ms` : `${wall.toFixed(2)}s`}`
             + ` at ${Math.round(shape.crossover * 100)}%`
-            + `${shape.bassSwap ? ', low end swapped' : ''}`
+            + `${shape.shapeBands ? ', three bands' : ''}`
+            + `${shape.sweepOut ? ', swept out' : ''}`
+            + `${plan.echoThrow ? ', thrown' : ''}`
+            + `${applied === 1 ? '' : `, outgoing at ${applied.toFixed(3)}x${tailChain.bend ? ' in tune' : ''}`}`
             + `${fade.snappedToBeat && shape.style === plan.style ? ` on a beat (${periodSec ? Math.round(60 / periodSec) : '?'} BPM)` : ''}`
-            + `${outgoingDb === null ? '' : `, outgoing ${outgoingDb.toFixed(1)} dBFS`}`,
+            + `${outgoingDb === null ? '' : `, outgoing ${outgoingDb.toFixed(1)} LUFS`}`
+            + `${tailClock.fit() === null ? ', position estimated' : ''}`,
         );
 
-        // Read before scheduling so the filter sweep and the gain curve share one start time.
-        const startAt = context.currentTime + shape.hold;
-        if (shape.bassSwap) {
-            scheduleBassSwap(
-                context, tailChain.lowCut, activeChain.lowCut, startAt, shape.overlap, shape.crossover,
+        if (shape.shapeBands) {
+            scheduleBandBlend(context, tailChain.tone, activeChain.tone, startAt, wall, {
+                crossover: shape.crossover,
+                swapBass: true,
+                sweepOut: shape.sweepOut,
+                tiltDb: plan.tiltDb,
+            });
+        }
+        if (plan.echoThrow) {
+            // A cut goes at the start of its own 40ms; an overlap goes where the two change places,
+            // which is the moment the outgoing track stops being the one being listened to.
+            scheduleEchoThrow(
+                context,
+                tailChain.throw,
+                startAt + (shape.style === 'beatCut' ? 0 : wall * shape.crossover),
+                periodSec,
             );
         }
-        scheduleCrossfade(
-            context, tailChain.fade, activeChain.fade, shape.overlap, shape.crossover, shape.hold,
-        );
+        scheduleCrossfade(context, tailChain.fade, activeChain.fade, wall, shape.crossover, hold);
         // Only where there is an overlap to balance. Across a splice or a cut the two tracks are
         // never both audible, so pulling one down would just be a level step nobody asked for.
         if (shape.overlap >= AUTOMIX_MIN_OVERLAP_SEC) {
@@ -451,7 +614,7 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
 
         cleanupTimer = setTimeout(
             () => settle({ pauseTail: true }),
-            spans * 1000 + FADE_CLEANUP_MARGIN_MS,
+            (hold + wall) * 1000 + FADE_CLEANUP_MARGIN_MS,
         );
     };
 
@@ -492,6 +655,7 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
     return {
         getActiveDeck: () => activeDeck,
         getPhase: () => phase,
+        sampleDecks,
         requestTransition,
         handleActiveDeckPlaying,
         handleTailEnded,

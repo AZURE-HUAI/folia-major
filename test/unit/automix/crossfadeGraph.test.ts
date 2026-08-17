@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-    BASS_OPEN_HZ,
-    BASS_SWAP_HZ,
     rampGain,
     rampGainDb,
-    scheduleBassSwap,
+    scheduleBandBlend,
     scheduleCrossfade,
+    scheduleEchoThrow,
 } from '@/services/automix/crossfadeGraph';
+import { dbToGain, BLEND_HEADROOM_DB } from '@/services/automix/signalAnalysis';
 import {
     asGain,
     createFakeContext,
@@ -35,6 +35,10 @@ describe('scheduleCrossfade', () => {
     it('hands loudness over at constant power rather than dipping in the middle', () => {
         // Two uncorrelated songs summed on a linear pair lose about 3dB halfway through, and the
         // blend audibly sags. That has to hold wherever the handover is put, not only at 50%.
+        //
+        // Constant power UNDER the headroom, which is the deliberate exception: both curves carry
+        // the same anti-clipping dip, so the ratio between them - which is what "constant power"
+        // is a statement about - is untouched by it.
         const context = createFakeContext();
         const outgoing = createFakeGainNode();
         const incoming = createFakeGainNode();
@@ -44,8 +48,30 @@ describe('scheduleCrossfade', () => {
         const out = lastCurve(outgoing)!.curve;
         const into = lastCurve(incoming)!.curve;
         for (let index = 0; index < out.length; index += 1) {
-            expect(out[index] ** 2 + into[index] ** 2).toBeCloseTo(1, 5);
+            const headroom = dbToGain(-BLEND_HEADROOM_DB * Math.sin((index / (out.length - 1)) * Math.PI));
+            expect(out[index] ** 2 + into[index] ** 2).toBeCloseTo(headroom ** 2, 5);
         }
+    });
+
+    it('keeps a decibel and a half in hand where the two masters are stacked', () => {
+        // Equal power is a statement about power, not about peaks: two modern masters summed in
+        // the middle of a blend can and do go past full scale. The dip has to be gone by both
+        // ends, or it becomes a swell on the incoming track the moment it is alone.
+        const context = createFakeContext();
+        const outgoing = createFakeGainNode();
+        const incoming = createFakeGainNode();
+
+        scheduleCrossfade(context, asGain(outgoing), asGain(incoming), 4, 0.5);
+
+        const out = lastCurve(outgoing)!.curve;
+        const into = lastCurve(incoming)!.curve;
+        let quietest = Infinity;
+        for (let index = 0; index < out.length; index += 1) {
+            quietest = Math.min(quietest, out[index] ** 2 + into[index] ** 2);
+        }
+        expect(quietest).toBeCloseTo(dbToGain(-BLEND_HEADROOM_DB) ** 2, 3);
+        expect(out[0]).toBeCloseTo(1, 6);
+        expect(into.at(-1)).toBeCloseTo(1, 6);
     });
 
     it('starts and ends on full handover, moving one way the whole time', () => {
@@ -114,41 +140,132 @@ describe('scheduleCrossfade, held', () => {
     });
 });
 
-describe('scheduleBassSwap', () => {
-    const run = (seconds = 4, crossover = 0.5) => {
+describe('scheduleBandBlend', () => {
+    const stack = () => {
+        const low = createFakeFilter('lowshelf');
+        const mid = createFakeFilter('peaking');
+        const high = createFakeFilter('highshelf');
+        return {
+            nodes: { low: low.node, mid: mid.node, high: high.node },
+            params: [low.param, mid.param, high.param] as const,
+        };
+    };
+
+    const run = (request: Partial<Parameters<typeof scheduleBandBlend>[5]> = {}) => {
         const context = createFakeContext(0);
-        const outgoing = createFakeFilter();
-        const incoming = createFakeFilter();
-        scheduleBassSwap(context, outgoing.node, incoming.node, 0, seconds, crossover);
+        const outgoing = stack();
+        const incoming = stack();
+        scheduleBandBlend(context, outgoing.nodes, incoming.nodes, 0, 4, {
+            crossover: 0.5,
+            swapBass: true,
+            sweepOut: true,
+            tiltDb: [0, 0],
+            ...request,
+        });
         return { outgoing, incoming };
     };
 
     it('brings the incoming track in without its bass and hands the low end over', () => {
+        // The one thing two overlapping tracks cannot share. Everything below ~250Hz doubles in
+        // level, beats against itself and cancels; the mids overlap perfectly happily.
         const { outgoing, incoming } = run();
 
-        expect(incoming.events[1]).toMatchObject({ type: 'set', time: 0, value: BASS_SWAP_HZ });
-        expect(incoming.events.at(-1)).toMatchObject({ type: 'exp', value: BASS_OPEN_HZ });
-        expect(outgoing.events[1]).toMatchObject({ type: 'set', time: 0, value: BASS_OPEN_HZ });
-        expect(outgoing.events.at(-1)).toMatchObject({ type: 'exp', value: BASS_SWAP_HZ });
+        const arriving = lastCurve(incoming.params[0])!.curve;
+        const leaving = lastCurve(outgoing.params[0])!.curve;
+        expect(arriving[0]).toBeLessThan(-12);
+        expect(arriving.at(-1)).toBeCloseTo(0, 5);
+        expect(leaving[0]).toBeCloseTo(0, 5);
+        expect(leaving.at(-1)!).toBeLessThan(-12);
     });
 
-    it('swaps around the crossover, not around the middle', () => {
-        const { incoming } = run(4, 0.25);
+    it('takes the top off the outgoing track only after the two have changed places', () => {
+        // A departing track that is filtered as well as faded reads as being pulled away rather
+        // than turned down - but not before the handover, or it is simply missing its cymbals.
+        const { outgoing } = run({ crossover: 0.5 });
 
-        // Crossover at 1s, so the sweep is centred there rather than at 2s.
-        const hold = incoming.events[2] as { time: number };
-        const end = incoming.events[3] as { time: number };
-        expect((hold.time + end.time) / 2).toBeCloseTo(1, 6);
+        const high = lastCurve(outgoing.params[2])!.curve;
+        expect(high[0]).toBeCloseTo(0, 5);
+        expect(high[Math.floor(high.length / 2)]).toBeCloseTo(0, 2);
+        expect(high.at(-1)!).toBeLessThan(-5);
     });
 
-    it('finishes the sweep inside the blend even when the handover is right at the edge', () => {
-        // Otherwise a deck is still sweeping after the other one has gone, and the swap is heard
-        // as a filter move rather than as the two tracks changing places.
-        const { incoming } = run(1, 0.9);
+    it('leaves every band flat when the styles that want none are used', () => {
+        const { outgoing, incoming } = run({ swapBass: false, sweepOut: false });
 
-        const end = incoming.events.at(-1) as { time: number };
-        expect(end.time).toBeLessThanOrEqual(1);
-        expect((incoming.events[2] as { time: number }).time).toBeGreaterThanOrEqual(0);
+        for (const param of [...outgoing.params, ...incoming.params]) {
+            const curve = lastCurve(param)!.curve;
+            expect(Math.max(...Array.from(curve, Math.abs))).toBeCloseTo(0, 6);
+        }
+    });
+
+    it('lands the incoming track back on its own tone by the handover', () => {
+        // The tone match is a way in, not an effect: it has to be gone by the time the arriving
+        // track is the one being listened to.
+        const { incoming } = run({ tiltDb: [-2.5, 2] });
+
+        const mid = lastCurve(incoming.params[1])!.curve;
+        expect(mid[0]).toBeCloseTo(-2.5, 5);
+        expect(mid[Math.round((mid.length - 1) * 0.5)]).toBeCloseTo(0, 5);
+        expect(mid.at(-1)).toBeCloseTo(0, 5);
+    });
+
+    it('puts every band back to flat after the curve, not at wherever it ended', () => {
+        // setValueCurveAtTime leaves a parameter at its last value for ever, and "for ever" here
+        // is the next track. A deck left 24dB down in the low end plays it with no bass.
+        const { outgoing, incoming } = run();
+
+        for (const param of [...outgoing.params, ...incoming.params]) {
+            expect(finalTarget(param)).toBe(0);
+        }
+    });
+});
+
+describe('scheduleEchoThrow', () => {
+    const node = () => {
+        const send = createFakeGainNode();
+        const delayTime = createFakeGainNode();
+        return {
+            send,
+            delayTime,
+            handle: {
+                send: asGain(send),
+                delay: { delayTime: delayTime.gain } as unknown as DelayNode,
+                feedback: asGain(createFakeGainNode()),
+            },
+        };
+    };
+
+    it('opens into the delay just before the track goes, and shuts as it goes', () => {
+        // What is already in the line keeps repeating - that is the effect. Leaving the send open
+        // would instead feed it the silence of a deck that has been paused.
+        const context = createFakeContext(0);
+        const { send, handle } = node();
+
+        scheduleEchoThrow(context, handle, 2, 0.5);
+
+        expect(send.events).toContainEqual({ type: 'ramp', time: 2, value: expect.any(Number) });
+        expect(finalTarget(send)).toBe(0);
+        const opens = send.events.find(event => event.type === 'set' && event.value === 0);
+        expect(opens).toMatchObject({ time: 1.85 });
+    });
+
+    it('repeats on the grid rather than across it', () => {
+        const context = createFakeContext(0);
+        const { delayTime, handle } = node();
+
+        scheduleEchoThrow(context, handle, 2, 0.5);
+
+        // An eighth note at the outgoing track's own tempo.
+        expect(finalTarget(delayTime)).toBeCloseTo(0.25, 6);
+    });
+
+    it('never schedules into the past', () => {
+        const context = createFakeContext(5);
+        const { send, handle } = node();
+
+        scheduleEchoThrow(context, handle, 5.02, null);
+
+        for (const event of send.events) expect(event.time).toBeGreaterThanOrEqual(5);
     });
 });
 

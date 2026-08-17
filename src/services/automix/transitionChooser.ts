@@ -1,4 +1,6 @@
-import type { TrackProfile } from './trackProfile';
+import { tempoMatch, TEMPO_LENGTH_SCALE, type TempoMatch } from './musicalTime';
+import { toneTilt } from './signalAnalysis';
+import type { KeyEstimate, TrackProfile } from './trackProfile';
 
 // src/services/automix/transitionChooser.ts
 // Which KIND of transition two songs should get, and what that kind turns into on the audio clock.
@@ -25,7 +27,7 @@ export type TransitionStyle =
     /** A plain crossfade. What everything used to be; now only what is left when nothing is known. */
     | 'plainBlend';
 
-export type KeyRelation = 'compatible' | 'neutral' | 'clashing' | 'unknown';
+export type KeyRelation = 'compatible' | 'adjacent' | 'neutral' | 'clashing' | 'unknown';
 
 /** Below this the key estimate is a coin flip and is treated as no answer at all. */
 const MIN_KEY_CONFIDENCE = 0.25;
@@ -51,10 +53,23 @@ export const HEAD_BUDGET_SEC = 0.05;
 /** Length multipliers by how well the two keys sit together. Unknown must not be a penalty. */
 const LENGTH_SCALE: Record<KeyRelation, number> = {
     compatible: 1,
+    adjacent: 0.85,
     neutral: 0.7,
     clashing: 0.4,
     unknown: 1,
 };
+
+/**
+ * How far apart the two ends can be in level before the overlap wants stretching to cover it.
+ *
+ * A hushed outro into a track that opens on its chorus is a step up; the reverse is a hole. Either
+ * way the ear wants a ramp rather than an edge, and the only thing a transition has to give it is
+ * time. Twelve decibels is about the widest step a real library produces once loudness matching has
+ * done its part.
+ */
+const ENERGY_STEP_CEILING_DB = 12;
+/** Longest an energy step alone may make a blend. A ramp, not a different transition. */
+const ENERGY_STEP_SCALE = 0.4;
 
 /**
  * How much shorter an overlap gets when the incoming track opens at full level.
@@ -72,34 +87,60 @@ const STYLE_SCALE: Record<TransitionStyle, number> = {
     plainBlend: 1,
 };
 
-const usableKey = (profile: TrackProfile | null | undefined) => (
-    profile && profile.key >= 0 && profile.keyConfidence >= MIN_KEY_CONFIDENCE ? profile : null
+const usableKey = (estimate: KeyEstimate | null | undefined): KeyEstimate | null => (
+    estimate && estimate.key >= 0 && estimate.confidence >= MIN_KEY_CONFIDENCE ? estimate : null
 );
 
 /**
- * How two keys sit together, in the only three grades that change what we do.
+ * The key of the END of a track that a transition actually touches.
+ *
+ * Songs change key, and this only ever asks about twenty seconds of one. A whole-track average is
+ * the answer to a different question, and it is used only as the fallback - for a track whose ends
+ * were too percussive to read, or one completed from a level history that carries no spectrum at
+ * all.
+ */
+const endKey = (
+    profile: TrackProfile | null | undefined,
+    which: 'intro' | 'outro',
+): KeyEstimate | null => {
+    if (!profile) return null;
+    const endpoint = which === 'outro' ? profile.outroKey : profile.introKey;
+    return usableKey(endpoint) ?? usableKey({
+        key: profile.key, major: profile.major, confidence: profile.keyConfidence,
+    });
+};
+
+/**
+ * How two keys sit together, in the grades that change what we do.
  *
  * Used to pick a transition, never to modify one. Bending the outgoing track's pitch onto the
- * incoming one is the obvious-looking move and it is wrong twice over: playbackRate shifts tempo
- * with pitch (a semitone is a 5.9% speed change, which reads as a tape stop), and a hand-rolled
- * phase vocoder on a finished mix smears the transients worse than the dissonance it removes. A
- * clash is answered by not giving it time, which costs nothing.
+ * incoming one is the obvious-looking move and it is wrong twice over: it would have to be a real
+ * pitch shift rather than a rate change, on a full mix, in the one moment of the transition where
+ * an artefact has nothing to hide behind - and it would leave the outgoing track out of tune with
+ * the three minutes the listener just heard. A clash is answered by not giving it time, which costs
+ * nothing.
  */
 export const keyRelation = (
     from: TrackProfile | null | undefined,
     to: TrackProfile | null | undefined,
 ): KeyRelation => {
-    const a = usableKey(from);
-    const b = usableKey(to);
+    const a = endKey(from, 'outro');
+    const b = endKey(to, 'intro');
     if (!a || !b) return 'unknown';
 
     const interval = ((b.key - a.key) % 12 + 12) % 12;
     if (a.major === b.major) {
         // Same key, or one step either way round the circle of fifths.
         if (interval === 0 || interval === 7 || interval === 5) return 'compatible';
+        // Two steps round: one accidental apart. Not a clash, and better than an arbitrary pair.
+        if (interval === 2 || interval === 10) return 'adjacent';
     } else if ((a.major && interval === 9) || (!a.major && interval === 3)) {
         // Relative minor / relative major: the same seven notes.
         return 'compatible';
+    } else if (interval === 0) {
+        // The parallel major and minor - C against C minor. A shared tonic, one note different, and
+        // one of the more usable moves on the wheel even though it is not the same scale.
+        return 'adjacent';
     }
     // A semitone apart or a tritone apart: the two most dissonant things two mixes can do at once.
     if (interval === 1 || interval === 11 || interval === 6) return 'clashing';
@@ -109,8 +150,19 @@ export const keyRelation = (
 export interface StyleChoice {
     style: TransitionStyle;
     relation: KeyRelation;
+    /** How the two tempos sit, and what would be done about it. */
+    tempo: TempoMatch;
     /** Multiplier the planner applies to its default length. */
     lengthScale: number;
+    /**
+     * Mid and top correction, in dB, for the incoming deck at the start of the blend.
+     *
+     * The incoming track arrives wearing the outgoing one's character and returns to its own by the
+     * time the two change places. Zero when either tone is unmeasured, which is the honest default.
+     */
+    tiltDb: [number, number];
+    /** The outgoing track is thrown into a delay as it goes, instead of simply stopping. */
+    echoThrow: boolean;
     reason: string;
 }
 
@@ -127,10 +179,29 @@ export const chooseTransitionStyle = (input: {
 }): StyleChoice => {
     const { from, to } = input;
     const relation = keyRelation(from, to);
+    // The tail's own tempo where it was measured. A track that slows into its last chorus has two
+    // tempos, and only one of them is the one a transition is laid against.
+    const tempo = tempoMatch(from?.outroBpm ?? from?.bpm, to?.bpm);
+    const tilt = toneTilt(from?.outroTone, to?.introTone);
+
+    // How far apart the two ends sit in level, in either direction. Both directions want the same
+    // answer - more time - so only the size of the step matters.
+    const step = from?.tailDb !== null && from?.tailDb !== undefined && to
+        ? Math.min(ENERGY_STEP_CEILING_DB, Math.abs(from.tailDb - to.headDb))
+        : 0;
+    const energyScale = 1 + (step / ENERGY_STEP_CEILING_DB) * ENERGY_STEP_SCALE;
+
     const decide = (style: TransitionStyle, reason: string, extraScale = 1): StyleChoice => ({
         style,
         relation,
-        lengthScale: LENGTH_SCALE[relation] * STYLE_SCALE[style] * extraScale,
+        tempo,
+        lengthScale: LENGTH_SCALE[relation] * STYLE_SCALE[style] * extraScale
+            * TEMPO_LENGTH_SCALE[tempo.relation] * (style === 'beatCut' ? 1 : energyScale),
+        // Nothing to match against on a cut: the two tracks are never both sounding.
+        tiltDb: style === 'beatCut' || style === 'plainBlend' ? [0, 0] : tilt,
+        // A track that stops at full level has an edge on it either way; a delay is what turns that
+        // edge into something that sounds chosen.
+        echoThrow: style === 'beatCut' || from?.endsHot === true,
         reason,
     });
 
@@ -153,6 +224,16 @@ export const chooseTransitionStyle = (input: {
             'the next track starts at full level, so the overlap is kept short',
             HOT_START_SCALE,
         );
+    }
+
+    // Two tempos too far apart to be held against each other. Over a four second overlap a quarter
+    // of a beat per beat becomes a full beat of drift, so the two rhythms end up in opposition
+    // rather than merely unaligned - and no gain curve, band split or stretch inside the honest
+    // range fixes that. The answer is to not overlap them: cut on a beat, so each track is only
+    // ever heard against itself. Needs a beat of the incoming track's own silence to wait in, for
+    // the same reason every cut does.
+    if (tempo.relation === 'far' && from?.bpm && to && to.leadIn >= 60 / from.bpm) {
+        return decide('beatCut', `the two tempos are ${Math.round(Math.abs(tempo.ratio - 1) * 100)}% apart, so this one is cut`);
     }
 
     // A produced fade-out. Fading a fade doubles it; overlap earlier and swap the low end instead.
@@ -191,7 +272,10 @@ export interface StyledBlend {
     /** Length of the handover itself. */
     overlap: number;
     crossover: number;
-    bassSwap: boolean;
+    /** The three regions get their own seams rather than sharing one gain curve. */
+    shapeBands: boolean;
+    /** The outgoing track is filtered out of the way as it goes, not only turned down. */
+    sweepOut: boolean;
 }
 
 /**
@@ -213,8 +297,24 @@ export const shapeBlend = (request: BlendShapeRequest): StyledBlend => {
             ? Math.floor((maxHold - nextBeatIn) / periodSec)
             : -1;
         const hold = steps >= 0 ? nextBeatIn! + steps * periodSec! : 0;
-        return { style, hold: Math.max(0, hold), overlap: BEAT_CUT_SEC, crossover: 0.5, bassSwap: false };
+        return {
+            style,
+            hold: Math.max(0, hold),
+            overlap: BEAT_CUT_SEC,
+            crossover: 0.5,
+            shapeBands: false,
+            sweepOut: false,
+        };
     }
 
-    return { style, hold: 0, overlap, crossover, bassSwap: style !== 'plainBlend' };
+    return {
+        style,
+        hold: 0,
+        overlap,
+        crossover,
+        shapeBands: style !== 'plainBlend',
+        // Not on a ride: a decaying tail is already leaving of its own accord, and taking the top
+        // off it as well removes the shimmer that is the whole reason to blend underneath one.
+        sweepOut: style === 'bassSwap',
+    };
 };
