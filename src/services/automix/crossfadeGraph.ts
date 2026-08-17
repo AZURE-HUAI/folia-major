@@ -297,8 +297,10 @@ export const scheduleCrossfade = (
     seconds: number,
     crossover = 0.5,
     hold = 0,
+    /** Fraction of the blend both tracks stay held at level. 0 is a plain crossfade. */
+    together = 0,
 ): boolean => {
-    const curves = buildCrossfadeCurves(crossover);
+    const curves = buildCrossfadeCurves(crossover, together);
     const now = context.currentTime;
     const startAt = now + Math.max(0, hold);
     try {

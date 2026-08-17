@@ -263,21 +263,53 @@ const headroomBell = (progress: number) => Math.sin(clamp(progress, 0, 1) * Math
  * Both sides read the same warped progress, so cos^2 + sin^2 keeps the summed power at exactly one
  * wherever the crossover is put: moving the handover changes the two tracks' relative speeds
  * without ever letting the blend sag or swell in the middle.
+ *
+ * `together` is the difference between a mix and a fade, and it is the whole reason this takes a
+ * second parameter.
+ *
+ * A fade's signature is not its length - it is that the outgoing track descends CONTINUOUSLY for
+ * the whole span, so you hear it receding the entire time. A mix's signature is that the outgoing
+ * track is simply THERE, at strength, and then is gone. Three separate rounds of making these
+ * blends longer did not change that, because length was never what the ear was reading: the level
+ * curve was a full-span cosine in every style, and three bands of filtering on top of a crossfade
+ * is a crossfade.
+ *
+ * So the warp gets a flat middle. `together` is the fraction of the blend both tracks spend held at
+ * one level, centred on the crossover - which is exactly where the bass swap happens, so the two
+ * sit at equal strength with only one of them carrying a low end, which is the actual DJ move and
+ * the actual reason it does not turn to mud.
+ *
+ * Crucially this costs NO headroom. The plateau sits at cos(pi/4) = sin(pi/4), so the summed power
+ * across it is still exactly one - the same as every other instant of the blend. It is a different
+ * shape at identical energy, not a louder one.
  */
-export const buildCrossfadeCurves = (crossover: number, points = 64): {
+export const buildCrossfadeCurves = (
+    crossover: number,
+    /** 0 is a pure crossfade, which is what a crossfade should be. Up to 0.8 of held middle. */
+    together = 0,
+    points = 64,
+): {
     out: Float32Array;
     in: Float32Array;
 } => {
     const pivot = clamp(crossover, 0.15, 0.85);
+    const held = clamp(together, 0, 0.8);
+    // Where the incoming track finishes arriving and where the outgoing one starts leaving. They
+    // collapse onto the pivot at together = 0, which is where this reduces to the old curve exactly.
+    const lead = pivot * (1 - held);
+    const trail = pivot + (1 - pivot) * held;
     const out = new Float32Array(points);
     const incoming = new Float32Array(points);
 
     for (let index = 0; index < points; index += 1) {
         const progress = index / (points - 1);
-        // Piecewise linear through (0,0) (pivot,0.5) (1,1): monotonic, and exact at both ends.
-        const warped = progress <= pivot
-            ? (progress / pivot) * 0.5
-            : 0.5 + ((progress - pivot) / (1 - pivot)) * 0.5;
+        // Piecewise linear through (0,0) (lead,0.5) (trail,0.5) (1,1): monotonic, flat across the
+        // middle, and exact at both ends whatever `together` is.
+        const warped = progress <= lead
+            ? (progress / Math.max(1e-3, lead)) * 0.5
+            : progress >= trail
+                ? 0.5 + ((progress - trail) / Math.max(1e-3, 1 - trail)) * 0.5
+                : 0.5;
         const angle = warped * (Math.PI / 2);
         const headroom = dbToGain(-BLEND_HEADROOM_DB * headroomBell(progress));
         out[index] = Math.cos(angle) * headroom;

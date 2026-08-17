@@ -239,7 +239,7 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
     ) => {
         appliedTrimDb = 0;
         balanceTimer = setInterval(() => {
-            const outgoingDb = tailChain.analyser.loudnessDb();
+            const outgoingDb = referenceDb(plannedFrom, tailChain) ?? tailChain.analyser.loudnessDb();
             const incomingDb = incomingReference ?? activeChain.analyser.loudnessDb();
             if (outgoingDb === null || incomingDb === null) return;
 
@@ -252,17 +252,35 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
     };
 
     /**
-     * The incoming track's own average level, in the units the taps report.
+     * Either track's own average level, in the units the taps report.
+     *
+     * Both sides go through here, and the symmetry is the point. This correction exists to cancel a
+     * MASTERING imbalance - one record cut six decibels hotter than another - which is a property
+     * of a whole track. It does not exist to cancel musical dynamics: a quiet intro and a decaying
+     * outro are the music, and flattening them is deleting it.
+     *
+     * So both sides must be the same KIND of measurement, and for two rounds they were not. The
+     * incoming side was the whole-track integrated value while the outgoing side was a live tap - a
+     * short window over the last few seconds - and a short window over anything with dynamics reads
+     * several decibels above the same track's integrated value. The difference between them
+     * therefore carried a built-in offset, in the same direction every time, and the symptom was
+     * the trim sitting on its 6dB clamp on nearly every transition in a real log. A correction that
+     * saturates on every input is not a correction, it is a constant.
+     *
+     * The live tap stays as the fallback, for a track that was never analysed - there it is the
+     * only reading there is, and both sides fall back together.
      *
      * The taps read *after* each deck's ReplayGain and the profile was measured *before* it, so the
      * deck's current compensation is added back on - otherwise with ReplayGain switched on the
-     * comparison would credit the incoming track with an imbalance ReplayGain had already removed.
-     * Null when the track was never analysed; then the live reading is all there is.
+     * comparison would credit a track with an imbalance ReplayGain had already removed.
      */
-    const incomingReferenceDb = (chain: AutomixDeckChain): number | null => (
-        plannedTo === null
+    const referenceDb = (
+        profile: TrackProfile | null,
+        chain: AutomixDeckChain,
+    ): number | null => (
+        profile === null
             ? null
-            : plannedTo.loudness + 20 * Math.log10(Math.max(chain.replayGain.gain.value, 1e-6))
+            : profile.loudness + 20 * Math.log10(Math.max(chain.replayGain.gain.value, 1e-6))
     );
 
     /**
@@ -561,6 +579,7 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             + `${hold > 0.01 ? ` waits ${hold.toFixed(2)}s, then` : ''}`
             + ` ${wall < 0.1 ? `${Math.round(wall * 1000)}ms` : `${wall.toFixed(2)}s`}`
             + ` at ${Math.round(shape.crossover * 100)}%`
+            + `${shape.together > 0 ? `, both held for ${Math.round(shape.together * 100)}%` : ''}`
             + `${shape.shapeBands ? ', three bands' : ''}`
             + `${shape.sweepOut ? ', swept out' : ''}`
             + `${plan.echoThrow ? ', thrown' : ''}`
@@ -588,11 +607,15 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
                 periodSec,
             );
         }
-        scheduleCrossfade(context, tailChain.fade, activeChain.fade, wall, shape.crossover, hold);
+        scheduleCrossfade(
+            context, tailChain.fade, activeChain.fade, wall, shape.crossover, hold, shape.together,
+        );
         // Only where there is an overlap to balance. Across a splice or a cut the two tracks are
         // never both audible, so pulling one down would just be a level step nobody asked for.
         if (shape.overlap >= AUTOMIX_MIN_OVERLAP_SEC) {
-            startBalanceCorrection(context, tailChain, activeChain, incomingReferenceDb(activeChain));
+            startBalanceCorrection(
+                context, tailChain, activeChain, referenceDb(plannedTo, activeChain),
+            );
         }
 
         cleanupTimer = setTimeout(

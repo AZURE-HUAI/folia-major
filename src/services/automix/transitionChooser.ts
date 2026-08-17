@@ -285,7 +285,34 @@ export interface StyledBlend {
     shapeBands: boolean;
     /** The outgoing track is filtered out of the way as it goes, not only turned down. */
     sweepOut: boolean;
+    /**
+     * Fraction of the blend both tracks are held at one level instead of sliding past each other.
+     *
+     * The one number that decides whether a join reads as a mix or as a fade. See
+     * `buildCrossfadeCurves` for why it is a shape and not a length, and why it is free.
+     */
+    together: number;
 }
+
+/**
+ * How much of each style is spent with both tracks held, rather than sliding.
+ *
+ * A crossfade is zero by definition - it is the thing being named. Everything else is a mix, and
+ * the differences between them are differences of how much they trust the other mechanisms:
+ *
+ * - `bassSwap` trusts the low-end handover most, so it holds longest. Both tracks at equal strength
+ *   with one low end between them is the move this style exists to perform, and it cannot be
+ *   performed while both are sliding.
+ * - `tailRide` holds nearly as long but for the opposite reason: the outgoing track is decaying on
+ *   its own, so any level curve we impose is a second fade on top of a first one. Holding flat lets
+ *   the track's own ending BE the fade, which is what riding a tail means.
+ */
+const TOGETHER: Record<TransitionStyle, number> = {
+    beatCut: 0,
+    bassSwap: 0.55,
+    tailRide: 0.5,
+    plainBlend: 0,
+};
 
 /**
  * Turns a chosen style into the schedule that realises it.
@@ -313,6 +340,7 @@ export const shapeBlend = (request: BlendShapeRequest): StyledBlend => {
             crossover: 0.5,
             shapeBands: false,
             sweepOut: false,
+            together: TOGETHER[style],
         };
     }
 
@@ -321,6 +349,7 @@ export const shapeBlend = (request: BlendShapeRequest): StyledBlend => {
         hold: 0,
         overlap,
         crossover,
+        together: TOGETHER[style],
         shapeBands: style !== 'plainBlend',
         // Not on a ride: a decaying tail is already leaving of its own accord, and taking the top
         // off it as well removes the shimmer that is the whole reason to blend underneath one.

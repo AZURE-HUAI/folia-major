@@ -523,6 +523,25 @@ describe('automix session, transition styles', () => {
         expect(harness.chains.A.trimNode.events).toHaveLength(0);
     });
 
+    it('does not read the leaving track\'s last loud bars as a mastering imbalance either', () => {
+        // The mirror of the test above, and the half that stayed broken. The outgoing side was a
+        // LIVE tap - a short window, so it reads several dB above the same track's integrated value
+        // on anything with dynamics - while the incoming side was the whole-track figure. The
+        // difference between two different kinds of measurement carries a constant offset, and the
+        // trim duly sat on its 6dB clamp across a whole real log. Two tracks mastered to the same
+        // level must come out at no correction however loud the final bars happen to be.
+        const harness = createHarness({ A: { loudnessDb: -4 }, B: { loudnessDb: -30 } });
+        harness.arm({
+            from: { ...BLENDABLE_FROM, profile: profile({ loudness: -14 }) },
+            to: { ...BLENDABLE_TO, profile: profile({ loudness: -14 }) },
+        });
+
+        harness.session.handleActiveDeckPlaying('local:next-song');
+        vi.advanceTimersByTime(300);
+
+        expect(harness.chains.A.trimNode.events).toHaveLength(0);
+    });
+
     it('still holds down a master that really is the louder of the two', () => {
         const harness = createHarness({ A: { loudnessDb: -8 }, B: { loudnessDb: -30 } });
         harness.arm({

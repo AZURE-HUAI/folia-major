@@ -353,4 +353,47 @@ describe('buildCrossfadeCurves', () => {
         // Clamped, so the first quarter still descends rather than dropping to nothing at once.
         expect(out[Math.floor((out.length - 1) / 4)]).toBeGreaterThan(0.3);
     });
+
+    it('holds both tracks flat through the middle when asked, instead of sliding', () => {
+        // The difference between a mix and a fade, and the reason three rounds of making blends
+        // LONGER did not fix "it still sounds like a crossfade": a fade is heard as the outgoing
+        // track receding continuously, so what had to change was the shape, not the span.
+        const { out, in: incoming } = buildCrossfadeCurves(0.35, 0.55);
+        const at = (fraction: number) => Math.round(fraction * (out.length - 1));
+
+        // Across the held middle neither track moves against the other - which is what "held"
+        // means to the ear. Asserted as the ratio, because the anti-clipping bell rides on both
+        // curves and is a claim about the pair's total, not about the balance between them.
+        const plateau = [0.25, 0.35, 0.45, 0.55].map(at);
+        for (const index of plateau) {
+            expect(out[index] / incoming[index]).toBeCloseTo(1, 6);
+        }
+        // And the outgoing track is genuinely present there, not a ghost under the new one.
+        expect(out[at(0.4)]).toBeGreaterThan(0.6);
+        // The plateau is flat in absolute terms too, to within the headroom dip - a quarter of a
+        // decibel across half the blend, against a full cosine descent before this change.
+        const levels = plateau.map(index => out[index]);
+        expect(Math.max(...levels) / Math.min(...levels)).toBeLessThan(dbToGain(0.5));
+    });
+
+    it('pays no headroom for holding them together', () => {
+        // The plateau sits where cos and sin are equal, so the summed power across it is the same
+        // one it is everywhere else. A different shape at identical energy, not a louder one.
+        const { out, in: incoming } = buildCrossfadeCurves(0.35, 0.55);
+        for (let index = 0; index < out.length; index += 1) {
+            const headroom = dbToGain(
+                -BLEND_HEADROOM_DB * Math.sin((index / (out.length - 1)) * Math.PI),
+            );
+            expect(out[index] ** 2 + incoming[index] ** 2).toBeCloseTo(headroom ** 2, 5);
+        }
+    });
+
+    it('is exactly the old crossfade when nothing is held', () => {
+        // A plain crossfade has to stay a plain crossfade - it is the thing being named.
+        const plain = buildCrossfadeCurves(0.35, 0);
+        for (let index = 1; index < plain.out.length - 1; index += 1) {
+            expect(plain.out[index]).toBeLessThan(plain.out[index - 1]);
+            expect(plain.in[index]).toBeGreaterThan(plain.in[index - 1]);
+        }
+    });
 });
