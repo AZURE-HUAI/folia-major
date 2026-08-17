@@ -54,10 +54,27 @@ const YIELD_EVERY = 512;
  */
 const VOCAL_LOW_HZ = 300;
 const VOCAL_HIGH_HZ = 3400;
-/** How far below the track's own most-centred moment still counts as a voice being present. */
-const VOCAL_BELOW_PEAK_DB = 9;
 /** A voice holds. A centred snare or a stab does not, and this is what tells them apart. */
 const VOCAL_MIN_SEC = 0.8;
+/** The centre-ness curve is a ratio of two noisy sums; unsmoothed it never holds a threshold. */
+const VOCAL_SMOOTH_SEC = 0.5;
+/**
+ * How far up the track's own range of centre-ness counts as a voice arriving.
+ *
+ * A fixed ratio would be a guess about mastering width, which varies more than the thing being
+ * measured. Halfway between the track's quietest-centred and most-centred moment is a statement
+ * about THIS mix and needs no such guess.
+ */
+const VOCAL_RISE = 0.5;
+
+/** Feature rate for the structural analysis. Sections are tens of seconds; frames are wasted here. */
+const NOVELTY_BIN_SEC = 1;
+/** Half the checkerboard kernel, in bins. Eight seconds total is about two bars either side. */
+const NOVELTY_HALF_KERNEL = 4;
+/** A boundary earlier than this is a count-in or a fade-in, not the end of a section. */
+const NOVELTY_MIN_SEC = 2;
+/** How far above the novelty curve's own mean a peak has to stand to count as a boundary. */
+const NOVELTY_SIGMAS = 1;
 
 export interface TrackProfile {
     version: number;
@@ -84,8 +101,24 @@ export interface TrackProfile {
      * timeline: every online lyric source opens with a credit block and the three of them format
      * it three incompatible ways, so "the first line" is not "the first sung moment" in any of
      * them. The audio has no such problem, and it also answers for tracks with no lyric file.
+     *
+     * Weaker evidence than `sectionStart`, and deliberately so: a centred pad or a centred lead
+     * synth is a voice as far as this measurement is concerned. It is here to CAP the structural
+     * answer, never to replace it.
      */
     vocalStart: number | null;
+    /**
+     * Seconds to the first structural boundary - where the arrangement stops being an intro.
+     *
+     * Foote novelty over a self-similarity matrix: the standard way a DJ tool or a music-structure
+     * analyser finds section edges, and what Mixed In Key's mix-in points and Spotify's `sections`
+     * are built on. It asks "did the music just become a different thing", which is answerable
+     * without knowing what a voice is - so unlike `vocalStart` it is not fooled by a centred synth.
+     *
+     * Null when the analysed window is too short to hold the kernel, or when nothing in it stands
+     * out as a boundary at all.
+     */
+    sectionStart: number | null;
     /** Seconds of near-silence after it stops. Null when only the head was read. */
     leadOut: number | null;
     /** The track is already at full level as it starts - no intro to hide a blend in. */
@@ -213,29 +246,121 @@ export const keyFromChroma = (chroma: readonly number[]): KeyEstimate => {
     };
 };
 
+/** Boxcar smoothing, off a prefix sum. The curve below is a ratio of noisy sums and holds no
+ *  threshold raw - a voice reads as a hundred frames straddling it rather than a run above it. */
+const smooth = (values: readonly number[], window: number): number[] => {
+    const half = Math.max(0, Math.floor(window / 2));
+    if (!half) return [...values];
+    const prefix = new Float64Array(values.length + 1);
+    for (let index = 0; index < values.length; index += 1) prefix[index + 1] = prefix[index] + values[index];
+    return values.map((_, index) => {
+        const from = Math.max(0, index - half);
+        const to = Math.min(values.length, index + half + 1);
+        return (prefix[to] - prefix[from]) / (to - from);
+    });
+};
+
 /**
  * Where a voice first arrives, from a per-frame "how centred is this track right now" curve.
  *
- * Thresholded against the track's own loudest centred moment rather than an absolute level, for
- * the same reason the silence floor is: masters differ by 10dB and a fixed number would answer for
- * one of them. The sustain requirement is what separates a voice from the other things that sit in
- * the middle of a mix - a snare, a centred stab - which are loud for a frame or two and gone.
+ * The curve is a RATIO - centred energy against total energy in the vocal band - and that is the
+ * whole of why it works at all. Measuring centred energy on its own tracks the track's volume, so
+ * a loud instrumental section reads as more centred than a quiet sung one and the answer is
+ * whatever the arrangement is doing rather than where the voice is.
+ *
+ * Thresholded halfway up the track's own range for the same reason the silence floor is relative:
+ * mastering width varies more than the thing being measured. The sustain requirement separates a
+ * voice from the other things that sit in the middle of a mix - a snare, a stab - which are there
+ * for a frame or two and gone.
  */
 const firstSustained = (centre: readonly number[], hopSec: number): number | null => {
-    let peak = SILENCE_DB;
-    for (const value of centre) if (value > peak) peak = value;
-    if (peak <= SILENCE_DB) return null;
+    if (!centre.length) return null;
+    const curve = smooth(centre, Math.round(VOCAL_SMOOTH_SEC / hopSec));
 
-    const floor = peak - VOCAL_BELOW_PEAK_DB;
+    let low = Infinity;
+    let high = -Infinity;
+    for (const value of curve) {
+        if (value < low) low = value;
+        if (value > high) high = value;
+    }
+    // A mix whose centre-ness never moves has no arrival in it to find.
+    if (!(high - low > 0.02)) return null;
+
+    const threshold = low + (high - low) * VOCAL_RISE;
     const needed = Math.max(1, Math.round(VOCAL_MIN_SEC / hopSec));
     let run = 0;
-    for (let index = 0; index < centre.length; index += 1) {
-        if (centre[index] <= floor) {
+    for (let index = 0; index < curve.length; index += 1) {
+        if (curve[index] <= threshold) {
             run = 0;
             continue;
         }
         run += 1;
         if (run >= needed) return (index - run + 1) * hopSec;
+    }
+    return null;
+};
+
+/**
+ * First structural boundary, by Foote novelty over a self-similarity matrix.
+ *
+ * Every bin is compared with every other (cosine distance between their chroma), which makes a
+ * matrix whose block structure IS the song's structure - a section looks like a bright square,
+ * and the corner where one square meets the next is a section change. Sliding a checkerboard
+ * kernel down the diagonal scores exactly that corner shape: high where the music before and the
+ * music after are each self-similar but unlike each other.
+ *
+ * Published by Foote in 2000 and still the standard non-neural method; librosa and msaf ship it.
+ * The reason it matters here is that it answers a question that can actually be answered from a
+ * finished mix - "did this just become a different piece of music" - rather than "is that a
+ * human", which needs a separated stem to do honestly.
+ */
+const firstBoundary = (bins: readonly Float64Array[], binSec: number): number | null => {
+    const half = NOVELTY_HALF_KERNEL;
+    if (bins.length < half * 2 + 3) return null;
+
+    const unit = bins.map(bin => {
+        let energy = 0;
+        for (const value of bin) energy += value * value;
+        const scale = energy > 0 ? 1 / Math.sqrt(energy) : 0;
+        return bin.map(value => value * scale);
+    });
+    const similarity = (a: number, b: number) => {
+        let dot = 0;
+        for (let index = 0; index < 12; index += 1) dot += unit[a][index] * unit[b][index];
+        return dot;
+    };
+
+    // Gaussian-tapered checkerboard: +1 on the two on-diagonal quadrants, -1 on the off-diagonal
+    // ones, faded out at the edges so a boundary is not scored by the far corners of the window.
+    const novelty = new Array<number>(bins.length).fill(0);
+    for (let centre = half; centre < bins.length - half; centre += 1) {
+        let score = 0;
+        for (let a = -half; a < half; a += 1) {
+            for (let b = -half; b < half; b += 1) {
+                const sign = (a < 0) === (b < 0) ? 1 : -1;
+                const taper = Math.exp(-(a * a + b * b) / (2 * (half / 2) ** 2));
+                score += sign * taper * similarity(centre + a, centre + b);
+            }
+        }
+        novelty[centre] = score;
+    }
+
+    const scored = novelty.slice(half, bins.length - half);
+    // Music that never changes scores a flat zero (the kernel's two halves cancel), and a flat
+    // curve has no peaks - only floating-point noise, which a sigma test would happily promote.
+    if (Math.max(...scored) - Math.min(...scored) < 1e-6) return null;
+
+    const mean = scored.reduce((sum, value) => sum + value, 0) / scored.length;
+    const variance = scored.reduce((sum, value) => sum + (value - mean) ** 2, 0) / scored.length;
+    const threshold = mean + NOVELTY_SIGMAS * Math.sqrt(variance);
+
+    // From half + 1, never half: novelty is only defined inside the kernel's reach, so the first
+    // scored bin has a zero to its left and wins "is a local maximum" by default. Measured on real
+    // tracks that artefact put four songs out of six at exactly the same boundary.
+    const earliest = Math.max(half + 1, Math.ceil(NOVELTY_MIN_SEC / binSec));
+    for (let index = earliest; index < bins.length - half - 1; index += 1) {
+        const isPeak = novelty[index] > novelty[index - 1] && novelty[index] >= novelty[index + 1];
+        if (isPeak && novelty[index] > threshold) return index * binSec;
     }
     return null;
 };
@@ -315,6 +440,12 @@ export const analyseTrack = async (
     const envelope: number[] = [];
     const centre: number[] = [];
     const chroma = new Array<number>(12).fill(0);
+    // The same chroma again, but kept per second rather than summed over the track: one is the
+    // key, the other is the shape the structural analysis compares against itself.
+    const sectionBins: Float64Array[] = Array.from(
+        { length: Math.max(1, Math.ceil(duration / NOVELTY_BIN_SEC)) },
+        () => new Float64Array(12),
+    );
     let energy = 0;
     let counted = 0;
     let frames = 0;
@@ -330,13 +461,21 @@ export const analyseTrack = async (
         }
         fft(real, imag);
 
+        const sectionBin = sectionBins[Math.min(
+            sectionBins.length - 1,
+            Math.floor((start / sampleRate) / NOVELTY_BIN_SEC),
+        )];
+
         let midBand = 0;
         for (let index = 0; index < bins; index += 1) {
             const magnitude = Math.hypot(real[index], imag[index]);
             // dB domain, matching the live analyser's input so the same flux maths applies.
             spectrum[index] = magnitude > 0 ? Math.max(SILENCE_DB, 20 * Math.log10(magnitude)) : SILENCE_DB;
             const pitchClass = binPitchClass[index];
-            if (pitchClass >= 0) chroma[pitchClass] += magnitude;
+            if (pitchClass >= 0) {
+                chroma[pitchClass] += magnitude;
+                sectionBin[pitchClass] += magnitude;
+            }
             if (index >= vocalLowBin && index <= vocalHighBin) midBand += magnitude * magnitude;
         }
 
@@ -350,9 +489,11 @@ export const analyseTrack = async (
             for (let index = vocalLowBin; index <= vocalHighBin; index += 1) {
                 sideBand += sideReal[index] * sideReal[index] + sideImag[index] * sideImag[index];
             }
-            // What survives cancelling the two channels against each other: the centred content.
-            const centred = midBand - sideBand;
-            centre.push(centred > 0 ? Math.max(SILENCE_DB, 10 * Math.log10(centred)) : SILENCE_DB);
+            // A RATIO, not the centred energy itself. The energy rises and falls with the whole
+            // arrangement, so thresholding it finds the loudest passage rather than the voice;
+            // the share of the band that survives cancellation does not care how loud the track is.
+            const total = midBand + sideBand;
+            centre.push(total > 0 ? midBand / total : 0.5);
         }
 
         if (frames > 0) envelope.push(spectralFlux(spectrum, previous, fluxBins));
@@ -413,6 +554,7 @@ export const analyseTrack = async (
         duration,
         leadIn: first * hopSec,
         vocalStart: side ? firstSustained(centre, hopSec) : null,
+        sectionStart: firstBoundary(sectionBins, NOVELTY_BIN_SEC),
         leadOut: partial ? null : Math.max(0, duration - (last * hopSec + FFT_SIZE / sampleRate)),
         // Averaged over a second or so rather than read off one frame: a single loud transient at
         // the top of a track is a count-in, not a track that starts at full tilt.

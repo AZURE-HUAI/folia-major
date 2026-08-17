@@ -93,7 +93,7 @@ describe('analyseTrack, finding the voice', () => {
         const profile = await analyseTrack(mid, RATE, { side: null });
 
         expect(profile?.vocalStart).toBeNull();
-        expect(profile?.bpm === null || profile.bpm > 0).toBe(true);
+        expect(profile?.loudness).toBeLessThan(0);
     });
 
     it('answers null when nothing centred ever arrives', async () => {
@@ -110,6 +110,32 @@ describe('analyseTrack, finding the voice', () => {
         const { mid, side } = buildTrack(80);
 
         expect((await analyseTrack(mid, RATE, { side }))?.vocalStart).toBeNull();
+    });
+});
+
+describe('analyseTrack, finding the structure', () => {
+    const chord = (seconds: number, hz: readonly number[]) =>
+        mix(...hz.map(one => tone(seconds, one, 0.3)));
+    const VERSE = [261.6, 329.6, 392.0];   // C major
+    const CHORUS = [293.7, 349.2, 440.0];  // D minor - a different set of pitch classes
+
+    it('puts the first boundary where the music becomes a different thing', async () => {
+        // Eight seconds of one harmony, then another. No level change, no tempo change and no
+        // voice, so nothing but the self-similarity of the two halves marks the join.
+        const profile = await analyseTrack(join(chord(8, VERSE), chord(14, CHORUS)), RATE);
+
+        expect(profile?.sectionStart).toBeCloseTo(8, 0);
+    });
+
+    it('finds no boundary in music that never changes', async () => {
+        // The checkerboard's two halves cancel exactly here, so what is left is float noise. A
+        // sigma test on its own promotes that noise to a boundary; the flatness check is why not.
+        expect((await analyseTrack(chord(22, VERSE), RATE))?.sectionStart).toBeNull();
+    });
+
+    it('has nothing to say about a track too short to hold the kernel', async () => {
+        expect((await analyseTrack(join(chord(2, VERSE), chord(2, CHORUS)), RATE))?.sectionStart)
+            .toBeNull();
     });
 });
 

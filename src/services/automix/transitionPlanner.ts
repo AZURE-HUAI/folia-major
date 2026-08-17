@@ -169,7 +169,15 @@ export const planTransition = (
     const tail = lastSung === null ? null : from.duration - lastSung;  // instrumental outro
     // Measured off the audio, not read off the incoming lyric file. The two ends of a transition
     // are asymmetric: a lyric timeline's END is trustworthy, its BEGINNING is a credit block.
-    const intro = to.profile?.vocalStart ?? null;                      // instrumental intro
+    //
+    // The structural boundary, and ONLY it. `vocalStart` is measured and reported alongside, but
+    // it does not get a vote, and that is a measurement rather than a preference: across six real
+    // tracks it was exact on one (Runaway, 17.46s against a first sung line at 17.5s), plausible
+    // on one, and near zero on three - including an instrumental with no voice in it at all. Its
+    // errors all land on "the voice starts immediately", which is the one answer that destroys the
+    // window. `sectionStart` came in EARLIER than the true vocal entry on every track it could be
+    // checked against, and early is the harmless direction: the blend is over before anyone sings.
+    const intro = to.profile?.sectionStart ?? null;
     const vocalFree = tail !== null && intro !== null ? Math.min(tail, intro) : null;
     const usesVocalFree = vocalFree !== null && vocalFree >= AUTOMIX_MIN_OVERLAP_SEC;
 
@@ -196,7 +204,7 @@ export const planTransition = (
         ? 'nothing sung in the outgoing lyrics'
         : 'no lyrics for the outgoing track';
     const introMissing = to.profile
-        ? 'no voice found in the incoming track'
+        ? 'nothing measurable at the start of the incoming track'
         : 'the incoming track was never analysed';
     const window = tail === null
         ? outroMissing

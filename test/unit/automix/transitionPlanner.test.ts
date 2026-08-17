@@ -17,14 +17,14 @@ const line = (startTime: number, endTime: number, fullText = 'la'): Line => ({
 /**
  * The two ends come from two different places now, and the signature says so.
  *
- * `lines` decides the OUTGOING side - where the singing stopped. `vocalStart` decides the INCOMING
+ * `lines` decides the OUTGOING side - where the singing stopped. `intro` decides the INCOMING
  * side and is measured off the audio, so it arrives on the profile: omit it for a track that was
- * never analysed, pass null for one that was analysed and holds no voice.
+ * never analysed, pass null for one that was analysed but yielded no boundary.
  */
-const track = (duration: number, lines: Line[] | null, vocalStart?: number | null): TransitionTrack => ({
+const track = (duration: number, lines: Line[] | null, intro?: number | null): TransitionTrack => ({
     duration,
     lines,
-    profile: vocalStart === undefined ? null : makeProfile({ vocalStart }),
+    profile: intro === undefined ? null : makeProfile({ sectionStart: intro }),
 });
 
 describe('planTransition', () => {
@@ -101,7 +101,7 @@ describe('planTransition', () => {
         expect(planTransition(track(100, [line(10, 90)]), track(100, null)).reason)
             .toContain('the incoming track was never analysed');
         expect(planTransition(track(100, [line(10, 90)]), track(100, null, null)).reason)
-            .toContain('no voice found in the incoming track');
+            .toContain('nothing measurable at the start of the incoming track');
     });
 
     it('says so when a lyric file exists but holds nothing sung', () => {

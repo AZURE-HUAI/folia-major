@@ -226,12 +226,17 @@ export const ensureTrackProfile = async (request: ProfileRequest): Promise<void>
             remember(songKey, profile);
             if (profile) {
                 await saveToCache(storageKey(songKey), profile);
+                // The analysed length is printed for the partial case on purpose: "nothing found"
+                // and "nothing found in the twelve seconds we were allowed to read" look identical
+                // in every other field, and only one of them says the measurement is wrong.
+                const at = (seconds: number | null) => (seconds === null ? 'none' : `${seconds.toFixed(2)}s`);
                 console.log(
-                    `[Automix] analysed "${request.song.name}"${profile.partial ? ' (head only)' : ''}:`
+                    `[Automix] analysed "${request.song.name}"`
+                    + `${profile.partial ? ` (head only, ${profile.duration.toFixed(1)}s of it)` : ''}:`
                     + ` ${profile.bpm ? `${Math.round(profile.bpm)} BPM, ` : ''}`
                     + `${profile.loudness.toFixed(1)} dBFS,`
                     + ` lead-in ${profile.leadIn.toFixed(2)}s,`
-                    + ` ${profile.vocalStart === null ? 'no voice found' : `voice at ${profile.vocalStart.toFixed(2)}s`},`
+                    + ` section ${at(profile.sectionStart)}, voice ${at(profile.vocalStart)},`
                     + ` ${profile.startsHot ? 'starts hot' : 'has an intro'}`
                     + `${profile.endsHot === null ? '' : `, ${profile.endsHot ? 'ends hot' : 'decays out'}`}`,
                 );

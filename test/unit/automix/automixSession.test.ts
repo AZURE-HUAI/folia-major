@@ -37,7 +37,7 @@ const BLENDABLE_FROM: TransitionTrack = { duration: 100, lines: [line(10, 94)] }
 const BLENDABLE_TO: TransitionTrack = { duration: 100, lines: [line(5, 90)] };
 const withIntro = (overrides: Partial<TrackProfile> = {}): TransitionTrack => ({
     ...BLENDABLE_TO,
-    profile: makeProfile({ duration: 100, vocalStart: 5, ...overrides }),
+    profile: makeProfile({ duration: 100, sectionStart: 5, ...overrides }),
 });
 
 const createHarness = (readings: Partial<Record<AutomixDeckId, FakeAnalyserReadings>> = {}) => {
