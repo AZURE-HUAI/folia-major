@@ -3005,6 +3005,17 @@ export default function App() {
             preload="auto"
             crossOrigin="anonymous"
             loop={effectiveLoopMode === 'one' && automix.activeDeck === deck}
+            onLoadStart={(e) => {
+                // Fires whenever a deck begins loading a resource, whatever caused it: React
+                // writing the src attribute, the audio bridge calling load(), a remount. That is
+                // the complete set of ways a deck that was playing can end up back at currentTime
+                // 0, so this line pins which one - and, from the URL, what replaced what.
+                console.log('[Audio] deck load', {
+                    deck,
+                    active: automix.isActiveDeck(e.currentTarget),
+                    src: (e.currentTarget.getAttribute('src') ?? '').slice(-40),
+                });
+            }}
             onPlay={(e) => {
                 if (!automix.isActiveDeck(e.currentTarget)) return;
                 shouldAutoPlay.current = false;

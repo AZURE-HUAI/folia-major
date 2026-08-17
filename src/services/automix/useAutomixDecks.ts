@@ -158,9 +158,18 @@ export function useAutomixDecks({
                 // currentTime tells the two failures apart, and they have different causes: zero
                 // means nothing ever pressed play on this deck, non-zero means it DID play and
                 // something paused it again. Without it this line just says "it was silent".
+                // `phase` matters as much as the rest: this check is scheduled at settle, but by
+                // the time it runs a NEW transition may have armed, and an armed incoming deck is
+                // SUPPOSED to be loaded and silent. Starting that one early breaks a good blend.
                 console.log(
                     '[Automix] the deck holding the next track was never started, starting it',
-                    { deck, at: element.currentTime, readyState: element.readyState, ended: element.ended },
+                    {
+                        deck,
+                        phase: sessionRef.current!.getPhase(),
+                        at: element.currentTime,
+                        readyState: element.readyState,
+                        ended: element.ended,
+                    },
                 );
                 void element.play().catch(() => { });
                 return;
@@ -193,6 +202,13 @@ export function useAutomixDecks({
     const session = sessionRef.current;
 
     const bindDeck = useCallback((deck: AutomixDeckId, element: HTMLAudioElement | null) => {
+        // A deck swapping to a DIFFERENT element mid-session means React unmounted and remounted
+        // it. The replacement starts empty, so whatever was playing is gone and the fresh element
+        // sits at currentTime 0 with nothing left to press play on it. Should never happen.
+        const previous = elementsRef.current[deck];
+        if (previous && element && previous !== element) {
+            console.warn(`[Automix] deck ${deck} was remounted while it held a source`);
+        }
         elementsRef.current[deck] = element;
         if (deck === session.getActiveDeck()) {
             audioRef.current = element;
