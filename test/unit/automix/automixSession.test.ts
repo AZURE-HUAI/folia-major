@@ -127,18 +127,19 @@ describe('automix session', () => {
         expect(harness.advanceTrack).toHaveBeenCalledTimes(1);
     });
 
-    it('holds the autoplay over the lead and lifts it exactly when the blend is due', () => {
+    it('holds the autoplay over the lead and lifts it just before the blend is due', () => {
         const harness = createHarness();
 
         harness.arm({ time: 92 });
         expect(harness.autoplayHolds).toEqual([true]);
 
-        // Three seconds of outgoing track over the five second blend: the deck may load for
-        // exactly that long and no longer.
-        vi.advanceTimersByTime(2_900);
+        // Three seconds of outgoing track over the five second blend, less the quarter second the
+        // release itself costs: letting go, rendering, calling play() and hearing the element
+        // report back is around 150ms of real time, and it lands on the front of the blend.
+        vi.advanceTimersByTime(2_700);
         expect(harness.autoplayHolds).toEqual([true]);
 
-        vi.advanceTimersByTime(200);
+        vi.advanceTimersByTime(100);
         expect(harness.autoplayHolds).toEqual([true, false]);
     });
 

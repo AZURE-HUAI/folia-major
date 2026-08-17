@@ -215,6 +215,13 @@ export const planTransition = (
         ? 'vocal-free'
         : beat === null ? 'default' : `${round(overlap / beat)} beats`;
     const key = choice.relation === 'unknown' ? '' : `, ${choice.relation} keys`;
+    // Four of the five joins are decided on how the OUTGOING track ends, and a head-only profile
+    // knows nothing about that - so they cannot be reached at all and every song change comes out
+    // as an overlap. Worth saying out loud: without it the log reads as "these two songs wanted an
+    // overlap" when what happened is that nothing else was ever on the table.
+    const outgoingTail = !from.profile
+        ? ', outgoing never analysed'
+        : from.profile.partial ? ', outgoing tail not analysed' : '';
 
     return {
         kind: 'fade',
@@ -224,7 +231,7 @@ export const planTransition = (
         inStart: 0,
         overlap: round(overlap),
         minOverlap: AUTOMIX_MIN_OVERLAP_SEC,
-        reason: `${choice.style} ${round(overlap)}s ${length} (${window}${key})`,
+        reason: `${choice.style} ${round(overlap)}s ${length} (${window}${key}${outgoingTail})`,
     };
 };
 

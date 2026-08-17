@@ -56,6 +56,17 @@ const otherDeck = (deck: AutomixDeckId): AutomixDeckId => (deck === 'A' ? 'B' : 
  */
 export const AUTOMIX_ARM_LEAD_SEC = 3;
 
+/**
+ * How early the hold is lifted, to pay for the round trip between letting go and hearing it.
+ *
+ * Lifting the hold does not start a deck: it re-renders, runs the audio bridge's autoplay effect,
+ * calls play() and waits for the element to say `playing`. Measured across a run of real
+ * transitions that round trip is a consistent 100-150ms, and all of it used to come off the front
+ * of the blend. Letting go a little early instead costs the outgoing track the same amount off its
+ * very end - underneath a fade that has already finished, so nothing is lost.
+ */
+const RELEASE_MARGIN_SEC = 0.25;
+
 /** Long enough for the last scheduled curve point to be consumed before the deck is torn down. */
 const FADE_CLEANUP_MARGIN_MS = 150;
 /** A refused blend still has to get the outgoing deck to silence without a click. */
@@ -294,9 +305,12 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         // the incoming deck may load for. Set before the advance, because the advance is what
         // eventually reaches the autoplay this is holding back.
         const startIn = request.from.duration - request.time - nextPlan.overlap;
-        if (startIn > 0) {
+        if (startIn > RELEASE_MARGIN_SEC) {
             setAutoplayHold(true);
-            releaseTimer = setTimeout(() => setAutoplayHold(false), startIn * 1000);
+            releaseTimer = setTimeout(
+                () => setAutoplayHold(false),
+                (startIn - RELEASE_MARGIN_SEC) * 1000,
+            );
         }
 
         ports.advanceTrack();
