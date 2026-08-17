@@ -104,6 +104,7 @@ export const createFakeChain = (readings: FakeAnalyserReadings = {}): FakeDeckCh
         analyser: {
             tick: () => { },
             loudnessDb: () => readings.loudnessDb ?? null,
+            levelHistory: () => null,
             tempo: () => (bpm === null
                 ? null
                 : { bpm, periodSec: 60 / bpm, confidence: 1, beatOffsetHops: 0 }),

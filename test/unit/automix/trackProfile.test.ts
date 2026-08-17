@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { analyseTrack, keyFromChroma } from '@/services/automix/trackProfile';
+import { analyseTrack, keyFromChroma, measureEdges } from '@/services/automix/trackProfile';
 
 // test/unit/automix/trackProfile.test.ts
 
@@ -201,5 +201,44 @@ describe('analyseTrack', () => {
     it('refuses to describe something too short to describe', async () => {
         expect(await analyseTrack(tone(0.5, 220), RATE)).toBeNull();
         expect(await analyseTrack(silence(4), RATE)).toBeNull();
+    });
+});
+
+describe('measureEdges', () => {
+    // The live path samples at 25ms, which is the case that has to hold: the file path's own hop is
+    // an order of magnitude finer, so a window sized in frames behaves differently at each.
+    const HOP = 0.025;
+    const levels = (...runs: { db: number; seconds: number }[]) =>
+        runs.flatMap(run => new Array(Math.round(run.seconds / HOP)).fill(run.db));
+
+    it('separates a track that stops at full level from one that decays out', () => {
+        const stops = measureEdges(levels({ db: -12, seconds: 40 }), HOP);
+        expect(stops).toMatchObject({ endsHot: true });
+        expect(stops!.outroSlope).toBeCloseTo(0, 2);
+
+        // A produced fade: the last ten seconds slide from full level down into the floor.
+        const fade = Array.from({ length: Math.round(10 / HOP) }, (_, index) =>
+            -12 - (index / (10 / HOP)) * 25);
+        const fades = measureEdges([...levels({ db: -12, seconds: 30 }), ...fade], HOP);
+        expect(fades).toMatchObject({ endsHot: false });
+        // Steeper than the chooser's -1.5 dB/s threshold, which is what makes it a fade-out.
+        expect(fades!.outroSlope).toBeLessThan(-1.5);
+    });
+
+    it('finds the sounding part between the silence at each end', () => {
+        const edges = measureEdges(
+            levels({ db: -90, seconds: 2 }, { db: -12, seconds: 30 }, { db: -90, seconds: 3 }),
+            HOP,
+        );
+        expect(edges!.leadIn).toBeCloseTo(2, 1);
+        expect(edges!.soundingEnd).toBeCloseTo(32, 1);
+        // Averaged over the sounding part alone: the trailing silence must not drag it down.
+        expect(edges!.loudness).toBeCloseTo(-12, 1);
+    });
+
+    it('has no answer for silence, or for no readings at all', () => {
+        expect(measureEdges(levels({ db: -90, seconds: 30 }), HOP)).toBeNull();
+        expect(measureEdges([], HOP)).toBeNull();
+        expect(measureEdges(levels({ db: -12, seconds: 30 }), 0)).toBeNull();
     });
 });

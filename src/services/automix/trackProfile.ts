@@ -381,6 +381,84 @@ const slopePerSec = (values: readonly number[], hopSec: number) => {
     return bottom > 0 ? (top / bottom) / hopSec : 0;
 };
 
+/** The half of a profile that is a function of a level envelope and nothing else. */
+export interface TrackEdges {
+    leadIn: number;
+    /** Seconds from the start of the measured span to the end of its last sounding frame. */
+    soundingEnd: number;
+    startsHot: boolean;
+    endsHot: boolean;
+    introSlope: number;
+    outroSlope: number;
+    loudness: number;
+}
+
+/**
+ * Everything about a track's two ends, from a series of frame levels in dBFS.
+ *
+ * Split out of the analysis rather than left inside it because these same questions get asked of
+ * two different sources: a decoded file offline, and the deck analyser's own readings as a track
+ * plays out. The tail of an uncached track cannot be downloaded - strip a file's header and nothing
+ * will decode what is left - but it does not have to be, because those bytes go past the deck on
+ * their way to the speakers anyway. Two definitions of "still at full level when it stops" would
+ * drift apart the first time either was touched, so there is one.
+ *
+ * `frameSec` is the length of a single measurement frame, which the file path knows and the live
+ * path does not; it only affects where the last sounding frame is considered to end.
+ */
+export const measureEdges = (
+    levels: readonly number[],
+    hopSec: number,
+    frameSec = 0,
+): TrackEdges | null => {
+    if (!levels.length || !(hopSec > 0)) return null;
+
+    // Looped rather than spread: a long track has tens of thousands of frames, and Math.max(...)
+    // passes every one of them as an argument.
+    let peak = SILENCE_DB;
+    for (const level of levels) if (level > peak) peak = level;
+    // Nothing ever sounded. Every threshold below is relative to the peak, so without this a span
+    // of pure digital silence describes itself as a track that is loud from end to end.
+    if (peak <= SILENCE_DB) return null;
+
+    const floor = peak - SILENCE_BELOW_PEAK_DB;
+    const first = levels.findIndex(level => level > floor);
+    let last = -1;
+    for (let index = levels.length - 1; index >= 0; index -= 1) {
+        if (levels[index] > floor) { last = index; break; }
+    }
+    if (first < 0 || last < first) return null;
+
+    const sounding = levels.slice(first, last + 1);
+    const mean = (values: readonly number[]) =>
+        values.reduce((sum, value) => sum + value, 0) / values.length;
+    const edgeFrames = Math.max(2, Math.round(EDGE_WINDOW_SEC / hopSec));
+    const hotFrames = Math.max(2, Math.round(HOT_WINDOW_SEC / hopSec));
+    const average = mean(sounding);
+    const head = (frames: number) => sounding.slice(0, Math.min(frames, sounding.length));
+    const tail = (frames: number) => sounding.slice(Math.max(0, sounding.length - frames));
+
+    let energy = 0;
+    let counted = 0;
+    for (const level of levels) {
+        if (level <= SILENCE_DB) continue;
+        energy += 10 ** (level / 10);
+        counted += 1;
+    }
+
+    return {
+        leadIn: first * hopSec,
+        soundingEnd: last * hopSec + frameSec,
+        // Averaged over a second or so rather than read off one frame: a single loud transient at
+        // the top of a track is a count-in, not a track that starts at full tilt.
+        startsHot: mean(head(hotFrames)) > average - HOT_EDGE_DB,
+        endsHot: mean(tail(hotFrames)) > average - HOT_EDGE_DB,
+        introSlope: slopePerSec(head(edgeFrames), hopSec),
+        outroSlope: slopePerSec(tail(edgeFrames), hopSec),
+        loudness: counted ? 10 * Math.log10(energy / counted) : SILENCE_DB,
+    };
+};
+
 const yieldToUi = () => new Promise<void>(resolve => { setTimeout(resolve, 0); });
 
 /**
@@ -446,8 +524,6 @@ export const analyseTrack = async (
         { length: Math.max(1, Math.ceil(duration / NOVELTY_BIN_SEC)) },
         () => new Float64Array(12),
     );
-    let energy = 0;
-    let counted = 0;
     let frames = 0;
 
     for (let start = 0; start + FFT_SIZE <= mono.length; start += HOP) {
@@ -499,39 +575,12 @@ export const analyseTrack = async (
         if (frames > 0) envelope.push(spectralFlux(spectrum, previous, fluxBins));
         previous.set(spectrum);
 
-        if (level > SILENCE_DB) {
-            energy += 10 ** (level / 10);
-            counted += 1;
-        }
         frames += 1;
         if (frames % YIELD_EVERY === 0) await yieldToUi();
     }
 
-    if (!levels.length) return null;
-
-    // Looped rather than spread: a long track has tens of thousands of frames, and Math.max(...)
-    // passes every one of them as an argument.
-    let peak = SILENCE_DB;
-    for (const level of levels) if (level > peak) peak = level;
-    // Nothing ever sounded. Every threshold below is relative to the peak, so without this a file
-    // of pure digital silence describes itself as a track that is loud from end to end.
-    if (peak <= SILENCE_DB) return null;
-    const floor = peak - SILENCE_BELOW_PEAK_DB;
-    const first = levels.findIndex(level => level > floor);
-    let last = -1;
-    for (let index = levels.length - 1; index >= 0; index -= 1) {
-        if (levels[index] > floor) { last = index; break; }
-    }
-    if (first < 0 || last < first) return null;
-
-    const sounding = levels.slice(first, last + 1);
-    const mean = (values: readonly number[]) =>
-        values.reduce((sum, value) => sum + value, 0) / values.length;
-    const edgeFrames = Math.max(2, Math.round(EDGE_WINDOW_SEC / hopSec));
-    const hotFrames = Math.max(2, Math.round(HOT_WINDOW_SEC / hopSec));
-    const head = sounding.slice(0, Math.min(edgeFrames, sounding.length));
-    const tail = sounding.slice(Math.max(0, sounding.length - edgeFrames));
-    const average = mean(sounding);
+    const edges = measureEdges(levels, hopSec, FFT_SIZE / sampleRate);
+    if (!edges) return null;
 
     const tempo = estimateTempo(envelope, hopSec);
     // estimateTempo reports the phase relative to the END of the envelope; the grid is wanted from
@@ -552,17 +601,15 @@ export const analyseTrack = async (
         version: TRACK_PROFILE_VERSION,
         partial,
         duration,
-        leadIn: first * hopSec,
+        leadIn: edges.leadIn,
         vocalStart: side ? firstSustained(centre, hopSec) : null,
         sectionStart: firstBoundary(sectionBins, NOVELTY_BIN_SEC),
-        leadOut: partial ? null : Math.max(0, duration - (last * hopSec + FFT_SIZE / sampleRate)),
-        // Averaged over a second or so rather than read off one frame: a single loud transient at
-        // the top of a track is a count-in, not a track that starts at full tilt.
-        startsHot: mean(sounding.slice(0, Math.min(hotFrames, sounding.length))) > average - HOT_EDGE_DB,
-        endsHot: partial ? null : mean(sounding.slice(Math.max(0, sounding.length - hotFrames))) > average - HOT_EDGE_DB,
-        introSlope: slopePerSec(head, hopSec),
-        outroSlope: partial ? null : slopePerSec(tail, hopSec),
-        loudness: counted ? 10 * Math.log10(energy / counted) : SILENCE_DB,
+        leadOut: partial ? null : Math.max(0, duration - edges.soundingEnd),
+        startsHot: edges.startsHot,
+        endsHot: partial ? null : edges.endsHot,
+        introSlope: edges.introSlope,
+        outroSlope: partial ? null : edges.outroSlope,
+        loudness: edges.loudness,
         bpm: tempo?.bpm ?? null,
         beatOffset,
         key: key.key,

@@ -6,7 +6,7 @@ import type { AudioQualityPreference } from '../../types/onlineMusic';
 import { getPlaybackSongKey } from '../../utils/appPlaybackGuards';
 import { getPrefetchedData } from '../prefetchService';
 import { getSongAlbumLabel } from '../onlineMusic/songMetadata';
-import { getTrackProfile } from './profileService';
+import { getTrackProfile, recordPlayedTail } from './profileService';
 import { connectAutomixDeck, type AutomixDeckChain } from './crossfadeGraph';
 import {
     createAutomixSession,
@@ -183,6 +183,17 @@ export function useAutomixDecks({
 
     const elementsRef = useRef<Record<AutomixDeckId, HTMLAudioElement | null>>({ A: null, B: null });
     const chainsRef = useRef<Partial<Record<AutomixDeckId, AutomixDeckChain>>>({});
+    /**
+     * Which song each deck is holding, so a deck that has finished can say what it just played.
+     *
+     * `currentSong` alone cannot answer that: by the time the outgoing deck ends, the app has been
+     * on the next track for the length of the blend. Written per deck as each becomes active, which
+     * leaves the outgoing deck still naming the track it is finishing.
+     */
+    const deckSongRef = useRef<Record<AutomixDeckId, SongResult | null>>({ A: null, B: null });
+    useEffect(() => {
+        deckSongRef.current[activeDeck] = currentSong;
+    }, [activeDeck, currentSong]);
     const advanceRef = useRef(onAdvanceTrack);
     advanceRef.current = onAdvanceTrack;
     // Set when a pause interrupts an armed transition, consumed by the audio bridge's autoplay.
@@ -300,6 +311,17 @@ export function useAutomixDecks({
             const element = elementsRef.current[deck];
             if (!element || chainsRef.current[deck]) return;
             chainsRef.current[deck] = connectAutomixDeck(context, element, output);
+            // The one moment a track's own end is measurable. 'ended' rather than the fade finishing:
+            // it fires only where the media really ran out, so a deck stopped early never claims to
+            // have heard a track through. The analyser is reset by whatever starts the next track on
+            // this deck, so the readings handed over here belong to the track that just finished.
+            element.addEventListener('ended', () => {
+                const song = deckSongRef.current[deck];
+                const history = chainsRef.current[deck]?.analyser.levelHistory();
+                if (song && history) {
+                    recordPlayedTail(song, history.db, history.hopSec, element.duration);
+                }
+            });
         });
         return Boolean(chainsRef.current.A && chainsRef.current.B);
     }, []);

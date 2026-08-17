@@ -4,7 +4,13 @@ import { saveAudioBlob } from '../audioCache';
 import { getFromCache, saveToCache } from '../db';
 import { getCachedSongAudioBlob } from '../onlineMusic/resourceCache';
 import { getSongResourceCacheKey } from '../onlineMusic/resourceKeys';
-import { analyseTrack, PROFILE_SAMPLE_RATE, TRACK_PROFILE_VERSION, type TrackProfile } from './trackProfile';
+import {
+    analyseTrack,
+    measureEdges,
+    PROFILE_SAMPLE_RATE,
+    TRACK_PROFILE_VERSION,
+    type TrackProfile,
+} from './trackProfile';
 
 // src/services/automix/profileService.ts
 // Gets the bytes of a track that has not been played yet, measures it once, and remembers the
@@ -250,6 +256,59 @@ export const ensureTrackProfile = async (request: ProfileRequest): Promise<void>
     });
 
     await queue;
+};
+
+/** Within this fraction of the track's length, the deck played it from one end to the other. */
+const PLAYED_THROUGH_TOLERANCE = 0.05;
+
+/**
+ * Completes a head-only profile from the deck's own readings, once a track has played out.
+ *
+ * This is the only way the END of an uncached track is ever knowable. A range request off the tail
+ * is not decodable - see readPrefix - so with song caching off the analysis can only ever describe
+ * how a track STARTS, which leaves `endsHot` and `outroSlope` null and takes three of the five
+ * transition styles permanently off the table. The bytes it needs are not missing though: they go
+ * past the deck on the way to the speakers, and the analyser tap already reads a level off every
+ * frame of them. So the half a download cannot reach is measured on the first listen instead, and
+ * the couple of hundred bytes it produces are kept - the audio itself is not.
+ *
+ * It converges over a rotation rather than working the first time, which is inherent: nothing can
+ * know how a song ends before hearing it end.
+ */
+export const recordPlayedTail = (
+    song: SongResult,
+    levels: readonly number[],
+    hopSec: number,
+    /** The track's real length, to check these readings actually span it. */
+    duration: number,
+): void => {
+    const songKey = getPlaybackSongKey(song);
+    const known = profiles.get(songKey);
+    if (!known || !known.partial) return;
+    // A seek leaves the history covering some other span than the file, and a level series that
+    // starts in the middle of a track describes a fade-out that never happened.
+    if (!Number.isFinite(duration) || duration <= 0) return;
+    if (Math.abs(levels.length * hopSec - duration) > duration * PLAYED_THROUGH_TOLERANCE) return;
+
+    const edges = measureEdges(levels, hopSec);
+    if (!edges) return;
+
+    const profile: TrackProfile = {
+        ...known,
+        partial: false,
+        duration,
+        leadOut: Math.max(0, duration - edges.soundingEnd),
+        endsHot: edges.endsHot,
+        outroSlope: edges.outroSlope,
+        // Measured over the whole track rather than the head, so it supersedes the stored one.
+        loudness: edges.loudness,
+    };
+    remember(songKey, profile);
+    void saveToCache(storageKey(songKey), profile);
+    console.log(
+        `[Automix] heard out "${song.name}": ${edges.loudness.toFixed(1)} dBFS,`
+        + ` ${edges.endsHot ? 'ends hot' : 'decays out'} (${edges.outroSlope.toFixed(2)} dB/s)`,
+    );
 };
 
 /** Drops the in-memory side. The stored profiles stay: they describe the file, not the session. */
