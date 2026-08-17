@@ -45,6 +45,14 @@ deck 照常拿到 src 并缓冲，只是先不出声，到点才放。把这两�
 ——在一张从头连到尾的专辑上它吃掉了三分之二的换歌，于是听众打开「混音过渡」，听到的是什么都没发生。
 现在剩下的每一种接法都是听得见的。加新接法时守住这条。
 
+**一首歌结束的地方，不是文件结束的地方。** 过渡是从「歌尾」倒着排的，而「歌尾」一度读的是媒体时长。
+成品母带在最后一个音之后还挂着几秒数字静音，于是过渡被排进了那段静音里——听感上是歌放完、静一下、
+下一首从零淡进来，也就是反复被报的「压根没有过渡」。真正的锚点是 `TrackProfile.leadOut`
+（`measureEdges` 的 `soundingEnd`），它一直在测，只是没人读。`planTransition` 里的 `end` 就是它，
+`outStart + overlap` 必须落在 `end` 上；`automixSession` 里放开 autoplay 的时刻和二次闸门的
+`remaining` 也都得跟着它走，不能再自己拿 duration 减一遍。head-only 档案的 `leadOut` 是 null
+（尾巴下载不到），那时才退回文件末尾。
+
 **证据层不认识 React，也不认识播放器。** 新增测量只加在 `trackProfile.ts` / `signalAnalysis.ts`，
 它们只接受数组和数字。要拿新数据做决策，改 `transitionChooser` 或 `transitionPlanner`，
 不要让执行层直接去读档案。

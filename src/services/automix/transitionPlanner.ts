@@ -77,8 +77,40 @@ export const AUTOMIX_DEFAULT_OVERLAP_SEC = 5;
  */
 const AUTOMIX_DEFAULT_OVERLAP_BEATS = 8;
 
+/**
+ * Longest run of trailing silence still treated as the end of the track rather than a structure.
+ *
+ * Master padding is a second or two; a long fade to nothing runs to five or six. Past ten seconds
+ * the silence is not how the song ends, it is a gap before something else - a hidden track, a
+ * spoken outro - and anchoring the handover before it would delete whatever comes after.
+ */
+const MAX_TRIMMED_TAIL_SEC = 10;
+
 const beatSec = (bpm: number | null | undefined) =>
     (bpm && Number.isFinite(bpm) && bpm > 0 ? 60 / bpm : null);
+
+/**
+ * Where the outgoing track stops SOUNDING, which is not where its file stops.
+ *
+ * A blend is scheduled backwards from the end of the outgoing track, and "the end" was being read
+ * off the media duration - so every second of digital silence a master carries after its last note
+ * was scheduled into as if it were music. Measured across one listening session: seven song changes
+ * out of twenty-nine handed over with the outgoing deck below -30 dBFS and four of those below -40,
+ * which is inaudible. Those are not quiet transitions, they are the track having already finished:
+ * the listener hears the song end, then a gap, then the next one fade up out of nothing. Precisely
+ * the "there is no transition" this feature keeps being reported for.
+ *
+ * `leadOut` already measures it and was going unread. Null while a profile is head-only, which is
+ * the honest answer - the tail of an uncached track cannot be downloaded - and then the file's own
+ * end is all there is to aim at, exactly as before.
+ */
+const soundingEnd = (track: TransitionTrack): number => {
+    const profile = track.profile;
+    const leadOut = profile && !profile.partial ? profile.leadOut : null;
+    return leadOut !== null && leadOut > 0
+        ? track.duration - Math.min(leadOut, MAX_TRIMMED_TAIL_SEC)
+        : track.duration;
+};
 
 /** Rounds a length down to whole beats, so a blend never ends mid-pulse. */
 const toWholeBeats = (seconds: number, beat: number | null) =>
@@ -141,6 +173,11 @@ export const planTransition = (
         to: to.profile ?? null,
     });
 
+    // Everything below is scheduled backwards from HERE, not from the end of the file.
+    const end = soundingEnd(from);
+    const trimmed = from.duration - end;
+    const silence = trimmed > 0.05 ? `, skipped ${round(trimmed)}s of silence at the end` : '';
+
     // A cut does not want a length, it wants somewhere to stand: enough of the tail that the
     // incoming deck has finished loading inside it, and no more, because whatever is left over
     // when the handover lands is cut off.
@@ -156,25 +193,30 @@ export const planTransition = (
         // since the top of the transition window, so the only thing still to pay for is the moment
         // between letting go and hearing it - which RELEASE_MARGIN_SEC already covers.
         const placeable = to.profile ? to.profile.leadIn + HEAD_BUDGET_SEC : CUT_LEAD_SEC;
-        const room = Math.min(CUT_LEAD_SEC, from.duration / 4, placeable);
+        // A quarter of the MUSIC, not of the file: a track padded with silence has less of itself
+        // to spend than its duration claims, and this is also what keeps the anchor off zero.
+        const room = Math.min(CUT_LEAD_SEC, end / 4, placeable);
         if (room < AUTOMIX_MIN_CUT_ROOM_SEC) {
-            return hardCut(`track too short to place a cut in (${round(from.duration)}s)`);
+            return hardCut(`track too short to place a cut in (${round(end)}s)`);
         }
         return {
             kind: 'fade',
             style: choice.style,
             relation: choice.relation,
-            outStart: round(from.duration - room),
+            outStart: round(end - room),
             inStart: 0,
             overlap: round(room),
             minOverlap: AUTOMIX_MIN_CUT_ROOM_SEC,
-            reason: `${choice.style} - ${choice.reason}`,
+            reason: `${choice.style} - ${choice.reason}${silence}`,
         };
     }
 
     const beat = beatSec(bpm);
     const lastSung = lastSungMoment(from.lines);
-    const tail = lastSung === null ? null : from.duration - lastSung;  // instrumental outro
+    // Against the last sounding moment for the same reason: a lyric timeline that stops eight
+    // seconds before a file that carries five seconds of silence has a three-second instrumental
+    // outro, not an eight-second one, and only one of those two numbers is somewhere to put a blend.
+    const tail = lastSung === null ? null : Math.max(0, end - lastSung);  // instrumental outro
     // Measured off the audio, not read off the incoming lyric file. The two ends of a transition
     // are asymmetric: a lyric timeline's END is trustworthy, its BEGINNING is a credit block.
     //
@@ -210,11 +252,11 @@ export const planTransition = (
     const bounded = usesVocalFree ? Math.min(wanted, toWholeBeats(vocalFree, beat)) : wanted;
 
     // Quarter-length cap so a very short track is not half crossfade.
-    const overlap = Math.min(bounded, AUTOMIX_MAX_OVERLAP_SEC, from.duration / 4);
+    const overlap = Math.min(bounded, AUTOMIX_MAX_OVERLAP_SEC, end / 4);
 
     // Only a track of a few seconds can land here, and there is no fade to be had in it.
     if (overlap < AUTOMIX_MIN_OVERLAP_SEC) {
-        return hardCut(`track too short to fade across (${round(from.duration)}s)`);
+        return hardCut(`track too short to fade across (${round(end)}s)`);
     }
 
     // Each end fails for its own reason and they want telling apart: the outgoing side can only
@@ -245,11 +287,11 @@ export const planTransition = (
         kind: 'fade',
         style: choice.style,
         relation: choice.relation,
-        outStart: round(from.duration - overlap),
+        outStart: round(end - overlap),
         inStart: 0,
         overlap: round(overlap),
         minOverlap: AUTOMIX_MIN_OVERLAP_SEC,
-        reason: `${choice.style} ${round(overlap)}s ${length} (${window}${key}${outgoingTail})`,
+        reason: `${choice.style} ${round(overlap)}s ${length} (${window}${key}${outgoingTail}${silence})`,
     };
 };
 

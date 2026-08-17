@@ -241,7 +241,7 @@ export const ensureTrackProfile = async (request: ProfileRequest): Promise<void>
                     + `${profile.partial ? ` (head only, ${profile.duration.toFixed(1)}s of it)` : ''}:`
                     + ` ${profile.bpm ? `${Math.round(profile.bpm)} BPM, ` : ''}`
                     + `${profile.loudness.toFixed(1)} dBFS,`
-                    + ` lead-in ${profile.leadIn.toFixed(2)}s,`
+                    + ` lead-in ${profile.leadIn.toFixed(2)}s, lead-out ${at(profile.leadOut)},`
                     + ` section ${at(profile.sectionStart)}, voice ${at(profile.vocalStart)},`
                     + ` ${profile.startsHot ? 'starts hot' : 'has an intro'}`
                     + `${profile.endsHot === null ? '' : `, ${profile.endsHot ? 'ends hot' : 'decays out'}`}`,
@@ -316,6 +316,7 @@ export const recordPlayedTail = (
     void saveToCache(storageKey(songKey), profile);
     console.log(
         `[Automix] heard out "${song.name}": ${edges.loudness.toFixed(1)} dBFS,`
+        + ` lead-out ${profile.leadOut?.toFixed(2)}s,`
         + ` ${edges.endsHot ? 'ends hot' : 'decays out'} (${edges.outroSlope.toFixed(2)} dB/s)`,
     );
 };

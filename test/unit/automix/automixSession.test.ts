@@ -162,6 +162,29 @@ describe('automix session', () => {
         expect(lastCurve(harness.chains.B.fadeNode)?.duration).toBe(5);
     });
 
+    it('measures the lead from where the music stops, not from the end of the file', () => {
+        // The blend is now aimed in front of a padded master's trailing silence, and the release
+        // has to follow it there. Re-deriving the wait from the duration would hold the autoplay
+        // through the whole of that silence and hand the fade what was left - a quarter of a
+        // second, under its own floor - so the blend would not run short, it would be dropped.
+        const padded: TransitionTrack = {
+            ...BLENDABLE_FROM,
+            profile: makeProfile({ duration: 100, leadOut: 5 }),
+        };
+        const harness = createHarness();
+
+        const plan = harness.arm({ time: 91 - AUTOMIX_ARM_LEAD_SEC, from: padded });
+        expect(plan?.outStart).toBe(91);
+        expect(harness.autoplayHolds).toEqual([true]);
+
+        vi.advanceTimersByTime(HOLD_MS + 100);
+        expect(harness.autoplayHolds).toEqual([true, false]);
+
+        harness.elements.A.currentTime = 91;
+        harness.session.handleActiveDeckPlaying('local:next-song');
+        expect(lastCurve(harness.chains.A.fadeNode)?.duration).toBe(4);
+    });
+
     it('holds nothing when the blend is already due as it arms', () => {
         const harness = createHarness();
 

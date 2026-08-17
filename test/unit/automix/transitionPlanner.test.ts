@@ -191,6 +191,74 @@ describe('resolveOverlap', () => {
 });
 
 /**
+ * A blend is aimed at where the MUSIC stops, not where the file does.
+ *
+ * Every one of these is the same invariant stated on a different path: `outStart + overlap` lands
+ * on the last sounding moment. The number that used to sit there was the media duration, which on
+ * a padded master is seconds of digital silence later - so the blend was scheduled into the
+ * silence, and a listening session's worth of song changes handed over with the outgoing deck
+ * below -40 dBFS. Not a quiet transition: the song had already finished.
+ */
+describe('a blend aims at where the music stops', () => {
+    const padded = (leadOut: number, lines: Line[] | null = null): TransitionTrack => ({
+        duration: 100,
+        lines,
+        profile: makeProfile({ duration: 100, leadOut }),
+    });
+
+    it('starts the handover before the trailing silence rather than inside it', () => {
+        const plan = planTransition(padded(5), track(100, null, 10), 120);
+        expect(plan.outStart + plan.overlap).toBeCloseTo(95, 6);
+        expect(plan.reason).toContain('skipped 5s of silence at the end');
+    });
+
+    it('does not count the silence as instrumental outro', () => {
+        // Singing stops at 92 on a file whose last five seconds are empty: three seconds of music
+        // to place a blend in, not eight. The longer number is somewhere with nothing in it.
+        expect(planTransition(padded(5, [line(10, 92)]), track(100, null, 10), 120).reason)
+            .toContain('outro 3s');
+    });
+
+    it('leaves a gap too long to be a tail where it is', () => {
+        // Half a minute of silence is not how a song ends, it is what comes before a hidden track,
+        // and aiming the handover in front of it would delete whatever follows.
+        const plan = planTransition(padded(30), track(100, null, 10), 120);
+        expect(plan.outStart + plan.overlap).toBeCloseTo(90, 6);
+    });
+
+    it('aims at the file end while only the head has been analysed', () => {
+        // The tail of an uncached track is not downloadable, so leadOut stays null until the track
+        // has been played out once. Null is not zero, and the file's end is all there is to aim at.
+        const head: TransitionTrack = {
+            duration: 100,
+            lines: null,
+            profile: makeProfile({ partial: true, leadOut: null, endsHot: null, outroSlope: null }),
+        };
+        const plan = planTransition(head, track(100, null, 10), 120);
+        expect(plan.outStart + plan.overlap).toBeCloseTo(100, 6);
+        expect(plan.reason).not.toContain('silence at the end');
+    });
+
+    it('places a cut before the silence too', () => {
+        // A track that stops dead and is then padded is genuinely `endsHot` - the measurement runs
+        // over the sounding part - so this is the cut path, which computes its own outStart.
+        const from: TransitionTrack = {
+            duration: 200,
+            lines: null,
+            profile: makeProfile({ endsHot: true, leadOut: 4 }),
+        };
+        const to: TransitionTrack = {
+            duration: 200,
+            lines: null,
+            profile: makeProfile({ startsHot: true, leadIn: 0.8 }),
+        };
+        const plan = planTransition(from, to, 120);
+        expect(plan.style).toBe('beatCut');
+        expect(plan.outStart + plan.overlap).toBeCloseTo(196, 6);
+    });
+});
+
+/**
  * The handoff between deciding a join and performing it.
  *
  * Both halves read correctly on their own and still disagreed between them: the planner asked for

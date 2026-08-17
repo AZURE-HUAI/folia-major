@@ -303,7 +303,12 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         // outgoing track is left over once the blend has had its share, which is exactly how long
         // the incoming deck may load for. Set before the advance, because the advance is what
         // eventually reaches the autoplay this is holding back.
-        const startIn = request.from.duration - request.time - nextPlan.overlap;
+        //
+        // Read off the plan rather than re-derived from the duration. The two agreed for as long as
+        // a blend ended where the file did; now that it ends where the MUSIC does, re-deriving it
+        // here would release the hold a track's worth of trailing silence too late and the fade
+        // would be clipped by exactly the amount the plan just moved.
+        const startIn = nextPlan.outStart - request.time;
         if (startIn > RELEASE_MARGIN_SEC) {
             setAutoplayHold(true);
             releaseTimer = setTimeout(
@@ -345,7 +350,13 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             return;
         }
 
-        const remaining = tailElement.duration - tailElement.currentTime;
+        // How much of the outgoing track is still worth using, which stops where the music does -
+        // `outStart + overlap` is the plan's own answer to that. Taking the element's duration
+        // instead would offer the beat snap a track's trailing silence to move the handover into,
+        // which is the one place it must never land. Clamped by the element as well: the profile
+        // and the media are two independent measurements of the same file and can disagree.
+        const soundingLeft = Math.min(tailElement.duration, plan.outStart + plan.overlap);
+        const remaining = soundingLeft - tailElement.currentTime;
         const overlap = resolveOverlap(plan, remaining);
         // The queue can move under us between planning and playing: a manual skip, or a track
         // that turned out to be unavailable and auto-skipped. Blending into a song we never
