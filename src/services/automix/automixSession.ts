@@ -26,6 +26,10 @@ import type { TrackProfile } from './trackProfile';
 // armed -> fading  the incoming deck actually made a sound, and the ramp is on the audio clock
 // fading -> idle   the overlap elapsed
 //
+// Arming happens a few seconds BEFORE the blend is due, and the app's autoplay is held over that
+// gap - see AUTOMIX_ARM_LEAD_SEC. Loading a track and starting it are two different events, and
+// the whole length of a blend depends on not treating them as one.
+//
 // Every arrow out of armed and fading also exists as a refusal: the transition can be dropped at
 // any point up to the moment the ramp is scheduled, because a blend nobody can vouch for is worse
 // than the plain cut it replaced.
@@ -34,6 +38,23 @@ export type AutomixDeckId = 'A' | 'B';
 export type AutomixPhase = 'idle' | 'armed' | 'fading';
 
 const otherDeck = (deck: AutomixDeckId): AutomixDeckId => (deck === 'A' ? 'B' : 'A');
+
+/**
+ * How early a blend is set up, ahead of the moment it is due to start sounding.
+ *
+ * Requesting the next track and hearing it are separated by a URL resolve, a few cache reads, a
+ * React commit and however long the media element needs to buffer. That gap used to come straight
+ * out of the blend: the transition armed at the exact instant the fade should begin, so the ramp
+ * started whenever loading happened to finish and the realised length was always the planned
+ * length minus the load. Since the load cost is roughly constant on a given machine, so was the
+ * result - a planner that asks for anything between 1.5 and 8 seconds was heard as a flat three.
+ *
+ * The lead pays for the load out of its own budget instead. Whatever is left over is waited out
+ * with the incoming deck loaded but silent, so the fade still begins exactly where it was planned.
+ * A load slower than the lead is not an error - it just spends the whole lead and the blend is
+ * clipped the way it always was, which is logged.
+ */
+export const AUTOMIX_ARM_LEAD_SEC = 3;
 
 /** Long enough for the last scheduled curve point to be consumed before the deck is torn down. */
 const FADE_CLEANUP_MARGIN_MS = 150;
@@ -54,6 +75,13 @@ export interface AutomixSessionPorts {
     onActiveDeckChange: (deck: AutomixDeckId) => void;
     /** Pins the outgoing source on the deck that is fading out; null once it is released. */
     onTailSrcChange: (src: string | null) => void;
+    /**
+     * Holds the app's autoplay while the incoming deck loads, until the blend is actually due.
+     *
+     * The deck still takes its source and buffers it - only pressing play is deferred. Released
+     * from exactly one place, `setAutoplayHold`, so no path can leave the app silently held.
+     */
+    onAutoplayHoldChange: (held: boolean) => void;
     /** Runs the queue's ordinary advance, early. */
     advanceTrack: () => void;
 }
@@ -81,6 +109,8 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
     let plannedTo: TrackProfile | null = null;
     let cleanupTimer: ReturnType<typeof setTimeout> | null = null;
     let balanceTimer: ReturnType<typeof setInterval> | null = null;
+    let releaseTimer: ReturnType<typeof setTimeout> | null = null;
+    let holdingAutoplay = false;
     let appliedTrimDb = 0;
 
     const clearTimers = () => {
@@ -92,6 +122,17 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             clearInterval(balanceTimer);
             balanceTimer = null;
         }
+        if (releaseTimer !== null) {
+            clearTimeout(releaseTimer);
+            releaseTimer = null;
+        }
+    };
+
+    /** The only writer of the hold, so "held" and "the app is not playing" cannot come apart. */
+    const setAutoplayHold = (held: boolean) => {
+        if (holdingAutoplay === held) return;
+        holdingAutoplay = held;
+        ports.onAutoplayHoldChange(held);
     };
 
     /**
@@ -158,6 +199,9 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
      */
     const settle = (options: { pauseTail: boolean }) => {
         clearTimers();
+        // Before anything else: a transition that ends while still holding the autoplay would
+        // leave the app with a loaded deck nothing is ever going to press play on.
+        setAutoplayHold(false);
         const tailDeck = otherDeck(activeDeck);
 
         if (appliedTrimDb > 0) {
@@ -212,7 +256,11 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             request.from.profile?.bpm ?? outgoingTempo?.bpm ?? null,
             { sameAlbum: request.sameAlbum },
         );
-        if (nextPlan.kind !== 'fade' || request.time < nextPlan.outStart) return nextPlan;
+        // Early by the lead, not on the dot: everything between here and `outStart` is what the
+        // next track gets to load in, instead of taking it out of the blend.
+        if (nextPlan.kind !== 'fade' || request.time < nextPlan.outStart - AUTOMIX_ARM_LEAD_SEC) {
+            return nextPlan;
+        }
 
         const context = ports.getContext();
         const incoming = otherDeck(activeDeck);
@@ -241,12 +289,26 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         ports.onTailSrcChange(request.audioSrc);
         ports.onActiveDeckChange(incoming);
 
+        // Off the media clock rather than a stopwatch started later: this is how much of the
+        // outgoing track is left over once the blend has had its share, which is exactly how long
+        // the incoming deck may load for. Set before the advance, because the advance is what
+        // eventually reaches the autoplay this is holding back.
+        const startIn = request.from.duration - request.time - nextPlan.overlap;
+        if (startIn > 0) {
+            setAutoplayHold(true);
+            releaseTimer = setTimeout(() => setAutoplayHold(false), startIn * 1000);
+        }
+
         ports.advanceTrack();
         return nextPlan;
     };
 
     /** The active deck started making sound. The last moment the blend can still be refused. */
     const handleActiveDeckPlaying = (currentKey: string | null) => {
+        // Whatever started this deck - the released hold, the stall check, the listener - it is
+        // making a sound now, so there is nothing left to hold back.
+        setAutoplayHold(false);
+
         const context = ports.getContext();
         const activeChain = ports.getChain(activeDeck);
 
@@ -280,6 +342,16 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             : overlap <= 0 ? 'the outgoing track ran out first' : null;
 
         phase = 'fading';
+
+        // The one measurement that says whether AUTOMIX_ARM_LEAD_SEC is long enough. A blend
+        // shorter than planned means the incoming deck spent the whole lead loading and then some,
+        // so the remainder came out of the fade - the failure this lead exists to remove.
+        if (overlap > 0 && overlap < plan.overlap - 0.05) {
+            console.log(
+                `[Automix] blend clipped to ${overlap}s of the planned ${plan.overlap}s:`
+                + ` the next deck took more than its ${AUTOMIX_ARM_LEAD_SEC}s of lead to start`,
+            );
+        }
 
         if (refusal) {
             // Both keys, always: "the queue moved" is a claim about two strings, and when it is

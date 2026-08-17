@@ -36,6 +36,8 @@ type UsePlaybackAudioBridgeParams = {
     getActiveChain: () => AutomixDeckChain | null;
     /** Set when a pause interrupted an armed transition; suppresses exactly one autoplay. */
     suppressAutoplayRef: MutableRefObject<boolean>;
+    /** True while automix has the next track loaded but its blend is not due to start yet. */
+    isAutoplayHeld: boolean;
     setPlayerState: React.Dispatch<React.SetStateAction<PlayerState>>;
     setStatusMsg: React.Dispatch<React.SetStateAction<StatusMessage | null>>;
     syncOutputGain: (targetVolume: number, smoothing?: number) => void;
@@ -64,6 +66,7 @@ export function usePlaybackAudioBridge({
     connectDecks,
     getActiveChain,
     suppressAutoplayRef,
+    isAutoplayHeld,
     setPlayerState,
     setStatusMsg,
     syncOutputGain,
@@ -258,6 +261,22 @@ export function usePlaybackAudioBridge({
             if (audioRef.current.getAttribute('src') !== audioSrc) return;
 
             if (shouldAutoPlayRef.current && !isLyricsLoading) {
+                // The deck has its source and is buffering, but its blend is not due yet. Bail
+                // WITHOUT spending the intent - this effect runs again when the hold lifts, and
+                // that run is the one meant to start it.
+                //
+                // This is what keeps the load out of the blend. Pressing play here instead starts
+                // the fade wherever loading happened to finish, which took the same second or two
+                // off every transition and capped an eight second plan at three.
+                if (isAutoplayHeld) {
+                    // The outgoing deck is still sounding. playSong dropped the state to IDLE on
+                    // its way past and nothing else puts it back until this deck starts, so left
+                    // alone the transport reads "stopped" for the whole lead - and the play button
+                    // it offers would start this deck early and take the blend with it.
+                    setPlayerState(PlayerState.PLAYING);
+                    return;
+                }
+
                 shouldAutoPlayRef.current = false;
 
                 // Automix starts the next track seconds early, so a pause can land after the
@@ -302,7 +321,7 @@ export function usePlaybackAudioBridge({
                 }
             }
         }
-    }, [audioRef, audioSrc, getTargetPlaybackVolume, isLyricsLoading, setPlayerState, setStatusMsg, setupAudioAnalyzer, shouldAutoPlayRef, suppressAutoplayRef, syncOutputGain, t]);
+    }, [audioRef, audioSrc, getTargetPlaybackVolume, isAutoplayHeld, isLyricsLoading, setPlayerState, setStatusMsg, setupAudioAnalyzer, shouldAutoPlayRef, suppressAutoplayRef, syncOutputGain, t]);
 
     return {
         setupAudioAnalyzer,

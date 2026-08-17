@@ -8,7 +8,12 @@ import { getPrefetchedData } from '../prefetchService';
 import { getSongAlbumLabel } from '../onlineMusic/songMetadata';
 import { getTrackProfile } from './profileService';
 import { connectAutomixDeck, type AutomixDeckChain } from './crossfadeGraph';
-import { createAutomixSession, type AutomixDeckId, type AutomixSession } from './automixSession';
+import {
+    createAutomixSession,
+    AUTOMIX_ARM_LEAD_SEC,
+    type AutomixDeckId,
+    type AutomixSession,
+} from './automixSession';
 import { AUTOMIX_MAX_OVERLAP_SEC } from './transitionPlanner';
 
 // src/services/automix/useAutomixDecks.ts
@@ -124,6 +129,9 @@ export function useAutomixDecks({
 }: UseAutomixDecksParams) {
     const [activeDeck, setActiveDeck] = useState<AutomixDeckId>('A');
     const [tailSrc, setTailSrc] = useState<string | null>(null);
+    // State rather than a ref on purpose: lifting the hold has to re-run the audio bridge's
+    // autoplay effect, and only a render does that.
+    const [autoplayHeld, setAutoplayHeld] = useState(false);
 
     const elementsRef = useRef<Record<AutomixDeckId, HTMLAudioElement | null>>({ A: null, B: null });
     const chainsRef = useRef<Partial<Record<AutomixDeckId, AutomixDeckChain>>>({});
@@ -191,6 +199,7 @@ export function useAutomixDecks({
                 // Null is the last thing every settle does, whichever way the transition ended.
                 if (src === null) scheduleStallCheck();
             },
+            onAutoplayHoldChange: setAutoplayHeld,
             advanceTrack: () => advanceRef.current(),
         });
     }
@@ -273,7 +282,9 @@ export function useAutomixDecks({
     const checkTransitionPoint = useCallback((time: number) => {
         if (!currentSong || !audioSrc) return;
         if (!Number.isFinite(duration) || duration <= 0) return;
-        if (duration - time > AUTOMIX_MAX_OVERLAP_SEC) return;
+        // The longest blend, plus the lead it is armed ahead of. Anything earlier than that cannot
+        // arm whatever the plan says, so there is nothing to evaluate yet.
+        if (duration - time > AUTOMIX_MAX_OVERLAP_SEC + AUTOMIX_ARM_LEAD_SEC) return;
 
         if (!isEnabled) return report('disabled', 'off - the Blend icon at the end of the volume row switches it on');
         if (loopMode === 'one') return report('loop-one', 'single-track loop, nothing to blend into');
@@ -343,8 +354,13 @@ export function useAutomixDecks({
     // Both decks are measured continuously while playing, not only once a blend is imminent: the
     // tempo estimate needs seconds of history behind it, and by the time a transition is planned
     // there is none left to gather. One timer for both decks, and only while there is sound.
+    //
+    // `tailSrc` is the other half of "there is sound". A transition in flight drops the player
+    // state to IDLE for as long as the incoming deck is loading - the whole lead - while the
+    // outgoing deck plays on. Stopping the measurements there would hand the blend a beat grid and
+    // a level reading from seconds ago, which is precisely the moment they have to be current.
     useEffect(() => {
-        if (!isEnabled || playerState !== PlayerState.PLAYING) return;
+        if (!isEnabled || (playerState !== PlayerState.PLAYING && tailSrc === null)) return;
         const timer = setInterval(() => {
             const context = audioContextRef.current;
             if (!context) return;
@@ -352,7 +368,7 @@ export function useAutomixDecks({
             (['A', 'B'] as const).forEach(deck => chainsRef.current[deck]?.analyser.tick(now));
         }, ANALYSER_INTERVAL_MS);
         return () => clearInterval(timer);
-    }, [audioContextRef, isEnabled, playerState]);
+    }, [audioContextRef, isEnabled, playerState, tailSrc]);
 
     // Any pause, from the UI, a media key or the OS, ends a transition. Watching player state
     // rather than the element's pause event matters: while armed the active deck is the silent
@@ -373,6 +389,7 @@ export function useAutomixDecks({
 
     return {
         activeDeck,
+        autoplayHeld,
         suppressAutoplayRef,
         registerDeckA,
         registerDeckB,

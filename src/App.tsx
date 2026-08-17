@@ -1444,6 +1444,7 @@ export default function App() {
         connectDecks: automix.connectDecks,
         getActiveChain: automix.getActiveChain,
         suppressAutoplayRef: automix.suppressAutoplayRef,
+        isAutoplayHeld: automix.autoplayHeld,
         setPlayerState,
         setStatusMsg,
         syncOutputGain,

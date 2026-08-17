@@ -25,7 +25,7 @@
 | 谁 | 用了什么 | 为什么 |
 | --- | --- | --- |
 | `src/App.tsx` | `useAutomixDecks`、`clearTrackProfileRuntime` | 渲染两个 `<audio>`，把事件转进来；切换音源商时清运行时缓存 |
-| `src/hooks/usePlaybackAudioBridge.ts` | `rampGain`、`AutomixDeckChain` | 播放桥拥有节点链上 ReplayGain 那一级 |
+| `src/hooks/usePlaybackAudioBridge.ts` | `rampGain`、`AutomixDeckChain`、`autoplayHeld` | 播放桥拥有节点链上 ReplayGain 那一级；过渡待命期间它得压住自动播放 |
 | `src/services/prefetchService.ts` | `ensureTrackProfile` | 预取下几首时顺手把它们测了 |
 | `src/stores/useSettingsUiStore.ts` | `automixEnabled` | 开关本身，UI 在 `components/panelTab/controls/VolumeRow.tsx` |
 
@@ -34,6 +34,11 @@
 **没有 `index.ts`，是故意的。** 依赖在目录层面是双向的：`prefetchService` 调 `profileService`
 去测曲子，而 `useAutomixDecks` 又回头读 `prefetchService` 的歌词缓存。现在两条边落在不同文件上，
 所以没有循环导入；一旦收进一个 barrel，它们就会合并成一个真的环。目录本身就是边界。
+
+**「装好下一首」和「开始淡入淡出」是两件事。** `automixSession` 提前
+`AUTOMIX_ARM_LEAD_SEC` 秒备好过渡，这段时间里 `onAutoplayHoldChange(true)` 压住播放桥的自动播放：
+deck 照常拿到 src 并缓冲，只是先不出声，到点才放。把这两件事合成一件，装载耗时就会从淡入淡出里
+扣掉，规划器算多长都没用。改动这一段时先确认每条退出路径都会解压——`settle` 是所有结局的必经之路。
 
 **证据层不认识 React，也不认识播放器。** 新增测量只加在 `trackProfile.ts` / `signalAnalysis.ts`，
 它们只接受数组和数字。要拿新数据做决策，改 `transitionChooser` 或 `transitionPlanner`，

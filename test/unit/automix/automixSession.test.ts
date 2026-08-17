@@ -55,6 +55,7 @@ const createHarness = (readings: Partial<Record<AutomixDeckId, FakeAnalyserReadi
 
     const activeDeckChanges: AutomixDeckId[] = [];
     const tailSrcChanges: (string | null)[] = [];
+    const autoplayHolds: boolean[] = [];
     const advanceTrack = vi.fn();
 
     const ports: AutomixSessionPorts = {
@@ -63,12 +64,18 @@ const createHarness = (readings: Partial<Record<AutomixDeckId, FakeAnalyserReadi
         getChain: deck => chains[deck],
         onActiveDeckChange: deck => { activeDeckChanges.push(deck); },
         onTailSrcChange: src => { tailSrcChanges.push(src); },
+        onAutoplayHoldChange: held => { autoplayHolds.push(held); },
         advanceTrack,
     };
 
     const session = createAutomixSession(ports);
 
-    /** Drives the machine to the point where the incoming deck is about to be heard. */
+    /**
+     * Drives the machine to the point where the incoming deck is about to be heard.
+     *
+     * The default `time` is the planned outStart itself, so unless a test asks for an earlier one
+     * there is no lead left to wait out and the blend is due the moment it is armed.
+     */
     const arm = (overrides: Partial<Parameters<typeof session.requestTransition>[0]> = {}) => (
         session.requestTransition({
             time: 95,
@@ -80,7 +87,10 @@ const createHarness = (readings: Partial<Record<AutomixDeckId, FakeAnalyserReadi
         })
     );
 
-    return { session, elements, chains, context, activeDeckChanges, tailSrcChanges, advanceTrack, arm };
+    return {
+        session, elements, chains, context,
+        activeDeckChanges, tailSrcChanges, autoplayHolds, advanceTrack, arm,
+    };
 };
 
 describe('automix session', () => {
@@ -94,14 +104,100 @@ describe('automix session', () => {
         vi.restoreAllMocks();
     });
 
-    it('leaves the track alone until the planned overlap actually starts', () => {
+    it('leaves the track alone until the overlap is within its lead', () => {
         const harness = createHarness();
 
+        // outStart is 95 and the lead is three seconds, so 90 is still one second too early.
         const plan = harness.arm({ time: 90 });
 
         expect(plan?.kind).toBe('fade');
         expect(harness.session.getPhase()).toBe('idle');
         expect(harness.advanceTrack).not.toHaveBeenCalled();
+    });
+
+    it('requests the next track a lead ahead of the blend, not at the moment it is due', () => {
+        // The whole reason the lead exists: resolving a URL, reading the caches, committing the
+        // render and buffering the media all happen between asking for the next track and hearing
+        // it. Asked for at outStart, that cost came out of the fade.
+        const harness = createHarness();
+
+        harness.arm({ time: 92 });
+
+        expect(harness.session.getPhase()).toBe('armed');
+        expect(harness.advanceTrack).toHaveBeenCalledTimes(1);
+    });
+
+    it('holds the autoplay over the lead and lifts it exactly when the blend is due', () => {
+        const harness = createHarness();
+
+        harness.arm({ time: 92 });
+        expect(harness.autoplayHolds).toEqual([true]);
+
+        // Three seconds of outgoing track over the five second blend: the deck may load for
+        // exactly that long and no longer.
+        vi.advanceTimersByTime(2_900);
+        expect(harness.autoplayHolds).toEqual([true]);
+
+        vi.advanceTimersByTime(200);
+        expect(harness.autoplayHolds).toEqual([true, false]);
+    });
+
+    it('gives the blend its full planned length even when the next deck is slow to load', () => {
+        // The regression this whole lead exists for. Armed at outStart, a deck that took three
+        // seconds to make a sound left two seconds of the outgoing track and a two second blend -
+        // the same subtraction on every song change, which is why a planner that asks for
+        // anything between 1.5 and 8 seconds was only ever heard as about three.
+        const harness = createHarness();
+        harness.arm({ time: 92 });
+
+        vi.advanceTimersByTime(3_000);
+        harness.elements.A.currentTime = 95;
+        harness.session.handleActiveDeckPlaying('local:next-song');
+
+        expect(lastCurve(harness.chains.A.fadeNode)?.duration).toBe(5);
+        expect(lastCurve(harness.chains.B.fadeNode)?.duration).toBe(5);
+    });
+
+    it('holds nothing when the blend is already due as it arms', () => {
+        const harness = createHarness();
+
+        harness.arm();
+
+        // Nothing to wait out, so the app's autoplay is never touched: a hold that is set and
+        // cleared in the same tick is a render nobody needs.
+        expect(harness.autoplayHolds).toEqual([]);
+    });
+
+    it('lifts the hold when the listener pauses during the lead', () => {
+        // A held autoplay outlives its transition exactly once before the app is silent for good:
+        // the deck is loaded, nothing is going to press play on it, and nothing says why.
+        const harness = createHarness();
+        harness.arm({ time: 92 });
+
+        harness.session.abort();
+
+        expect(harness.autoplayHolds).toEqual([true, false]);
+    });
+
+    it('lifts the hold when the outgoing track ends before the blend was due', () => {
+        const harness = createHarness();
+        harness.arm({ time: 92 });
+
+        harness.session.handleTailEnded();
+
+        expect(harness.autoplayHolds).toEqual([true, false]);
+        expect(harness.session.getPhase()).toBe('idle');
+    });
+
+    it('lifts the hold when something else starts the deck first', () => {
+        // The stall check, or the listener pressing play. Either way the deck is sounding, so a
+        // hold left standing would only suppress the NEXT track's autoplay.
+        const harness = createHarness();
+        harness.arm({ time: 92 });
+
+        harness.session.handleActiveDeckPlaying('local:next-song');
+
+        expect(harness.autoplayHolds).toEqual([true, false]);
     });
 
     it('hands the deck role over and requests the next track once the overlap begins', () => {
