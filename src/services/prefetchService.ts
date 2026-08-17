@@ -26,6 +26,21 @@ const PREFETCH_COUNT_PREV = 1;  // Prefetch 1 song behind
 const URL_TTL_MS = 1200 * 1000; // 1200 seconds = 20 minutes
 const MAX_PREFETCH_CACHE_SIZE = 200; // Evict least recently used entries beyond this limit
 
+/**
+ * Hands a track to the automix analyser with whatever URL this file resolved for it.
+ *
+ * 'CACHED_IN_DB' is this file's sentinel for "the bytes are in the media cache rather than at a
+ * URL", and the analyser finds those on its own - so it gets a null instead of a string it would
+ * try to fetch. Never awaited: a slow decode must not hold up the song after this one.
+ */
+const analyseForAutomix = (song: SongResult, audioUrl: string | null | undefined) => {
+    void ensureTrackProfile({
+        song,
+        audioUrl: audioUrl === 'CACHED_IN_DB' ? null : audioUrl ?? null,
+        enableMediaCache: useSettingsUiStore.getState().enableMediaCache,
+    });
+};
+
 export interface PrefetchedSongData {
     songKey: string;
     songId: MediaId;
@@ -134,11 +149,7 @@ const prefetchSong = async (
     if (existing && lyricPreferenceMatches && existing.audioUrl && isUrlValid(existing.audioUrlFetchedAt) && (existing.lyrics || existing.lyricRaw?.isPureMusic)) {
         console.log(`[Prefetch] Already cached: ${song.name}`);
         touchPrefetchCacheEntry(songKey, existing);
-        void ensureTrackProfile({
-            song,
-            audioUrl: existing.audioUrl === 'CACHED_IN_DB' ? null : existing.audioUrl,
-            enableMediaCache: currentSettings.enableMediaCache,
-        });
+        analyseForAutomix(song, existing.audioUrl);
         return;
     }
 
@@ -306,13 +317,8 @@ const prefetchSong = async (
 
     // Measured here because this is where the bytes are cheapest: the track is about to be cached
     // anyway, so with song caching on it is one download feeding both the cache and the analysis,
-    // and with it off nothing is fetched at all. Never awaited - a slow decode must not hold up
-    // the lyrics for the song after this one.
-    void ensureTrackProfile({
-        song,
-        audioUrl: data.audioUrl === 'CACHED_IN_DB' ? null : data.audioUrl,
-        enableMediaCache: currentSettings.enableMediaCache,
-    });
+    // and with it off nothing is fetched at all.
+    analyseForAutomix(song, data.audioUrl);
 };
 
 export const updatePrefetchedAudioUrl = (
@@ -390,12 +396,7 @@ export const prefetchNearbySongs = async (
     // The track playing right now is the other half of every transition it is about to be in, and
     // it is not in the prefetch set, so it would otherwise only ever be analysed on a second
     // listen. Its own prefetch entry usually still holds the URL it was resolved from.
-    const currentUrl = prefetchCache.get(currentSongKey)?.audioUrl ?? null;
-    void ensureTrackProfile({
-        song: currentSong,
-        audioUrl: currentUrl === 'CACHED_IN_DB' ? null : currentUrl,
-        enableMediaCache: useSettingsUiStore.getState().enableMediaCache,
-    });
+    analyseForAutomix(currentSong, prefetchCache.get(currentSongKey)?.audioUrl);
 
     // Prefetch using requestIdleCallback for non-blocking execution
     const prefetchWithIdle = (songs: SongResult[], index: number) => {
