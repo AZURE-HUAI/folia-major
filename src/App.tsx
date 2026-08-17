@@ -59,7 +59,7 @@ import { useElectronWindowPlaybackHandoff } from './hooks/useElectronWindowPlayb
 import { useMediaSessionBridge } from './hooks/useMediaSessionBridge';
 import { usePlayerChromeAutoHide } from './hooks/usePlayerChromeAutoHide';
 import { usePlaybackAudioBridge } from './hooks/usePlaybackAudioBridge';
-import { useAutomixDecks, type AutomixDeckId } from './hooks/useAutomixDecks';
+import { useAutomixDecks, type AutomixDeckId } from './services/automix/useAutomixDecks';
 import { usePlaybackInteractionBridge } from './hooks/usePlaybackInteractionBridge';
 import { usePlaybackUiEffects } from './hooks/usePlaybackUiEffects';
 import { useLibraryPlaybackController } from './hooks/useLibraryPlaybackController';

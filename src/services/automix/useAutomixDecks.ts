@@ -1,17 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { MutableRefObject } from 'react';
-import { PlayerState } from '../types';
-import type { LyricData, SongResult, StageLoopMode } from '../types';
-import type { AudioQualityPreference } from '../types/onlineMusic';
-import { getPlaybackSongKey } from '../utils/appPlaybackGuards';
-import { getPrefetchedData } from '../services/prefetchService';
-import { getSongAlbumLabel } from '../services/onlineMusic/songMetadata';
-import { getTrackProfile } from '../services/automix/profileService';
-import { connectAutomixDeck, type AutomixDeckChain } from '../services/automix/crossfadeGraph';
-import { createAutomixSession, type AutomixDeckId, type AutomixSession } from '../services/automix/automixSession';
-import { AUTOMIX_MAX_OVERLAP_SEC } from '../services/automix/transitionPlanner';
+import { PlayerState } from '../../types';
+import type { LyricData, SongResult, StageLoopMode } from '../../types';
+import type { AudioQualityPreference } from '../../types/onlineMusic';
+import { getPlaybackSongKey } from '../../utils/appPlaybackGuards';
+import { getPrefetchedData } from '../prefetchService';
+import { getSongAlbumLabel } from '../onlineMusic/songMetadata';
+import { getTrackProfile } from './profileService';
+import { connectAutomixDeck, type AutomixDeckChain } from './crossfadeGraph';
+import { createAutomixSession, type AutomixDeckId, type AutomixSession } from './automixSession';
+import { AUTOMIX_MAX_OVERLAP_SEC } from './transitionPlanner';
 
-// src/hooks/useAutomixDecks.ts
+// src/services/automix/useAutomixDecks.ts
 // The React shell around the automix state machine: two audio elements, which one the app's
 // audioRef currently names, and the source each one renders. All of the decision-making lives in
 // automixSession; this file only gathers what the planner needs and owns the two pieces of state

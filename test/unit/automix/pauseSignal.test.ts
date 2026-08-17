@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { PlayerState } from '@/types';
-import { isPausedByListener } from '@/hooks/useAutomixDecks';
+import { isPausedByListener } from '@/services/automix/useAutomixDecks';
 
 // test/unit/automix/pauseSignal.test.ts
 // Pins the one distinction that decides whether automix works at all.
