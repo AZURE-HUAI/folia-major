@@ -258,8 +258,16 @@ export const ensureTrackProfile = async (request: ProfileRequest): Promise<void>
     await queue;
 };
 
-/** Within this fraction of the track's length, the deck played it from one end to the other. */
-const PLAYED_THROUGH_TOLERANCE = 0.05;
+/**
+ * How far the readings may fall short of the track's length and still describe how it ends.
+ *
+ * Deliberately not zero. A blend stops the outgoing deck as soon as its fade has finished, which
+ * lands a fraction before the media would have run out on its own, so demanding the whole file
+ * would throw away every track that was blended - which is all of them. Wide enough for that and
+ * narrow enough that the two cases worth refusing never pass: a seek, and a track skipped part
+ * way, both of which move this by tens of seconds.
+ */
+const TAIL_MISS_TOLERANCE_SEC = 2;
 
 /**
  * Completes a head-only profile from the deck's own readings, once a track has played out.
@@ -285,10 +293,11 @@ export const recordPlayedTail = (
     const songKey = getPlaybackSongKey(song);
     const known = profiles.get(songKey);
     if (!known || !known.partial) return;
-    // A seek leaves the history covering some other span than the file, and a level series that
-    // starts in the middle of a track describes a fade-out that never happened.
+    // One test for both ways this can be the wrong track's shape: too little played means it was
+    // skipped or seeked forward, too much means it was seeked back and some of it counted twice.
+    // Either way a level series that does not span the file describes an ending it never had.
     if (!Number.isFinite(duration) || duration <= 0) return;
-    if (Math.abs(levels.length * hopSec - duration) > duration * PLAYED_THROUGH_TOLERANCE) return;
+    if (Math.abs(levels.length * hopSec - duration) > TAIL_MISS_TOLERANCE_SEC) return;
 
     const edges = measureEdges(levels, hopSec);
     if (!edges) return;

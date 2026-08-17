@@ -194,6 +194,26 @@ export function useAutomixDecks({
     useEffect(() => {
         deckSongRef.current[activeDeck] = currentSong;
     }, [activeDeck, currentSong]);
+
+    /**
+     * Files away what a deck just heard, if what it heard was a whole track.
+     *
+     * Called from both ends a deck's track can reach, and the two are not interchangeable: `ended`
+     * only fires where the media really ran out, which for a blended track it never does - the
+     * fade finishes a fraction early and the deck is stopped there. So the settle path below is
+     * the one that carries almost every track, and `ended` covers the song changes that were never
+     * blended at all.
+     */
+    const harvestDeck = useCallback((deck: AutomixDeckId) => {
+        const element = elementsRef.current[deck];
+        const song = deckSongRef.current[deck];
+        const history = chainsRef.current[deck]?.analyser.levelHistory();
+        if (!element || !song || !history) return;
+        recordPlayedTail(song, history.db, history.hopSec, element.duration);
+    }, []);
+    // The session's ports are built once, before this exists, and must not close over a stale copy.
+    const harvestRef = useRef(harvestDeck);
+    harvestRef.current = harvestDeck;
     const advanceRef = useRef(onAdvanceTrack);
     advanceRef.current = onAdvanceTrack;
     // Set when a pause interrupts an armed transition, consumed by the audio bridge's autoplay.
@@ -254,6 +274,12 @@ export function useAutomixDecks({
                 setActiveDeck(deck);
             },
             onTailSrcChange: src => {
+                // Ahead of the state updates below, which take that deck's source away from it:
+                // this is the last moment the element can still say how long its track was.
+                if (src === null) {
+                    const active = sessionRef.current!.getActiveDeck();
+                    harvestRef.current(active === 'A' ? 'B' : 'A');
+                }
                 setTailSrc(src);
                 // Null is the last thing every settle does, whichever way the transition ended.
                 if (src === null) {
@@ -311,17 +337,10 @@ export function useAutomixDecks({
             const element = elementsRef.current[deck];
             if (!element || chainsRef.current[deck]) return;
             chainsRef.current[deck] = connectAutomixDeck(context, element, output);
-            // The one moment a track's own end is measurable. 'ended' rather than the fade finishing:
-            // it fires only where the media really ran out, so a deck stopped early never claims to
-            // have heard a track through. The analyser is reset by whatever starts the next track on
-            // this deck, so the readings handed over here belong to the track that just finished.
-            element.addEventListener('ended', () => {
-                const song = deckSongRef.current[deck];
-                const history = chainsRef.current[deck]?.analyser.levelHistory();
-                if (song && history) {
-                    recordPlayedTail(song, history.db, history.hopSec, element.duration);
-                }
-            });
+            // The song changes no blend was ever scheduled for. The analyser is only reset by
+            // whatever starts the next track on this deck, so the readings are still the finished
+            // track's when this fires.
+            element.addEventListener('ended', () => harvestRef.current(deck));
         });
         return Boolean(chainsRef.current.A && chainsRef.current.B);
     }, []);

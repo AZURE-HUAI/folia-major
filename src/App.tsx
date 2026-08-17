@@ -3037,6 +3037,13 @@ export default function App() {
                 // audioSrc have drifted apart - the state that once had a deck "start playing"
                 // before it had a source, and then sit fully buffered in silence because the
                 // autoplay intent had already been spent on it.
+                // Never during a transition. There the active deck is *meant* to be rendering the
+                // warmed source while audioSrc still names the track the other deck is finishing -
+                // see resolveDeckSrc, where that fallthrough is what keeps the handover seamless.
+                // Ordinarily the warm load happens seconds before the deck roles move and this is
+                // never reached; entering the last few seconds abruptly, by seeking, collapses the
+                // two into one pass and made this cry wolf.
+                if (automix.isTransitionAudible()) return;
                 if (automix.isActiveDeck(e.currentTarget) && e.currentTarget.getAttribute('src') !== audioSrc) {
                     console.error('[Audio] the active deck is loading something other than the current source', {
                         deck,
