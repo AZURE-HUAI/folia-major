@@ -52,20 +52,36 @@ describe('tempoMatch', () => {
     it('grades a difference by what could honestly be done about it', () => {
         expect(tempoMatch(120, 120.5).relation).toBe('locked');
         expect(tempoMatch(120, 125).relation).toBe('near');
-        expect(tempoMatch(120, 128).relation).toBe('stretchable');
-        // Past a turntable's pitch fader, which is where a record stops sounding like itself.
-        expect(tempoMatch(120, 138).relation).toBe('far');
+        expect(tempoMatch(120, 130).relation).toBe('stretchable');
+        // Past what a stretch should be asked to do, and still perfectly overlappable.
+        expect(tempoMatch(120, 138).relation).toBe('drifting');
+        // Far enough that even the shortest blend drifts a whole beat.
+        expect(tempoMatch(90, 128).relation).toBe('far');
     });
 
-    it('refuses the ratios a mis-measured tempo produces', () => {
-        // The reason the limit is 8% and not 25%. A beat tracker that locks onto the wrong harmonic
-        // returns 5:4, 4:3 or 3:2 of the true period, so those exact ratios are far more often a
-        // measurement error than a real pair of tempos - and bending to meet one is maximum damage
-        // for no benefit. Every one of these appeared in a real log.
-        expect(tempoMatch(123, 92).relation).toBe('far');   // 3:4, logged as "92 BPM (123 at the end)"
-        expect(tempoMatch(136, 102).relation).toBe('far');  // 3:4 again
-        expect(tempoMatch(117, 89).relation).toBe('far');   // 4:3
-        expect(tempoMatch(123, 92).stretch).toBe(1);
+    it('separates "do not bend this" from "do not overlap this"', () => {
+        // The regression this exists to prevent. One threshold was answering both questions, so
+        // lowering the bend limit silently started CUTTING pairs an eighth apart - a difference two
+        // tracks are easily overlapped across, just not beat matched. Verbatim from a real log:
+        // "blending 0.51s - beatCut - the two tempos are 11% apart, so this one is cut".
+        const eleven = tempoMatch(100, 111);
+        expect(eleven.relation).not.toBe('far');
+        expect(eleven.stretch).not.toBe(1);   // close enough to actually fix
+
+        const fifteen = tempoMatch(100, 115);
+        expect(fifteen.relation).toBe('drifting');
+        expect(fifteen.stretch).toBe(1);      // too far to fix, near enough to still overlap
+    });
+
+    it('never bends towards a ratio a mis-measured tempo produces', () => {
+        // A beat tracker that locks onto the wrong harmonic returns 5:4, 4:3 or 3:2 of the true
+        // period. The invariant that matters is that none of them is BENT to - where exactly the
+        // overlap line falls between them is a much cheaper thing to be wrong about. All from a
+        // real log.
+        expect(tempoMatch(123, 92).stretch).toBe(1);   // 3:4, "92 BPM (123 at the end)"
+        expect(tempoMatch(136, 102).stretch).toBe(1);  // 3:4 again
+        expect(tempoMatch(117, 89).stretch).toBe(1);   // 4:3
+        expect(tempoMatch(90, 135).stretch).toBe(1);   // 3:2
     });
 
     it('bends the outgoing track onto the incoming one, never the other way', () => {

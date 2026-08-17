@@ -53,8 +53,26 @@ const EDGE_WINDOW_SEC = 10;
 const HOT_WINDOW_SEC = 1.5;
 /** Within this of the track's own average level, an edge counts as being at full level. */
 const HOT_EDGE_DB = 6;
-/** Frames between yields, so a four-minute track does not hold the main thread for its whole scan. */
-const YIELD_EVERY = 512;
+/**
+ * Longest the scan may hold the main thread between yields.
+ *
+ * In milliseconds rather than in frames, and that is the whole of the fix. This was "every 512
+ * frames", which is not an amount of work: a frame here is a 2048 point FFT plus a second one for
+ * the side channel plus four passes over a thousand bins, so five hundred of them is somewhere
+ * between fifty and several hundred milliseconds depending on the track and the machine. Neither
+ * end of that range is a frame of animation, so the UI visibly stopped - about twenty times per
+ * analysed track, and only for tracks not already profiled, which is exactly the "sometimes it
+ * stutters after a transition, sometimes not" the log and the listener both reported.
+ *
+ * Eight milliseconds is half a frame at sixty hertz, so the scan cannot cost a dropped frame even
+ * if it starts one late. The budget is checked rather than counted, which is what makes it hold on
+ * a machine that is slower than the one it was chosen on.
+ *
+ * ponytail: still on the main thread. Moving the FFT loop into a Worker is the real ceiling lift -
+ * `decodeAudioData` has to stay here, but the scan could take a transferred Float32Array. Worth it
+ * only if an 8ms bound turns out not to be enough.
+ */
+const YIELD_BUDGET_MS = 8;
 /**
  * The band a lead vocal lives in.
  *
@@ -683,6 +701,7 @@ export const analyseTrack = async (
     /** Energy in each of the three regions, per second. Summed over an end, that end's tone. */
     const toneBins: Float64Array[] = Array.from({ length: binCount }, () => new Float64Array(3));
     let frames = 0;
+    let yieldBy = performance.now() + YIELD_BUDGET_MS;
 
     for (let start = 0; start + FFT_SIZE <= mono.length; start += HOP) {
         frame.set(mono.subarray(start, start + FFT_SIZE));
@@ -768,7 +787,12 @@ export const analyseTrack = async (
         previous.set(spectrum);
 
         frames += 1;
-        if (frames % YIELD_EVERY === 0) await yieldToUi();
+        // Checked every frame: `performance.now()` is tens of nanoseconds against a frame that
+        // costs tens of microseconds, so asking is free next to what it is measuring.
+        if (performance.now() >= yieldBy) {
+            await yieldToUi();
+            yieldBy = performance.now() + YIELD_BUDGET_MS;
+        }
     }
 
     const edges = measureEdges(levels, hopSec, FFT_SIZE / sampleRate);

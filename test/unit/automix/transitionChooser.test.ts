@@ -152,7 +152,7 @@ describe('chooseTransitionStyle', () => {
         // out of a phrase - the shortest span that still reads as a join.
         const worst = chooseTransitionStyle({
             from: profile({ key: 0, major: true, keyConfidence: 0.8, bpm: 90, outroBpm: 90 }),
-            to: profile({ key: 6, major: true, keyConfidence: 0.8, bpm: 150, startsHot: true, leadIn: 0.1 }),
+            to: profile({ key: 6, major: true, keyConfidence: 0.8, bpm: 120, startsHot: true, leadIn: 0.1 }),
         });
         expect(worst.relation).toBe('clashing');
         expect(worst.tempo.relation).toBe('far');

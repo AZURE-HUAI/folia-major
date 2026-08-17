@@ -442,9 +442,14 @@ export const planTransition = (
         ? ', outgoing never analysed'
         : from.profile.partial ? ', outgoing tail not analysed' : '';
 
+    // The percentage, always, when a pair is left unbent. "Too far apart to hold" was a verdict with
+    // its evidence withheld: it read the same at 11% and at 60%, and the first of those turned out
+    // to be a threshold set wrong rather than a pair of tracks that could not be mixed.
+    const apart = Math.round(Math.abs(choice.tempo.ratio - 1) * 100);
     const bend = choice.tempo.stretch !== 1
         ? `, outgoing bent ${((choice.tempo.stretch - 1) * 100).toFixed(1)}% onto the next tempo`
-        : choice.tempo.relation === 'far' ? ', tempos too far apart to hold' : '';
+        : choice.tempo.relation === 'drifting' ? `, tempos ${apart}% apart, left to drift`
+            : choice.tempo.relation === 'far' ? `, tempos ${apart}% apart, too far to overlap` : '';
     const entry = inStart > 0.05 ? `, entering the next track at ${round(inStart)}s` : '';
 
     return {

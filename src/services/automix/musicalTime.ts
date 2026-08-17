@@ -13,12 +13,19 @@ export const BEATS_PER_PHRASE = BEATS_PER_BAR * 4;
 /**
  * How two tempos sit together, in the four grades that lead to four different actions.
  *
- * - `locked`     the two are already the same speed to within a rounding error
- * - `near`       close enough that pulling one onto the other is under a semitone of pitch
+ * - `locked`      the two are already the same speed to within a rounding error
+ * - `near`        far enough apart to measure, close enough that the stretch does nothing audible
  * - `stretchable` far enough apart to hear, close enough to fix without the fix being the problem
- * - `far`        past what stretching can hide; the answer is a different transition, not a rate
+ * - `drifting`    past what a stretch should be asked to do, close enough to still overlap - unbent,
+ *                 so the two grids walk apart, which is what shortens the blend
+ * - `far`         so far apart that even a short overlap is two rhythms in opposition; cut instead
+ *
+ * The last two used to be one grade, and collapsing them was a real regression: `far` was answering
+ * BOTH "how much may we bend this" and "may these two be overlapped at all", which are different
+ * questions with different answers. Lowering the bend limit therefore silently started cutting
+ * pairs 11% apart - a difference two tracks can easily be overlapped across, just not beat matched.
  */
-export type TempoRelation = 'locked' | 'near' | 'stretchable' | 'far' | 'unknown';
+export type TempoRelation = 'locked' | 'near' | 'stretchable' | 'drifting' | 'far' | 'unknown';
 
 /** Inside this the two tempos are the same number measured twice. */
 const LOCKED_DEVIATION = 0.015;
@@ -32,22 +39,36 @@ const LOCKED_DEVIATION = 0.015;
  */
 export const RAW_RATE_LIMIT = 0.0594;
 /**
- * Past this the two tracks are not at nearly the same tempo, and forcing them makes it worse.
+ * Widest the outgoing track may be bent.
  *
- * Eight percent is where a turntable's pitch fader stops, and that is not an arbitrary piece of
- * hardware trivia: it is the widest a record can be pulled before the room hears it as a different
- * record rather than the same one, arrived at over decades of people doing exactly this in front of
- * an audience. A stretcher moves the artefact from pitch to texture but does not raise that limit.
+ * Two numbers have been wrong here, in opposite directions, and the reasoning matters more than the
+ * value. It was 0.25, which is where 5:4 lives - and 5:4 and 4:3 are exactly what autocorrelation
+ * returns when it locks onto the wrong harmonic of the beat, so the very widest bends were
+ * disproportionately the pairs where a tempo had been MEASURED WRONG. Maximum damage, no benefit.
  *
- * The number this replaces was 0.25, and it was wrong twice. Loud: at a quarter, a fifth of every
- * window a stretcher emits is invented rather than played. Quiet, and worse: 0.25 is 5:4 and 0.33
- * is 4:3, which are exactly the ratios an autocorrelation returns when it locks onto the wrong
- * harmonic of the beat. So the widest bends were not the pairs that most needed matching - they
- * were disproportionately the pairs where one of the two tempos had been measured wrong, and the
- * bend was maximum damage for no benefit at all. Below 8% no harmonic error can reach, so what is
- * left in the band is real.
+ * Then it was 0.08, on the grounds that a turntable's pitch fader stops there. That argument is
+ * about PITCH, and pitch no longer moves - the element preserves it. Carrying a constraint past the
+ * thing that justified it made 11% differences into hard cuts.
+ *
+ * What actually binds now: the stretcher's own texture, clean to about a tenth on a full mix and
+ * smeary well before a quarter; and staying clear of the harmonic ratios, the nearest of which is a
+ * fifth away. Twelve percent sits inside the first and under the second, and it is applied to a
+ * track that is three seconds from gone with its low end already being pulled out from under it -
+ * the most forgiving place in the whole transition to spend an artefact.
  */
-const STRETCH_LIMIT = 0.08;
+const STRETCH_LIMIT = 0.12;
+/**
+ * Past this two tracks are not overlapped at all.
+ *
+ * Not the same question as the one above, and conflating them is what made a 0.51 second "blend"
+ * out of an 11% tempo difference. Bending asks "can this be corrected"; overlapping asks "can these
+ * two be heard at once", and the second tolerates far more, because a bass swap means only one of
+ * the two kicks is audible at a time. A quarter is where that stops being true: a four beat overlap
+ * at a quarter drifts a full beat, so the two rhythms end in opposition rather than merely
+ * unaligned, and no gain curve or band split answers that. `far` routes to a cut, which is the only
+ * arrangement in which each track is only ever heard against itself.
+ */
+const DRIFT_LIMIT = 0.25;
 
 export interface TempoMatch {
     relation: TempoRelation;
@@ -92,6 +113,9 @@ export const tempoMatch = (
     if (deviation < LOCKED_DEVIATION) return { relation: 'locked', stretch: 1, ratio };
     if (deviation <= RAW_RATE_LIMIT) return { relation: 'near', stretch: ratio, ratio };
     if (deviation <= STRETCH_LIMIT) return { relation: 'stretchable', stretch: ratio, ratio };
+    // Both of the remaining grades leave the rate alone. What separates them is whether the two are
+    // allowed to sound together at all while their grids walk apart.
+    if (deviation <= DRIFT_LIMIT) return { relation: 'drifting', stretch: 1, ratio };
     return { relation: 'far', stretch: 1, ratio };
 };
 
@@ -135,6 +159,9 @@ export const TEMPO_LENGTH_SCALE: Record<TempoRelation, number> = {
     locked: 1.3,
     near: 1.2,
     stretchable: 1.1,
+    // The first grade that is NOT put onto one grid, so this is the first one where the length has
+    // to pay for the drift instead of the rate paying for it.
+    drifting: 0.6,
     far: 0.5,
     unknown: 1,
 };
