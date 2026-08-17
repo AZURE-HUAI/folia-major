@@ -78,11 +78,12 @@ export const AUTOMIX_DEFAULT_OVERLAP_SEC = 5;
 const AUTOMIX_DEFAULT_OVERLAP_BEATS = 8;
 
 /**
- * Longest run of trailing silence still treated as the end of the track rather than a structure.
+ * Longest run at the end of a track a transition may take as being "the ending".
  *
- * Master padding is a second or two; a long fade to nothing runs to five or six. Past ten seconds
- * the silence is not how the song ends, it is a gap before something else - a hidden track, a
- * spoken outro - and anchoring the handover before it would delete whatever comes after.
+ * Master padding is a second or two and a produced fade-out runs to five or six, so ten covers
+ * both with room. Past it the measurement is not describing an ending any more: a minute of
+ * silence is the gap before a hidden track, and a two-minute decay is an ambient outro somebody
+ * wrote on purpose. Anchoring a handover in front of either would delete a part of the song.
  */
 const MAX_TRIMMED_TAIL_SEC = 10;
 
@@ -90,26 +91,34 @@ const beatSec = (bpm: number | null | undefined) =>
     (bpm && Number.isFinite(bpm) && bpm > 0 ? 60 / bpm : null);
 
 /**
- * Where the outgoing track stops SOUNDING, which is not where its file stops.
+ * The two ends of the outgoing track that are not its file's end.
  *
- * A blend is scheduled backwards from the end of the outgoing track, and "the end" was being read
- * off the media duration - so every second of digital silence a master carries after its last note
- * was scheduled into as if it were music. Measured across one listening session: seven song changes
- * out of twenty-nine handed over with the outgoing deck below -30 dBFS and four of those below -40,
- * which is inaudible. Those are not quiet transitions, they are the track having already finished:
- * the listener hears the song end, then a gap, then the next one fade up out of nothing. Precisely
- * the "there is no transition" this feature keeps being reported for.
+ * A blend is scheduled backwards from "the end of the track", and that was read off the media
+ * duration - so both of these were being treated as music. Measured over two listening sessions,
+ * each one on its own accounts for a class of song change that arrives as silence:
  *
- * `leadOut` already measures it and was going unread. Null while a profile is head-only, which is
- * the honest answer - the tail of an uncached track cannot be downloaded - and then the file's own
- * end is all there is to aim at, exactly as before.
+ * `sounding` - past it the file is digitally silent. Twenty-nine song changes, seven handed over
+ * below -30 dBFS and four below -40, one of them 55 dB under the outgoing track's own level. Not
+ * quiet transitions: the song had finished, and the listener heard a gap and then a fade-up.
+ *
+ * `body` - past it the track is decaying rather than playing. Fixing the first left five song
+ * changes of which three still handed over at -23 to -26 dBFS, because the silence threshold is
+ * forty dB under the track's PEAK, which on a modern master is thirty under its music. So a blend
+ * aimed at `sounding` runs its whole length inside the decay. Aiming at `body` starts it while
+ * the outgoing track is still carrying the song, and the decay then plays out underneath the
+ * incoming one instead of in place of it - which is what `tailRide` was always for.
+ *
+ * Null on a head-only profile, which is the honest answer - the tail of an uncached track is not
+ * downloadable - and then the file's own end is all there is to aim at, exactly as before.
  */
-const soundingEnd = (track: TransitionTrack): number => {
-    const profile = track.profile;
-    const leadOut = profile && !profile.partial ? profile.leadOut : null;
-    return leadOut !== null && leadOut > 0
-        ? track.duration - Math.min(leadOut, MAX_TRIMMED_TAIL_SEC)
-        : track.duration;
+const endsOf = (track: TransitionTrack) => {
+    const profile = track.profile && !track.profile.partial ? track.profile : null;
+    const back = (seconds: number | null | undefined) => (
+        seconds !== null && seconds !== undefined && seconds > 0
+            ? track.duration - Math.min(seconds, MAX_TRIMMED_TAIL_SEC)
+            : track.duration
+    );
+    return { sounding: back(profile?.leadOut), body: back(profile?.bodyOut) };
 };
 
 /** Rounds a length down to whole beats, so a blend never ends mid-pulse. */
@@ -174,7 +183,7 @@ export const planTransition = (
     });
 
     // Everything below is scheduled backwards from HERE, not from the end of the file.
-    const end = soundingEnd(from);
+    const { sounding: end, body } = endsOf(from);
     const trimmed = from.duration - end;
     const silence = trimmed > 0.05 ? `, skipped ${round(trimmed)}s of silence at the end` : '';
 
@@ -199,6 +208,9 @@ export const planTransition = (
         if (room < AUTOMIX_MIN_CUT_ROOM_SEC) {
             return hardCut(`track too short to place a cut in (${round(end)}s)`);
         }
+        // No `body` here, and that is what a cut IS: the styles that reach this branch were chosen
+        // because the outgoing track is still at full level when it stops, so its body runs to the
+        // last sounding frame and the two answers are the same one.
         return {
             kind: 'fade',
             style: choice.style,
@@ -274,6 +286,19 @@ export const planTransition = (
             : `outro ${round(tail)}s, intro ${round(intro)}s`;
     const length = `${beat === null ? 'default' : `${round(overlap / beat)} beats`}`
         + (bounded < wanted ? ', capped by the vocal-free window' : '');
+    // Three clauses, and the order between them is the whole decision.
+    //
+    // Latest: where the blend sits when the track just stops - flush against the last sounding
+    // moment. Body: the top of the decay, taken instead when the decay starts earlier than that,
+    // so the handover happens while the outgoing track is still carrying the song rather than
+    // fifteen dB into its own fade-out. Floor: never before the singing stopped, because two vocal
+    // lines stacked on each other is the one thing that makes an overlap sound wrong, and moving
+    // the anchor earlier is exactly the way to cause it.
+    const latest = end - overlap;
+    const outStart = Math.min(latest, Math.max(body, lastSung ?? 0));
+    const rode = latest - outStart;
+    const fadeOut = rode > 0.05 ? `, started ${round(rode)}s early to ride the fade-out` : '';
+
     const key = choice.relation === 'unknown' ? '' : `, ${choice.relation} keys`;
     // Four of the five joins are decided on how the OUTGOING track ends, and a head-only profile
     // knows nothing about that - so they cannot be reached at all and every song change comes out
@@ -287,11 +312,12 @@ export const planTransition = (
         kind: 'fade',
         style: choice.style,
         relation: choice.relation,
-        outStart: round(end - overlap),
+        outStart: round(outStart),
         inStart: 0,
         overlap: round(overlap),
         minOverlap: AUTOMIX_MIN_OVERLAP_SEC,
-        reason: `${choice.style} ${round(overlap)}s ${length} (${window}${key}${outgoingTail}${silence})`,
+        reason: `${choice.style} ${round(overlap)}s ${length}`
+            + ` (${window}${key}${outgoingTail}${silence}${fadeOut})`,
     };
 };
 

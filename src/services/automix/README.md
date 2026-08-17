@@ -45,13 +45,19 @@ deck 照常拿到 src 并缓冲，只是先不出声，到点才放。把这两�
 ——在一张从头连到尾的专辑上它吃掉了三分之二的换歌，于是听众打开「混音过渡」，听到的是什么都没发生。
 现在剩下的每一种接法都是听得见的。加新接法时守住这条。
 
-**一首歌结束的地方，不是文件结束的地方。** 过渡是从「歌尾」倒着排的，而「歌尾」一度读的是媒体时长。
-成品母带在最后一个音之后还挂着几秒数字静音，于是过渡被排进了那段静音里——听感上是歌放完、静一下、
-下一首从零淡进来，也就是反复被报的「压根没有过渡」。真正的锚点是 `TrackProfile.leadOut`
-（`measureEdges` 的 `soundingEnd`），它一直在测，只是没人读。`planTransition` 里的 `end` 就是它，
-`outStart + overlap` 必须落在 `end` 上；`automixSession` 里放开 autoplay 的时刻和二次闸门的
-`remaining` 也都得跟着它走，不能再自己拿 duration 减一遍。head-only 档案的 `leadOut` 是 null
-（尾巴下载不到），那时才退回文件末尾。
+**一首歌结束的地方，不是文件结束的地方——而且有两个「结束」。** 过渡是从「歌尾」倒着排的，
+「歌尾」一度读的是媒体时长，于是母带尾巴上的东西全被当成音乐排了进去。两次实测各暴露一层：
+
+- `leadOut` / `soundingEnd`：最后一个音之后的数字静音。29 次换歌里 7 次交接时出场曲低于 -30 dBFS，
+  4 次低于 -40——那不是过渡轻，是歌早就放完了。
+- `bodyOut` / `bodyEnd`：静音门槛是「比**峰值**低 40 dB」，现代母带上那约等于比**音乐本身**低 30 dB。
+  所以贴着 `soundingEnd` 排的过渡整段都在衰减里跑。补完上一条之后 5 次里仍有 3 次交接在 -23～-26 dBFS。
+
+`planTransition` 的落点是这三句的最小值/最大值组合：`min(sounding - overlap, max(body, lastSung))`
+——正常贴着响声末尾，衰减来得更早就从衰减顶点开始，但绝不早于唱完。`automixSession` 里放开 autoplay
+的时刻和二次闸门的 `remaining` 必须读计划，不能再自己拿 duration 减一遍。head-only 档案两个字段都是
+null（尾巴下载不到），那时才退回文件末尾。超过 `MAX_TRIMMED_TAIL_SEC` 的空白或衰减不算尾巴——
+那是隐藏曲目或者写好的氛围尾奏，动它等于删歌。
 
 **证据层不认识 React，也不认识播放器。** 新增测量只加在 `trackProfile.ts` / `signalAnalysis.ts`，
 它们只接受数组和数字。要拿新数据做决策，改 `transitionChooser` 或 `transitionPlanner`，

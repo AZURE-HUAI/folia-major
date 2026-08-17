@@ -10,7 +10,7 @@ import { estimateTempo, rmsDb, spectralFlux, SILENCE_DB } from './signalAnalysis
 // are loud or decaying, the beat grid, the key - is about the *incoming* song.
 
 /** Bumped whenever the maths changes, so stored profiles from an older build are re-measured. */
-export const TRACK_PROFILE_VERSION = 2;
+export const TRACK_PROFILE_VERSION = 3;
 
 /**
  * What the analysis runs at.
@@ -121,6 +121,14 @@ export interface TrackProfile {
     sectionStart: number | null;
     /** Seconds of near-silence after it stops. Null when only the head was read. */
     leadOut: number | null;
+    /**
+     * Seconds from where the track stops holding its level to the end of the file - the decaying
+     * tail plus whatever silence follows it. Never smaller than `leadOut`. Null with only the head.
+     *
+     * Kept as a distance from the END rather than an absolute time so it stays true of the file
+     * regardless of which of the two durations - the profile's or the media element's - is asked.
+     */
+    bodyOut: number | null;
     /** The track is already at full level as it starts - no intro to hide a blend in. */
     startsHot: boolean;
     /** It is still at full level when it stops - no decaying tail to blend under. */
@@ -386,6 +394,19 @@ export interface TrackEdges {
     leadIn: number;
     /** Seconds from the start of the measured span to the end of its last sounding frame. */
     soundingEnd: number;
+    /**
+     * Seconds to where the track stops HOLDING its level, which is well before it stops sounding.
+     *
+     * `soundingEnd` is a silence threshold - forty dB under the track's own peak, which on a modern
+     * master is some thirty dB under the music. Everything between the two is the decay: the last
+     * chord ringing off, a produced fade-out, reverb. Scheduling a handover backwards from
+     * `soundingEnd` therefore runs the whole of it against a track that is already fifteen to thirty
+     * dB down, which is a crossfade with nothing on one side of it.
+     *
+     * Equal to `soundingEnd` on a track that stops at full level - the two questions only come apart
+     * where there is a decay to come apart over.
+     */
+    bodyEnd: number;
     startsHot: boolean;
     endsHot: boolean;
     introSlope: number;
@@ -438,6 +459,20 @@ export const measureEdges = (
     const head = (frames: number) => sounding.slice(0, Math.min(frames, sounding.length));
     const tail = (frames: number) => sounding.slice(Math.max(0, sounding.length - frames));
 
+    // `endsHot` asked at every position rather than only at the last one, walked backwards until it
+    // passes. Prefix-summed because this is a sliding mean over tens of thousands of frames, and
+    // because one definition of "at full level" for both answers is the point of measuring it here.
+    const prefix = new Float64Array(sounding.length + 1);
+    for (let index = 0; index < sounding.length; index += 1) {
+        prefix[index + 1] = prefix[index] + sounding[index];
+    }
+    const holdsLevelAt = (endExclusive: number) => {
+        const from = Math.max(0, endExclusive - hotFrames);
+        return (prefix[endExclusive] - prefix[from]) / (endExclusive - from) > average - HOT_EDGE_DB;
+    };
+    let body = sounding.length;
+    while (body > 1 && !holdsLevelAt(body)) body -= 1;
+
     let energy = 0;
     let counted = 0;
     for (const level of levels) {
@@ -449,6 +484,7 @@ export const measureEdges = (
     return {
         leadIn: first * hopSec,
         soundingEnd: last * hopSec + frameSec,
+        bodyEnd: Math.max(0, (first + body - 1) * hopSec + frameSec),
         // Averaged over a second or so rather than read off one frame: a single loud transient at
         // the top of a track is a count-in, not a track that starts at full tilt.
         startsHot: mean(head(hotFrames)) > average - HOT_EDGE_DB,
@@ -605,6 +641,7 @@ export const analyseTrack = async (
         vocalStart: side ? firstSustained(centre, hopSec) : null,
         sectionStart: firstBoundary(sectionBins, NOVELTY_BIN_SEC),
         leadOut: partial ? null : Math.max(0, duration - edges.soundingEnd),
+        bodyOut: partial ? null : Math.max(0, duration - edges.bodyEnd),
         startsHot: edges.startsHot,
         endsHot: partial ? null : edges.endsHot,
         introSlope: edges.introSlope,

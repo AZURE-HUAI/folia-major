@@ -12,6 +12,7 @@ export const makeProfile = (overrides: Partial<TrackProfile> = {}): TrackProfile
     vocalStart: null,
     sectionStart: null,
     leadOut: 0,
+    bodyOut: 0,
     startsHot: false,
     endsHot: false,
     introSlope: 0,

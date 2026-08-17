@@ -239,6 +239,45 @@ describe('a blend aims at where the music stops', () => {
         expect(plan.reason).not.toContain('silence at the end');
     });
 
+    it('starts the blend at the top of a fade-out rather than inside it', () => {
+        // Trimming the silence alone still left three song changes out of five handing over at -23
+        // to -26 dBFS, because the silence floor sits about thirty dB under the music: a blend
+        // flush against it runs its whole length in the decay. Starting at the top of the decay
+        // instead means the outgoing track is still carrying the song when the handover begins,
+        // and the fade then plays out underneath the incoming one.
+        const from: TransitionTrack = {
+            duration: 100,
+            lines: null,
+            profile: makeProfile({ duration: 100, leadOut: 1, bodyOut: 8 }),
+        };
+        const plan = planTransition(from, track(100, null, 10), 120);
+        expect(plan.outStart).toBeCloseTo(92, 6);
+        expect(plan.reason).toContain('to ride the fade-out');
+    });
+
+    it('never moves the blend back over the singing', () => {
+        // Moving the anchor earlier is precisely how two vocal lines end up stacked on each other,
+        // which is the one thing an overlap must not do. A long fade under a late vocal is where
+        // the two rules meet, and the vocal wins.
+        const from: TransitionTrack = {
+            duration: 100,
+            lines: [line(10, 94)],
+            profile: makeProfile({ duration: 100, leadOut: 0, bodyOut: 9 }),
+        };
+        expect(planTransition(from, track(100, null, 10), 120).outStart).toBeCloseTo(94, 6);
+    });
+
+    it('leaves a decay too long to be an ending where it is', () => {
+        // A two-minute ambient outro is not how the song ends, it is the song. Riding all of it
+        // would start the next track while this one still had a third of itself to play.
+        const from: TransitionTrack = {
+            duration: 200,
+            lines: null,
+            profile: makeProfile({ duration: 200, leadOut: 0, bodyOut: 120 }),
+        };
+        expect(planTransition(from, track(100, null, 10), 120).outStart).toBeCloseTo(190, 6);
+    });
+
     it('places a cut before the silence too', () => {
         // A track that stops dead and is then padded is genuinely `endsHot` - the measurement runs
         // over the sounding part - so this is the cut path, which computes its own outStart.

@@ -225,6 +225,24 @@ describe('measureEdges', () => {
         expect(fades!.outroSlope).toBeLessThan(-1.5);
     });
 
+    it('separates where a track stops holding its level from where it stops sounding', () => {
+        // The two fixtures above, asked the question a handover actually needs. The silence floor
+        // is forty dB under the PEAK, which on a real master is thirty under the music - so a blend
+        // aimed at `soundingEnd` spends its whole length inside the decay. A track that stops dead
+        // has one answer to both; a produced fade has two, and the gap between them is the fade.
+        const stops = measureEdges(levels({ db: -12, seconds: 40 }), HOP)!;
+        expect(stops.bodyEnd).toBeCloseTo(stops.soundingEnd, 6);
+
+        const fade = Array.from({ length: Math.round(10 / HOP) }, (_, index) =>
+            -12 - (index / (10 / HOP)) * 25);
+        const fades = measureEdges([...levels({ db: -12, seconds: 30 }), ...fade], HOP)!;
+        expect(fades.soundingEnd).toBeCloseTo(40, 1);
+        // Some way into the fade the level drops far enough under the track's own average to stop
+        // counting. Everything after it is decay a handover should play OVER rather than inside.
+        expect(fades.bodyEnd).toBeGreaterThan(30);
+        expect(fades.bodyEnd).toBeLessThan(36);
+    });
+
     it('finds the sounding part between the silence at each end', () => {
         const edges = measureEdges(
             levels({ db: -90, seconds: 2 }, { db: -12, seconds: 30 }, { db: -90, seconds: 3 }),
