@@ -152,6 +152,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
         hideRemoteControlTaskbarIcon,
         openPlayerOnLaunch,
         enableMediaCache,
+        mediaCacheLimitGb,
         backgroundOpacity,
         subtitleOverlayOpacity,
         subtitleOverlayBackground,
@@ -221,6 +222,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
         handleToggleHideRemoteControlTaskbarIcon: onToggleHideRemoteControlTaskbarIcon,
         handleToggleOpenPlayerOnLaunch: onToggleOpenPlayerOnLaunch,
         handleToggleMediaCache: onToggleMediaCache,
+        handleSetMediaCacheLimitGb: onSetMediaCacheLimitGb,
         handleSetBackgroundOpacity: setBackgroundOpacity,
         handleSetSubtitleOverlayOpacity: setSubtitleOverlayOpacity,
         handleToggleSubtitleOverlayBackground: onToggleSubtitleOverlayBackground,
@@ -1618,10 +1620,12 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                                                 errorTextColor={errorTextColor}
                                                 isCleaning={isCleaning}
                                                 isElectron={isElectron}
+                                                mediaCacheLimitGb={mediaCacheLimitGb}
                                                 mediaCount={mediaCount}
                                                 onChooseCacheDirectory={handleChooseCacheDirectory}
                                                 onClear={handleClear}
                                                 onClearAll={handleClearAllCache}
+                                                onSetMediaCacheLimitGb={onSetMediaCacheLimitGb}
                                                 onToggleMediaCache={onToggleMediaCache}
                                                 settingsCardClass={settingsCardClass}
                                                 settingsIconClass={settingsIconClass}

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Check, Cloud, Command, Database, Disc3, Download, FolderOpen, Layers, Loader2, Pencil, PlayCircle, RefreshCw, Trash2, Upload, X } from 'lucide-react';
+import { Check, Cloud, Command, Database, Disc3, Download, FolderOpen, HardDrive, Layers, Loader2, Pencil, PlayCircle, RefreshCw, Trash2, Upload, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { Theme } from '../../../types';
 import { getSyncConfig, getSyncStatus, saveSyncConfig, setSyncStatus, subscribeSyncConfig, subscribeSyncStatus } from '../../../services/sync/syncConfig';
@@ -24,10 +24,12 @@ type StorageSettingsSectionProps = {
     errorTextColor: string;
     isCleaning: string | null;
     isElectron: boolean;
+    mediaCacheLimitGb: number;
     mediaCount: number;
     onChooseCacheDirectory: () => void;
     onClear: (category: CacheCategory) => void;
     onClearAll: () => void;
+    onSetMediaCacheLimitGb: (gigabytes: number) => void;
     onToggleMediaCache: (enabled: boolean) => void;
     settingsCardClass: string;
     settingsIconClass?: string;
@@ -45,10 +47,12 @@ const StorageSettingsSection: React.FC<StorageSettingsSectionProps> = ({
     errorTextColor,
     isCleaning,
     isElectron,
+    mediaCacheLimitGb,
     mediaCount,
     onChooseCacheDirectory,
     onClear,
     onClearAll,
+    onSetMediaCacheLimitGb,
     onToggleMediaCache,
     settingsCardClass,
     settingsIconClass,
@@ -70,6 +74,9 @@ const StorageSettingsSection: React.FC<StorageSettingsSectionProps> = ({
     const iconClass = useInsetCacheRows && settingsIconClass
         ? `p-2 rounded-lg opacity-60 ${settingsIconClass}`
         : 'p-2 bg-white/5 rounded-lg opacity-60';
+    // Zero is "no ceiling", which is a real answer rather than a missing one, so it gets a label
+    // instead of an empty field.
+    const cacheLimitOptions = [1, 2, 5, 10, 20, 50, 0];
     const cacheItems = [
         { id: 'playlist' as const, label: t('options.playlistData') || 'Playlist Data', size: cacheSizes.playlist, icon: Layers },
         { id: 'lyrics' as const, label: t('options.lyrics') || 'Lyrics', size: cacheSizes.lyrics, icon: Command },
@@ -465,9 +472,35 @@ const StorageSettingsSection: React.FC<StorageSettingsSectionProps> = ({
                         </div>
                     )}
 
+                    {isElectron && (
+                        <div className="pt-3 border-t border-white/10 flex items-center justify-between gap-4">
+                            <div className="space-y-1">
+                                <div className="text-sm font-medium flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
+                                    <HardDrive size={14} />
+                                    {t('options.mediaCacheLimit') || 'Cache Limit'}
+                                </div>
+                                <div className="text-xs opacity-50 max-w-[240px]" style={{ color: 'var(--text-secondary)' }}>
+                                    {t('options.mediaCacheLimitDesc') || 'Once past this, the songs you have not played in longest are dropped first.'}
+                                </div>
+                            </div>
+                            <select
+                                value={mediaCacheLimitGb}
+                                onChange={(event) => onSetMediaCacheLimitGb(Number(event.target.value))}
+                                className="shrink-0 rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm outline-none focus:border-white/25"
+                                style={{ color: 'var(--text-primary)' }}
+                            >
+                                {cacheLimitOptions.map((gigabytes) => (
+                                    <option key={gigabytes} value={gigabytes} className="bg-neutral-900">
+                                        {gigabytes === 0 ? (t('options.mediaCacheLimitNone') || 'No limit') : `${gigabytes} GB`}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+                    )}
+
                     <div className="pt-3 border-t border-white/10 flex justify-between items-center text-xs opacity-50">
                         <span>{t('options.cachedSongsCount') || 'Cached Songs'}:</span>
-                        <span className="font-mono">{mediaCount}</span>
+                        <span className="font-mono">{mediaCount} · {cacheSizes.media}</span>
                     </div>
                 </div>
             </section>

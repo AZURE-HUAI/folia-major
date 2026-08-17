@@ -1,5 +1,16 @@
 import { getFromCache, removeFromCache, saveToCache } from './db';
 import { isBlob } from '../utils/blobGuards';
+import { useSettingsUiStore } from '../stores/useSettingsUiStore';
+
+/**
+ * The ceiling the desktop cache is pruned back to after each write, in bytes.
+ *
+ * Read here rather than passed in, because every caller would otherwise have to know about a
+ * setting that has nothing to do with the song it is saving. Zero means the listener asked for
+ * no ceiling and reaches the main process unchanged.
+ */
+const cacheLimitBytes = () =>
+  useSettingsUiStore.getState().mediaCacheLimitGb * 1024 * 1024 * 1024;
 
 interface ElectronAudioCacheEntry {
   found: boolean;
@@ -75,7 +86,7 @@ export async function saveAudioBlob(cacheKey: string, blob: Blob): Promise<void>
   }
   if (isElectronAudioCacheAvailable()) {
     const buffer = await blob.arrayBuffer();
-    await window.electron!.saveAudioCache(cacheKey, buffer, blob.type || 'audio/mpeg');
+    await window.electron!.saveAudioCache(cacheKey, buffer, blob.type || 'audio/mpeg', cacheLimitBytes());
     return;
   }
 

@@ -14,6 +14,7 @@ const { createDisplaySleepBlocker } = require('./displaySleepBlocker.cjs');
 const { createLyricApi } = require('./lyricApi.cjs');
 const { createLocalCoverAssetStore, getLocalCoverAssetDirectory } = require('./localCoverAssets.cjs');
 const { getReleaseUrl, getUpdateProviderConfig, resolveReleaseChannel } = require('./updateChannels.cjs');
+const { resolveCacheLimit, selectEvictions } = require('./audioCachePrune.cjs');
 const { sanitizeDualTheme: sanitizeGeneratedDualTheme } = require('../shared/themeSanitizer.cjs');
 const useLinuxGraphicsDebugMode = process.env.ELECTRON_LINUX_PACKAGED_GRAPHICS === 'true';
 const isAppImageRuntime =
@@ -1979,6 +1980,12 @@ async function readAudioCacheEntry(cacheKey) {
       fsp.readFile(metaPath, 'utf-8').catch(() => null),
     ]);
 
+    // Mark it as recently used, so pruning evicts by last play rather than by first download.
+    // Access time would say this without a write, but Windows ships with atime updates off, so
+    // the only field that survives a round trip is the one we set ourselves.
+    const now = new Date();
+    fsp.utimes(dataPath, now, now).catch(() => {});
+
     let mimeType = 'audio/mpeg';
     if (rawMeta) {
       try {
@@ -2005,7 +2012,36 @@ async function readAudioCacheEntry(cacheKey) {
   }
 }
 
-async function writeAudioCacheEntry(cacheKey, data, mimeType) {
+/**
+ * Drops the least recently played files until the cache fits under `limitBytes`.
+ *
+ * Run after every write, which is the only moment the cache can grow, so there is nowhere for it
+ * to exceed the ceiling unobserved. Which files go is decided in audioCachePrune.cjs.
+ */
+async function pruneAudioCache(limitBytes) {
+  if (resolveCacheLimit(limitBytes) === Infinity) return;
+
+  const audioDirectory = getAudioCacheDirectory();
+  try {
+    const names = (await fsp.readdir(audioDirectory)).filter((name) => name.endsWith('.bin'));
+    const entries = await Promise.all(names.map(async (name) => {
+      const stat = await fsp.stat(path.join(audioDirectory, name));
+      return { name, size: stat.size, usedAt: stat.mtimeMs };
+    }));
+
+    for (const name of selectEvictions(entries, limitBytes)) {
+      const base = path.join(audioDirectory, name.replace(/\.bin$/, ''));
+      await Promise.allSettled([
+        fsp.rm(`${base}.bin`, { force: true }),
+        fsp.rm(`${base}.json`, { force: true }),
+      ]);
+    }
+  } catch (error) {
+    console.warn('[AudioCache] Failed to prune cache directory', error);
+  }
+}
+
+async function writeAudioCacheEntry(cacheKey, data, mimeType, limitBytes) {
   const { dataPath, metaPath } = getAudioCachePaths(cacheKey);
   await ensureAudioCacheDirectory();
 
@@ -2022,6 +2058,8 @@ async function writeAudioCacheEntry(cacheKey, data, mimeType) {
       updatedAt: Date.now(),
     }), 'utf-8'),
   ]);
+
+  await pruneAudioCache(limitBytes);
 }
 
 async function getAudioCacheUsageBytes() {
@@ -3314,8 +3352,8 @@ ipcMain.handle('has-audio-cache', async (event, cacheKey) => {
   return hasAudioCacheEntry(cacheKey);
 });
 
-ipcMain.handle('save-audio-cache', async (event, cacheKey, data, mimeType) => {
-  await writeAudioCacheEntry(cacheKey, data, mimeType);
+ipcMain.handle('save-audio-cache', async (event, cacheKey, data, mimeType, limitBytes) => {
+  await writeAudioCacheEntry(cacheKey, data, mimeType, limitBytes);
   return true;
 });
 

@@ -39,6 +39,9 @@ export const CACHE_SIZE_KEY = 'folia_cache_size';
 export const ENABLE_MEDIA_CACHE_KEY = 'folia_enable_media_cache';
 /** What the toggle used to write to, before it was corrected to the prefixed key above. */
 export const LEGACY_ENABLE_MEDIA_CACHE_KEY = 'enable_media_cache';
+export const MEDIA_CACHE_LIMIT_GB_KEY = 'folia_media_cache_limit_gb';
+/** Gigabytes of cached audio to keep. Zero is the listener asking for no ceiling at all. */
+export const DEFAULT_MEDIA_CACHE_LIMIT_GB = 5;
 const AUTOMIX_ENABLED_KEY = 'folia_automix_enabled';
 const LAST_SEEN_GUIDE_VERSION_STORAGE_KEY = 'folia_last_seen_guide_version';
 
@@ -116,6 +119,16 @@ export const readStoredEnableMediaCache = (): boolean => {
 
     localStorage.setItem(ENABLE_MEDIA_CACHE_KEY, legacy);
     return legacy === 'true';
+};
+
+export const readStoredMediaCacheLimitGb = (): number => {
+    if (typeof window === 'undefined') {
+        return DEFAULT_MEDIA_CACHE_LIMIT_GB;
+    }
+
+    const saved = localStorage.getItem(MEDIA_CACHE_LIMIT_GB_KEY);
+    const parsed = saved === null ? NaN : Number(saved);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_MEDIA_CACHE_LIMIT_GB;
 };
 
 export const readSystemThemeIsDaylight = (): boolean | null => {
@@ -1191,6 +1204,8 @@ export type SettingsUiState = {
     hideRemoteControlTaskbarIcon: boolean;
     openPlayerOnLaunch: boolean;
     enableMediaCache: boolean;
+    /** Gigabytes of cached audio to keep before the oldest is dropped. Zero means no ceiling. */
+    mediaCacheLimitGb: number;
     automixEnabled: boolean;
     backgroundOpacity: number;
     subtitleOverlayOpacity: number;
@@ -1320,6 +1335,7 @@ export type SettingsUiState = {
     handleToggleHideRemoteControlTaskbarIcon: (enable: boolean) => void;
     handleToggleOpenPlayerOnLaunch: (enable: boolean) => void;
     handleToggleMediaCache: (enable: boolean) => void;
+    handleSetMediaCacheLimitGb: (gigabytes: number) => void;
     handleToggleAutomix: (enable: boolean) => void;
     handleSetBackgroundOpacity: (opacity: number) => void;
     handleSetSubtitleOverlayOpacity: (opacity: number) => void;
@@ -1454,6 +1470,7 @@ export const useSettingsUiStore = create<SettingsUiState>((set, get) => ({
     hideRemoteControlTaskbarIcon: getStoredBoolean(REMOTE_CONTROL_SKIP_TASKBAR_STORAGE_KEY, false),
     openPlayerOnLaunch: getStoredBoolean(OPEN_PLAYER_ON_LAUNCH_STORAGE_KEY, false),
     enableMediaCache: readStoredEnableMediaCache(),
+    mediaCacheLimitGb: readStoredMediaCacheLimitGb(),
     automixEnabled: getStoredBoolean(AUTOMIX_ENABLED_KEY, false),
     backgroundOpacity: readStoredBackgroundOpacity(),
     subtitleOverlayOpacity: readStoredSubtitleOverlayOpacity(),
@@ -1824,6 +1841,13 @@ export const useSettingsUiStore = create<SettingsUiState>((set, get) => ({
     handleToggleMediaCache: (enable) => {
         setStoredBoolean(ENABLE_MEDIA_CACHE_KEY, enable);
         set({ enableMediaCache: enable });
+    },
+    handleSetMediaCacheLimitGb: (gigabytes) => {
+        const next = Number.isFinite(gigabytes) && gigabytes >= 0 ? gigabytes : DEFAULT_MEDIA_CACHE_LIMIT_GB;
+        if (typeof window !== 'undefined') {
+            localStorage.setItem(MEDIA_CACHE_LIMIT_GB_KEY, String(next));
+        }
+        set({ mediaCacheLimitGb: next });
     },
     handleToggleAutomix: (enable) => {
         setStoredBoolean(AUTOMIX_ENABLED_KEY, enable);
@@ -2796,6 +2820,7 @@ export const selectSettingsUiSnapshot = (state: SettingsUiState) => ({
     hideRemoteControlTaskbarIcon: state.hideRemoteControlTaskbarIcon,
     openPlayerOnLaunch: state.openPlayerOnLaunch,
     enableMediaCache: state.enableMediaCache,
+    mediaCacheLimitGb: state.mediaCacheLimitGb,
     backgroundOpacity: state.backgroundOpacity,
     subtitleOverlayOpacity: state.subtitleOverlayOpacity,
     subtitleOverlayBackground: state.subtitleOverlayBackground,
@@ -2887,6 +2912,7 @@ export const selectSettingsUiSnapshot = (state: SettingsUiState) => ({
     handleToggleHideRemoteControlTaskbarIcon: state.handleToggleHideRemoteControlTaskbarIcon,
     handleToggleOpenPlayerOnLaunch: state.handleToggleOpenPlayerOnLaunch,
     handleToggleMediaCache: state.handleToggleMediaCache,
+    handleSetMediaCacheLimitGb: state.handleSetMediaCacheLimitGb,
     handleSetBackgroundOpacity: state.handleSetBackgroundOpacity,
     handleSetSubtitleOverlayOpacity: state.handleSetSubtitleOverlayOpacity,
     handleToggleSubtitleOverlayBackground: state.handleToggleSubtitleOverlayBackground,

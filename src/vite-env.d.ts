@@ -487,7 +487,8 @@ declare global {
       onUpdateStatusChanged: (callback: (status: ElectronUpdateStatus) => void) => () => void;
       getAudioCache: (cacheKey: string) => Promise<ElectronAudioCacheEntry>;
       hasAudioCache: (cacheKey: string) => Promise<boolean>;
-      saveAudioCache: (cacheKey: string, data: ArrayBuffer, mimeType?: string) => Promise<boolean>;
+      /** `limitBytes` is the cache ceiling to prune down to afterwards; 0 means no ceiling. */
+      saveAudioCache: (cacheKey: string, data: ArrayBuffer, mimeType?: string, limitBytes?: number) => Promise<boolean>;
       getAudioCacheUsage: () => Promise<number>;
       getAudioCacheStats: () => Promise<ElectronAudioCacheStats>;
       clearAudioCache: () => Promise<boolean>;
