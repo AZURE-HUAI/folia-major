@@ -201,13 +201,16 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         });
     };
 
-    /** Seconds from `now` until a deck reaches the next line of one of its own grids. */
-    const gridWait = (deck: AutomixDeckId, grid: Grid | null, now: number): number | null => {
-        const rate = grid && clocks[deck].rate();
-        const position = grid && clocks[deck].positionAt(now);
-        if (!grid || position === null || !rate) return null;
-        const next = grid.offset + Math.ceil((position - grid.offset) / grid.period) * grid.period;
-        return (next - position) / rate;
+    /**
+     * Seconds of WALL time from a media position to the next line of that track's own grid.
+     *
+     * Both halves of the conversion in one place: the grid is in the track's own seconds, the
+     * answer is in the audio clock's, and a deck bent onto another tempo is running at neither one.
+     */
+    const waitToGrid = (grid: Grid | null, fromMedia: number, rate: number): number | null => {
+        if (!grid || !(grid.period > 0) || !(rate > 0)) return null;
+        const next = grid.offset + Math.ceil((fromMedia - grid.offset) / grid.period) * grid.period;
+        return (next - fromMedia) / rate;
     };
 
     /**
@@ -528,16 +531,33 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         // chorus has two, and this is the one the transition is laid against.
         const outgoingBpm = plannedFrom?.outroBpm ?? plannedFrom?.bpm ?? null;
         const periodSec = outgoingBpm ? 60 / outgoingBpm : tempo?.periodSec ?? null;
+
+        // The rate is set before the wait is measured, because the wait is spent AT that rate.
+        const stretch = plan.style === 'beatCut' || overlap < AUTOMIX_MIN_OVERLAP_SEC
+            ? 1
+            : plan.stretch;
+        const applied = applyTempoBend(tailElement, tailChain.bend, stretch, now);
+        const alignHold = Math.max(0, (startMedia - position) / (tailRate * applied));
+
         // Where the beats are, from the file rather than from the last few seconds of it.
         //
         // This used to be a live autocorrelation, because nothing else could answer it: the offline
         // profile knows where the beats sit in the FILE, and until the deck clock there was no way
-        // to say where the file was on the audio clock. There is now, and between the two the grid
-        // is exact rather than estimated. The tap stays as the fallback for anything unanalysed.
-        const beatGrid = periodSec !== null && plannedFrom
-            ? { offset: plannedFrom.beatOffset % periodSec, period: periodSec }
+        // to say where the file was on the audio clock. There is now, so the grid is arithmetic
+        // rather than an estimate - measured forward from where the blend will START, not from
+        // where the deck happens to be while this runs.
+        //
+        // Only when one tempo describes the whole track, though. `beatOffset` is a phase in the
+        // whole-track grid; pairing it with a DIFFERENT period measured over the last half minute
+        // gives a grid that is right about spacing and wrong about position, which is the worse of
+        // the two errors. Where a track slowed down, the tap is the only thing that heard it.
+        const steady = plannedFrom?.bpm
+            && (plannedFrom.outroBpm === null || Math.abs((plannedFrom.outroBpm ?? 0) - plannedFrom.bpm) < 0.5);
+        const beatGrid = steady && plannedFrom?.bpm
+            ? { offset: plannedFrom.beatOffset % (60 / plannedFrom.bpm), period: 60 / plannedFrom.bpm }
             : null;
-        const nextBeatIn = gridWait(tailDeck, beatGrid, now) ?? tailChain.analyser.nextBeatIn(now);
+        const nextBeatIn = waitToGrid(beatGrid, startMedia, tailRate * applied)
+            ?? tailChain.analyser.nextBeatIn(now + alignHold);
         const fade = planBlendShape({
             overlap,
             outgoingDb,
@@ -560,15 +580,6 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         // clock, and the two stop being the same unit the moment that track is bent to meet the
         // incoming tempo: eight of its seconds at 1.1x take seven and a bit to play. One division,
         // in one place, is the whole of the conversion.
-        const stretch = shape.style === 'beatCut' || shape.overlap < AUTOMIX_MIN_OVERLAP_SEC
-            ? 1
-            : plan.stretch;
-        // Applied here rather than at the start of the fade, so the wait to the fade is measured in
-        // the same time base the wait is actually spent in. A tenth of a second of the outgoing
-        // track at the new tempo, before the incoming one is audible, is not something anyone hears
-        // - two time bases either side of a hold is something everyone hears.
-        const applied = applyTempoBend(tailElement, tailChain.bend, stretch, now);
-        const alignHold = Math.max(0, (startMedia - position) / (tailRate * applied));
         const hold = alignHold + shape.hold;
         const startAt = now + hold;
         const wall = shape.overlap / applied;

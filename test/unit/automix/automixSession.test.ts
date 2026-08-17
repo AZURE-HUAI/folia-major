@@ -185,7 +185,14 @@ describe('automix session', () => {
 
         harness.elements.A.currentTime = 87;
         harness.session.handleActiveDeckPlaying('local:next-song');
-        expect(lastCurve(harness.chains.A.fadeNode)?.duration).toBe(8);
+
+        // Close to the planned eight, and nudged off it only by the beat snap - which is the grid
+        // moving the length, not the release round trip eating it.
+        const duration = lastCurve(harness.chains.A.fadeNode)!.duration;
+        expect(duration).toBeGreaterThan(6);
+        expect(duration).toBeLessThanOrEqual(8);
+        // 120 BPM from the profile: the handover itself lands on a beat.
+        expect((duration * 0.45) % 0.5).toBeCloseTo(0, 6);
     });
 
     it('holds nothing when the blend is already due as it arms', () => {
@@ -543,9 +550,9 @@ describe('automix session, transition styles', () => {
 
         harness.session.handleActiveDeckPlaying('local:next-song');
 
-        // Beats every 0.75s from 0.3s in, handover at 42.5%: the length moves to put it on 1.05s.
-        // At the tap's 160 the beats would be 0.375s apart and the answer would be a different one.
-        expect(lastCurve(harness.chains.A.fadeNode)?.duration).toBeCloseTo(1.05 / 0.425, 5);
+        // Beats every 0.75s, and the handover at 42.5% is moved onto one of them - so it lands on
+        // 1.5s. At the tap's 160 the grid would be 0.375s apart and it would land on 1.125s.
+        expect(lastCurve(harness.chains.A.fadeNode)?.duration).toBeCloseTo(1.5 / 0.425, 5);
     });
 
     it('takes the low end off the arriving track and gives it back at the handover', () => {
