@@ -6,7 +6,7 @@ import {
     type AutomixDeckId,
     type AutomixSessionPorts,
 } from '@/services/automix/automixSession';
-import type { TransitionTrack } from '@/services/automix/transitionPlanner';
+import { AUTOMIX_MIN_OVERLAP_SEC, type TransitionTrack } from '@/services/automix/transitionPlanner';
 import { type TrackProfile } from '@/services/automix/trackProfile';
 import { makeProfile } from './trackProfileFixture';
 import {
@@ -552,47 +552,25 @@ describe('automix session, transition styles', () => {
         expect(finalTarget(harness.chains.B.lowCutParam)).toBe(20);
     });
 
-    it('waits out the outgoing track and splices, for a segue the album already had', () => {
+    it('blends a pair the record already runs together, instead of doing nothing', () => {
+        // Both ends at full level off one album used to take a six-millisecond splice, on the
+        // grounds that the record already joins them. It does - and on a continuous album that was
+        // two thirds of the song changes, so switching blending on produced no audible blending.
         const harness = createHarness();
-        const plan = harness.arm({
-            time: 99,
-            sameAlbum: true,
-            from: { ...BLENDABLE_FROM, profile: profile({ endsHot: true }) },
-            to: { ...BLENDABLE_TO, profile: profile({ startsHot: true, leadIn: 3 }) },
-        });
-        expect(plan?.style).toBe('gapless');
-
-        harness.session.handleActiveDeckPlaying('local:next-song');
-
-        // Five seconds of the outgoing track are left, so the incoming deck - which has already
-        // started, silently - waits all but the splice out. It costs nothing here because the
-        // incoming track opens with three seconds of silence to spend.
-        const splice = lastCurve(harness.chains.A.fadeNode);
-        expect(splice?.duration).toBeCloseTo(0.006, 4);
-        expect(splice?.time).toBeCloseTo(1.494, 3);
-        expect(harness.chains.A.lowCutParam.events).toHaveLength(0);
-    });
-
-    it('still joins a track that opens on its first sample, and takes almost nothing from it', () => {
-        const harness = createHarness();
+        // A two second blend starts at 98s rather than the harness default's 95s.
         harness.arm({
-            time: 99,
-            sameAlbum: true,
+            time: 98,
             from: { ...BLENDABLE_FROM, profile: profile({ endsHot: true }) },
-            to: { ...BLENDABLE_TO, profile: profile({ startsHot: true, leadIn: 0 }) },
+            // 0.3s, measured off a real master: less than a beat, so not enough to place a cut in.
+            to: { ...BLENDABLE_TO, profile: profile({ startsHot: true, leadIn: 0.3 }) },
         });
 
         harness.session.handleActiveDeckPlaying('local:next-song');
 
-        // No leading silence at all, and the join happens anyway - because the room asked for is
-        // now only as long as the wait can be paid for, so the incoming deck is released to start
-        // at the splice rather than a second and a half before it. All the wait costs here is the
-        // 50ms of grace shapeBlend allows on top of a track's own silence.
-        const splice = lastCurve(harness.chains.A.fadeNode);
-        expect(splice?.duration).toBeCloseTo(0.006, 4);
-        expect(splice?.time).toBeLessThanOrEqual(0.05);
-        // A join is not an overlap: the two tracks are never both audible, so nothing is filtered.
-        expect(harness.chains.A.lowCutParam.events).toHaveLength(0);
+        const blend = lastCurve(harness.chains.A.fadeNode);
+        expect(blend?.duration).toBeGreaterThanOrEqual(AUTOMIX_MIN_OVERLAP_SEC);
+        // And it is a real overlap, so the low end is handed over rather than stacked.
+        expect(harness.chains.A.lowCutParam.events.length).toBeGreaterThan(0);
     });
 
     it('cuts rather than fades into a track that starts at full level', () => {

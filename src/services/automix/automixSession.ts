@@ -106,8 +106,6 @@ export interface AutomixTransitionRequest {
     audioSrc: string;
     from: TransitionTrack;
     to: TransitionTrack;
-    /** The two tracks are neighbours on one album, which is what allows a gapless join. */
-    sameAlbum?: boolean;
     /** Playback key of the track the queue will advance to, checked again before the ramp. */
     nextKey: string;
 }
@@ -267,7 +265,6 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             // The offline profile measured the whole file; the live tap only heard the last few
             // seconds. Prefer the profile, fall back to the tap for anything never analysed.
             request.from.profile?.bpm ?? outgoingTempo?.bpm ?? null,
-            { sameAlbum: request.sameAlbum },
         );
         // Early by the lead, not on the dot: everything between here and `outStart` is what the
         // next track gets to load in, instead of taking it out of the blend.

@@ -3,8 +3,6 @@ import { isInterludeLine } from '../../utils/lyrics/parserCore';
 import {
     chooseTransitionStyle,
     CUT_LEAD_SEC,
-    GAPLESS_LEAD_SEC,
-    GAPLESS_SPLICE_SEC,
     HEAD_BUDGET_SEC,
     type KeyRelation,
     type TransitionStyle,
@@ -44,9 +42,9 @@ export interface TransitionPlan {
     /**
      * How much of the outgoing track's tail this transition occupies, in seconds.
      *
-     * For the three overlapping styles this is the crossfade itself. For a cut or a gapless join
-     * it is the room the transition is given to place itself in - most of which is spent waiting,
-     * and whatever is not waited out is cut off.
+     * For the three overlapping styles this is the crossfade itself. For a cut it is the room the
+     * transition is given to place itself in - most of which is spent waiting, and whatever is not
+     * waited out is cut off.
      */
     overlap: number;
     /** Shortest room this style can still work in, checked again when the incoming deck starts. */
@@ -133,7 +131,6 @@ export const planTransition = (
     to: TransitionTrack,
     /** Measured tempo of the outgoing track, when there is one. Sets the unit for the length. */
     bpm: number | null = null,
-    options: { sameAlbum?: boolean } = {},
 ): TransitionPlan => {
     if (!Number.isFinite(from.duration) || from.duration <= 0) {
         return hardCut('outgoing duration unknown, nothing to schedule a fade against');
@@ -142,30 +139,27 @@ export const planTransition = (
     const choice = chooseTransitionStyle({
         from: from.profile ?? null,
         to: to.profile ?? null,
-        sameAlbum: Boolean(options.sameAlbum),
     });
 
-    // A join and a cut do not want a length, they want somewhere to stand: enough of the tail that
-    // the incoming deck has finished loading inside it, and no more, because whatever is left over
+    // A cut does not want a length, it wants somewhere to stand: enough of the tail that the
+    // incoming deck has finished loading inside it, and no more, because whatever is left over
     // when the handover lands is cut off.
-    if (choice.style === 'gapless' || choice.style === 'beatCut') {
-        const lead = choice.style === 'gapless' ? GAPLESS_LEAD_SEC : CUT_LEAD_SEC;
-        // Never ask for more room than the join can actually be placed in.
+    if (choice.style === 'beatCut') {
+        // Never ask for more room than the cut can actually be placed in.
         //
         // Room is spent waiting, and the wait comes out of the incoming track's own leading
-        // silence - shapeBlend will not spend a millisecond more than that, and abandons the style
-        // outright when the room it was handed needs more. So asking for a second and a half of it
-        // on a track that opens after a fifth of one produces a plan that is guaranteed to be
-        // thrown away, which is exactly how a gapless join came to be chosen on real song changes
-        // and then never once performed.
+        // silence - shapeBlend will not spend a millisecond more than that. So asking for a second
+        // and a half of it on a track that opens after a fifth of one produces a plan that is
+        // guaranteed to be thrown away.
         //
-        // The lead is what a deck starting cold would need; these decks have been buffering since
-        // the top of the transition window, so the only thing still to pay for is the moment
+        // CUT_LEAD_SEC is what a deck starting cold would need; these decks have been buffering
+        // since the top of the transition window, so the only thing still to pay for is the moment
         // between letting go and hearing it - which RELEASE_MARGIN_SEC already covers.
-        const placeable = to.profile ? to.profile.leadIn + HEAD_BUDGET_SEC : lead;
-        const room = Math.min(lead, from.duration / 4, placeable);
-        const floor = choice.style === 'gapless' ? GAPLESS_SPLICE_SEC * 4 : AUTOMIX_MIN_CUT_ROOM_SEC;
-        if (room < floor) return hardCut(`track too short to place a join in (${round(from.duration)}s)`);
+        const placeable = to.profile ? to.profile.leadIn + HEAD_BUDGET_SEC : CUT_LEAD_SEC;
+        const room = Math.min(CUT_LEAD_SEC, from.duration / 4, placeable);
+        if (room < AUTOMIX_MIN_CUT_ROOM_SEC) {
+            return hardCut(`track too short to place a cut in (${round(from.duration)}s)`);
+        }
         return {
             kind: 'fade',
             style: choice.style,
@@ -173,7 +167,7 @@ export const planTransition = (
             outStart: round(from.duration - room),
             inStart: 0,
             overlap: round(room),
-            minOverlap: floor,
+            minOverlap: AUTOMIX_MIN_CUT_ROOM_SEC,
             reason: `${choice.style} - ${choice.reason}`,
         };
     }

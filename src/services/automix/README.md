@@ -12,7 +12,7 @@
 | | `signalAnalysis.ts` | 上下都要用的数学：RMS、自相关测速、交叉曲线、平衡修正 |
 | | `profileService.ts` | 字节从哪来、什么时候允许下载、测完存哪。`trackProfile` 的不纯的那一半 |
 | | `deckAnalyser.ts` | 正在响的那一路此刻是什么样：实时电平、下一个拍点在哪 |
-| 决策 | `transitionChooser.ts` | 这两首歌该用五种接法里的哪一种（gapless / beatCut / bassSwap / tailRide / plainBlend） |
+| 决策 | `transitionChooser.ts` | 这两首歌该用四种接法里的哪一种（beatCut / bassSwap / tailRide / plainBlend） |
 | | `transitionPlanner.ts` | 这一次接多长、落在出场曲的哪个位置 |
 | 执行 | `automixSession.ts` | 状态机 `idle → armed → fading`，以及每一步反悔的条件 |
 | | `crossfadeGraph.ts` | Web Audio 那一半：两路 deck 的节点链、增益曲线、低频交接 |
@@ -39,6 +39,11 @@
 `AUTOMIX_ARM_LEAD_SEC` 秒备好过渡，这段时间里 `onAutoplayHoldChange(true)` 压住播放桥的自动播放：
 deck 照常拿到 src 并缓冲，只是先不出声，到点才放。把这两件事合成一件，装载耗时就会从淡入淡出里
 扣掉，规划器算多长都没用。改动这一段时先确认每条退出路径都会解压——`settle` 是所有结局的必经之路。
+
+**启发式只决定「怎么接」，不决定「接不接」。** 曾经有第五种接法 `gapless`：同专辑相邻、两端都
+满电平，就用一个 6 毫秒的拼接直接对上，理由是唱片本来就连着。对唱片的判断没错，对开关的判断错了
+——在一张从头连到尾的专辑上它吃掉了三分之二的换歌，于是听众打开「混音过渡」，听到的是什么都没发生。
+现在剩下的每一种接法都是听得见的。加新接法时守住这条。
 
 **证据层不认识 React，也不认识播放器。** 新增测量只加在 `trackProfile.ts` / `signalAnalysis.ts`，
 它们只接受数组和数字。要拿新数据做决策，改 `transitionChooser` 或 `transitionPlanner`，

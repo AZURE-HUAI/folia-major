@@ -7,11 +7,15 @@ import type { TrackProfile } from './trackProfile';
 // The reason this file exists: for as long as there was only one transition, every song change was
 // a crossfade and the only thing left to decide was how long. A crossfade is the right answer for
 // maybe a third of song changes and the least wrong answer for the rest, which is what "it leans
-// on fading too much" describes. Five kinds and a chooser is the fix; a better curve is not.
+// on fading too much" describes. Four kinds and a chooser is the fix; a better curve is not.
+//
+// What is deliberately NOT here is a fifth kind that did nothing. Consecutive tracks off a
+// run-together album used to get a splice too short to hear, on the grounds that the record already
+// joins them - correct about the record, and wrong about the switch. On a continuous album it fired
+// on two thirds of song changes, so the listener turned blending on and heard no blending. A
+// heuristic may choose HOW two songs are joined; it may not decide that the feature does not apply.
 
 export type TransitionStyle =
-    /** Author-intended segue: the two tracks are simply joined, with a splice too short to hear. */
-    | 'gapless'
     /** The incoming track starts at full tilt, so the outgoing one is cut rather than faded. */
     | 'beatCut'
     /** Overlapped, but only one track holds the low end at a time. The default when two overlap. */
@@ -30,13 +34,9 @@ const FADE_OUT_SLOPE_DB_PER_SEC = -1.5;
 /** A lead-in shorter than this is not an intro, it is the file's own leading silence. */
 const INTRO_SILENCE_SEC = 0.3;
 
-/** Splice length for a gapless join: short enough to be inaudible, long enough not to click. */
-export const GAPLESS_SPLICE_SEC = 0.006;
 /** A cut is not instant either - a step in the waveform is a click on every system. */
 export const BEAT_CUT_SEC = 0.04;
-/** How much of the outgoing track a gapless join is allowed to occupy while it waits. */
-export const GAPLESS_LEAD_SEC = 1.5;
-/** The same for a cut, and it is spent: whatever is not waited out is cut off. */
+/** How much of the outgoing track a cut may occupy, and it is spent: what is not waited is cut. */
 export const CUT_LEAD_SEC = 1.5;
 /**
  * How much of the incoming track's own beginning may be swallowed while waiting.
@@ -66,7 +66,6 @@ const HOT_START_SCALE = 0.6;
 
 /** Longer for a style that wants room, shorter for one that wants none. */
 const STYLE_SCALE: Record<TransitionStyle, number> = {
-    gapless: 1,
     beatCut: 1,
     bassSwap: 1,
     tailRide: 1.4,
@@ -125,10 +124,8 @@ export interface StyleChoice {
 export const chooseTransitionStyle = (input: {
     from: TrackProfile | null;
     to: TrackProfile | null;
-    /** The two tracks are neighbours on the same album, so a segue may have been written in. */
-    sameAlbum: boolean;
 }): StyleChoice => {
-    const { from, to, sameAlbum } = input;
+    const { from, to } = input;
     const relation = keyRelation(from, to);
     const decide = (style: TransitionStyle, reason: string, extraScale = 1): StyleChoice => ({
         style,
@@ -140,13 +137,6 @@ export const chooseTransitionStyle = (input: {
     // Every test below reads the tail fields strictly against true/false, never for truthiness:
     // on a partial profile they are null, meaning "not knowable without downloading the file",
     // and treating that as "no" would silently pick the same transition a real "no" picks.
-
-    // Both ends still sounding, on consecutive tracks of one album: the join is part of the record.
-    // This is not the old "songs from one album do not get blended" rule wearing a hat - that one
-    // refused to do anything, this one picks a better join, and the switch still acts every time.
-    if (sameAlbum && from?.endsHot === true && to?.startsHot === true) {
-        return decide('gapless', 'consecutive album tracks that run into each other');
-    }
 
     // Nothing to fade into: the incoming track is at full level from its first bar.
     if (to?.startsHot === true && from?.bpm) {
@@ -207,27 +197,14 @@ export interface StyledBlend {
 /**
  * Turns a chosen style into the schedule that realises it.
  *
- * All five come out as the same three numbers - wait this long, hand over for that long, cross at
- * this point - which is why there is one scheduling path in the session rather than five.
- *
- * The style can still change here. A gapless join needs to wait out whatever is left of the
- * outgoing track, and that is only free if the incoming track opens with at least that much
- * silence; when it does not, waiting would eat its first notes, so it becomes an overlap instead.
+ * All four come out as the same three numbers - wait this long, hand over for that long, cross at
+ * this point - which is why there is one scheduling path in the session rather than four.
  */
 export const shapeBlend = (request: BlendShapeRequest): StyledBlend => {
     const { style, room, overlap, crossover, nextBeatIn, periodSec, incomingLeadIn } = request;
-    const headBudget = (incomingLeadIn ?? 0) + HEAD_BUDGET_SEC;
-
-    if (style === 'gapless') {
-        const hold = Math.max(0, room - GAPLESS_SPLICE_SEC);
-        if (hold <= headBudget) {
-            return { style, hold, overlap: GAPLESS_SPLICE_SEC, crossover: 0.5, bassSwap: false };
-        }
-        // The join cannot be placed without cutting into the next track. Overlap instead.
-        return { style: 'bassSwap', hold: 0, overlap, crossover, bassSwap: true };
-    }
 
     if (style === 'beatCut') {
+        const headBudget = (incomingLeadIn ?? 0) + HEAD_BUDGET_SEC;
         const maxHold = Math.min(room - BEAT_CUT_SEC, headBudget);
         // The latest beat of the outgoing track that fits inside what may be waited out. Usually
         // there is none - the incoming deck rarely starts with a beat to spare - and then the cut

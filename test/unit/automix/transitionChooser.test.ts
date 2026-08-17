@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import {
     BEAT_CUT_SEC,
     chooseTransitionStyle,
-    GAPLESS_SPLICE_SEC,
     keyRelation,
     shapeBlend,
 } from '@/services/automix/transitionChooser';
@@ -41,24 +40,16 @@ describe('keyRelation', () => {
 });
 
 describe('chooseTransitionStyle', () => {
-    it('joins consecutive album tracks that run into each other', () => {
+    it('still blends two tracks a record joins together itself', () => {
+        // Consecutive tracks off a run-together album used to get a splice too short to hear, on
+        // the grounds that the record already joins them. True about the record - but on a
+        // continuous album it took two thirds of the song changes, so switching blending on
+        // produced no audible blending. Every style left is one the listener can hear.
         const choice = chooseTransitionStyle({
             from: profile({ endsHot: true }),
-            to: profile({ startsHot: true }),
-            sameAlbum: true,
+            to: profile({ startsHot: true, bpm: 120 }),
         });
-        expect(choice.style).toBe('gapless');
-    });
-
-    it('does not join two unrelated songs just because both ends are loud', () => {
-        // The old vetoed rule refused to blend album-mates at all. This one only reaches for a
-        // different join when the album says the segue may have been written in.
-        const choice = chooseTransitionStyle({
-            from: profile({ endsHot: true }),
-            to: profile({ startsHot: true }),
-            sameAlbum: false,
-        });
-        expect(choice.style).not.toBe('gapless');
+        expect(choice.style).toBe('bassSwap');
     });
 
     it('cuts into a hot start only when there is a beat of silence to place the cut in', () => {
@@ -67,7 +58,6 @@ describe('chooseTransitionStyle', () => {
         const choice = chooseTransitionStyle({
             from: profile({ bpm: 120 }),
             to: profile({ startsHot: true, leadIn: 0.8 }),
-            sameAlbum: false,
         });
         expect(choice.style).toBe('beatCut');
     });
@@ -79,7 +69,6 @@ describe('chooseTransitionStyle', () => {
         const choice = chooseTransitionStyle({
             from: profile({ bpm: 120 }),
             to: profile({ startsHot: true, leadIn: 0.07 }),
-            sameAlbum: false,
         });
         expect(choice.style).toBe('bassSwap');
         expect(choice.lengthScale).toBeLessThan(1);
@@ -90,7 +79,6 @@ describe('chooseTransitionStyle', () => {
         const choice = chooseTransitionStyle({
             from: profile({ outroSlope: -3 }),
             to: profile({ leadIn: 2 }),
-            sameAlbum: false,
         });
         expect(choice.style).toBe('bassSwap');
     });
@@ -99,7 +87,6 @@ describe('chooseTransitionStyle', () => {
         const choice = chooseTransitionStyle({
             from: profile({ endsHot: false, outroSlope: -0.5 }),
             to: profile({ leadIn: 1.5 }),
-            sameAlbum: false,
         });
         expect(choice.style).toBe('tailRide');
         expect(choice.lengthScale).toBeGreaterThan(1);
@@ -107,8 +94,8 @@ describe('chooseTransitionStyle', () => {
 
     it('falls back to a plain crossfade only when nothing was measured', () => {
         // This used to be every transition there was. It should now be the rarest one.
-        expect(chooseTransitionStyle({ from: null, to: null, sameAlbum: false }).style).toBe('plainBlend');
-        expect(chooseTransitionStyle({ from: profile(), to: null, sameAlbum: false }).style).toBe('bassSwap');
+        expect(chooseTransitionStyle({ from: null, to: null }).style).toBe('plainBlend');
+        expect(chooseTransitionStyle({ from: profile(), to: null }).style).toBe('bassSwap');
     });
 
     it('still cuts into a hot start when only the heads of both tracks were readable', () => {
@@ -120,25 +107,22 @@ describe('chooseTransitionStyle', () => {
         const choice = chooseTransitionStyle({
             from: head({ bpm: 128 }),
             to: head({ startsHot: true, leadIn: 1 }),
-            sameAlbum: false,
         });
         expect(choice.style).toBe('beatCut');
     });
 
     it('does not read an unknown tail as a known one', () => {
         // null means "not knowable without downloading the file". Treating it as false would pick
-        // tailRide for tracks that end dead flat, and gapless is simply not decidable at all.
+        // tailRide for tracks that end dead flat.
         const head = profile({ partial: true, leadOut: null, endsHot: null, outroSlope: null });
 
-        expect(chooseTransitionStyle({ from: head, to: profile({ startsHot: true }), sameAlbum: true }).style)
-            .not.toBe('gapless');
-        expect(chooseTransitionStyle({ from: head, to: profile({ leadIn: 2, bpm: null }), sameAlbum: false }).style)
+        expect(chooseTransitionStyle({ from: head, to: profile({ leadIn: 2, bpm: null }) }).style)
             .toBe('bassSwap');
     });
 
     it('shortens an overlap between clashing keys instead of trying to fix it', () => {
-        const clash = chooseTransitionStyle({ from: inKey(0, true), to: inKey(6, true), sameAlbum: false });
-        const fits = chooseTransitionStyle({ from: inKey(0, true), to: inKey(7, true), sameAlbum: false });
+        const clash = chooseTransitionStyle({ from: inKey(0, true), to: inKey(6, true) });
+        const fits = chooseTransitionStyle({ from: inKey(0, true), to: inKey(7, true) });
         expect(clash.lengthScale).toBeLessThan(fits.lengthScale);
     });
 });
@@ -152,22 +136,6 @@ describe('shapeBlend', () => {
         periodSec: null,
         incomingLeadIn: null,
     };
-
-    it('waits out the rest of the outgoing track before a gapless splice', () => {
-        const shape = shapeBlend({ ...base, style: 'gapless', incomingLeadIn: 3 });
-        expect(shape.style).toBe('gapless');
-        expect(shape.hold).toBeCloseTo(1.5 - GAPLESS_SPLICE_SEC, 4);
-        expect(shape.overlap).toBe(GAPLESS_SPLICE_SEC);
-    });
-
-    it('gives up the splice rather than swallowing the start of the next track', () => {
-        // Waiting is the only way to place a join, and anything waited past the incoming track's
-        // own silence comes out of its first notes. A missing downbeat is worse than an overlap.
-        const shape = shapeBlend({ ...base, style: 'gapless', incomingLeadIn: 0 });
-        expect(shape.style).toBe('bassSwap');
-        expect(shape.hold).toBe(0);
-        expect(shape.overlap).toBe(4);
-    });
 
     it('cuts on the spot when there is no beat it can afford to wait for', () => {
         const shape = shapeBlend({

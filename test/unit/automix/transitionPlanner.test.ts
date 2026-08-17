@@ -4,11 +4,12 @@ import { isInterludeLine, parseLRC } from '../../../src/utils/lyrics/parserCore'
 import {
     AUTOMIX_DEFAULT_OVERLAP_SEC,
     AUTOMIX_MAX_OVERLAP_SEC,
+    AUTOMIX_MIN_OVERLAP_SEC,
     planTransition,
     resolveOverlap,
     type TransitionTrack,
 } from '../../../src/services/automix/transitionPlanner';
-import { GAPLESS_SPLICE_SEC, shapeBlend } from '../../../src/services/automix/transitionChooser';
+import { BEAT_CUT_SEC, shapeBlend } from '../../../src/services/automix/transitionChooser';
 import { makeProfile } from './trackProfileFixture';
 
 const line = (startTime: number, endTime: number, fullText = 'la'): Line => ({
@@ -192,13 +193,13 @@ describe('resolveOverlap', () => {
 /**
  * The handoff between deciding a join and performing it.
  *
- * Both halves read correctly on their own, and every gapless join chosen on a real song change was
- * still thrown away between them: the planner asked for a second and a half of room, and the
- * shaper refuses to wait longer than the incoming track's own leading silence, which on a
- * commercial master is a fraction of that. The log said `bassSwap (planned gapless)` every time.
+ * Both halves read correctly on their own and still disagreed between them: the planner asked for
+ * a second and a half of room, and the shaper refuses to wait longer than the incoming track's own
+ * leading silence, which on a commercial master is a fraction of that. So the planner asks for
+ * what can actually be waited out, and these check the two ends still agree.
  */
 describe('a join has to survive the step that performs it', () => {
-    const consecutiveAlbumTracks = (leadIn: number) => ({
+    const runTogether = (leadIn: number) => ({
         from: {
             duration: 200,
             lines: null,
@@ -212,38 +213,41 @@ describe('a join has to survive the step that performs it', () => {
     });
 
     /** What automixSession does at the instant the incoming deck starts. */
-    const perform = (plan: ReturnType<typeof planTransition>, incomingLeadIn: number) => shapeBlend({
+    const perform = (
+        plan: ReturnType<typeof planTransition>,
+        incomingLeadIn: number,
+        grid: { nextBeatIn: number | null; periodSec: number | null } = { nextBeatIn: null, periodSec: null },
+    ) => shapeBlend({
         style: plan.style,
         room: plan.overlap,
         overlap: plan.overlap,
         crossover: 0.5,
-        nextBeatIn: null,
-        periodSec: null,
+        ...grid,
         incomingLeadIn,
     });
 
-    it('places a gapless join in the silence the next track actually has', () => {
-        // 0.30s, measured off a real master. Nothing commercial opens after a second and a half.
-        const { from, to } = consecutiveAlbumTracks(0.3);
-        const plan = planTransition(from, to, 120, { sameAlbum: true });
+    it('gives two tracks that run into each other something the listener can hear', () => {
+        // These used to get a six-millisecond splice, on the grounds that the record already joins
+        // them. It does - and a listener who switched blending on heard nothing happen, on two
+        // thirds of the song changes of a continuous album. Every style left is an audible one.
+        const { from, to } = runTogether(0.3);
+        const plan = planTransition(from, to, 120);
 
-        expect(plan.style).toBe('gapless');
-        // The room asked for is now something the wait can be paid for, not GAPLESS_LEAD_SEC.
-        expect(plan.overlap).toBeLessThanOrEqual(0.35);
-
-        const shaped = perform(plan, 0.3);
-        expect(shaped.style).toBe('gapless');
-        expect(shaped.overlap).toBe(GAPLESS_SPLICE_SEC);
+        expect(plan.overlap).toBeGreaterThanOrEqual(AUTOMIX_MIN_OVERLAP_SEC);
+        expect(perform(plan, 0.3).overlap).toBe(plan.overlap);
     });
 
-    it('still refuses one it cannot place, rather than pretending', () => {
-        // A track that opens on its first sample has no silence to wait in at all.
-        const { from, to } = consecutiveAlbumTracks(0);
-        const plan = planTransition(from, to, 120, { sameAlbum: true });
-        expect(plan.style).toBe('gapless');
-        expect(perform(plan, 0).style).toBe('gapless');
+    it('places a cut on a beat the incoming track can afford to wait for', () => {
+        // 120 BPM is half a second a beat, and the wait comes out of the next track's own silence.
+        const { from, to } = runTogether(0.8);
+        const plan = planTransition(from, to, 120);
+        expect(plan.style).toBe('beatCut');
+        // Not CUT_LEAD_SEC: the room asked for is what the wait can actually be paid for.
+        expect(plan.overlap).toBeLessThanOrEqual(0.85);
 
-        // But hand that same plan a deck whose track turned out to have none, and it downgrades.
-        expect(perform({ ...plan, overlap: 1.5 }, 0).style).toBe('bassSwap');
+        const shaped = perform(plan, 0.8, { nextBeatIn: 0.2, periodSec: 0.5 });
+        expect(shaped.style).toBe('beatCut');
+        expect(shaped.hold).toBeCloseTo(0.7, 6);
+        expect(shaped.overlap).toBe(BEAT_CUT_SEC);
     });
 });

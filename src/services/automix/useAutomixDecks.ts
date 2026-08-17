@@ -5,7 +5,6 @@ import type { LyricData, SongResult, StageLoopMode } from '../../types';
 import type { AudioQualityPreference } from '../../types/onlineMusic';
 import { getPlaybackSongKey } from '../../utils/appPlaybackGuards';
 import { getPrefetchedData } from '../prefetchService';
-import { getSongAlbumLabel } from '../onlineMusic/songMetadata';
 import { getTrackProfile, recordPlayedTail } from './profileService';
 import { connectAutomixDeck, type AutomixDeckChain } from './crossfadeGraph';
 import {
@@ -395,8 +394,6 @@ export function useAutomixDecks({
             prefetched?.audioUrl && prefetched.audioUrl !== 'CACHED_IN_DB' ? prefetched.audioUrl : null,
         );
 
-        // Queue neighbours already, so one shared album name is the whole test for a segue.
-        const album = getSongAlbumLabel(currentSong);
         const plan = session.requestTransition({
             time,
             audioSrc,
@@ -409,7 +406,6 @@ export function useAutomixDecks({
                 lines: prefetched?.lyrics?.lines ?? null,
                 profile: getTrackProfile(nextSong),
             },
-            sameAlbum: Boolean(album) && album === getSongAlbumLabel(nextSong),
             nextKey: getPlaybackSongKey(nextSong),
         });
         if (!plan) return;
