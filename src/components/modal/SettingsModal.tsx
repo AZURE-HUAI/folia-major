@@ -1619,6 +1619,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                                                 enableMediaCache={enableMediaCache}
                                                 errorTextColor={errorTextColor}
                                                 isCleaning={isCleaning}
+                                                isDaylight={isDaylight}
                                                 isElectron={isElectron}
                                                 mediaCacheLimitGb={mediaCacheLimitGb}
                                                 mediaCount={mediaCount}

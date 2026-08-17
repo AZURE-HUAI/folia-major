@@ -7,6 +7,7 @@ import { exportSyncLibraryBundle, importSyncLibraryBundle, isSyncLibraryExportBu
 import { createSyncLibraryZipBlob, readSyncLibraryZipFile } from '../../../services/sync/syncArchive';
 import { SYNC_PROVIDER, type SyncProviderConfig, type SyncRuntimeStatus } from '../../../services/sync/syncTypes';
 import { createSafeObjectUrl } from '../../../utils/blobGuards';
+import { CustomSelect } from '../../shared/CustomSelect';
 
 // src/components/modal/settings/StorageSettingsSection.tsx
 // Shared storage and media cache settings used by the main options page and storage subview.
@@ -23,6 +24,7 @@ type StorageSettingsSectionProps = {
     enableMediaCache: boolean;
     errorTextColor: string;
     isCleaning: string | null;
+    isDaylight?: boolean;
     isElectron: boolean;
     mediaCacheLimitGb: number;
     mediaCount: number;
@@ -46,6 +48,7 @@ const StorageSettingsSection: React.FC<StorageSettingsSectionProps> = ({
     enableMediaCache,
     errorTextColor,
     isCleaning,
+    isDaylight = false,
     isElectron,
     mediaCacheLimitGb,
     mediaCount,
@@ -76,7 +79,10 @@ const StorageSettingsSection: React.FC<StorageSettingsSectionProps> = ({
         : 'p-2 bg-white/5 rounded-lg opacity-60';
     // Zero is "no ceiling", which is a real answer rather than a missing one, so it gets a label
     // instead of an empty field.
-    const cacheLimitOptions = [1, 2, 5, 10, 20, 50, 0];
+    const cacheLimitOptions = [1, 2, 5, 10, 20, 50, 0].map((gigabytes) => ({
+        value: String(gigabytes),
+        label: gigabytes === 0 ? (t('options.mediaCacheLimitNone') || 'No limit') : `${gigabytes} GB`,
+    }));
     const cacheItems = [
         { id: 'playlist' as const, label: t('options.playlistData') || 'Playlist Data', size: cacheSizes.playlist, icon: Layers },
         { id: 'lyrics' as const, label: t('options.lyrics') || 'Lyrics', size: cacheSizes.lyrics, icon: Command },
@@ -483,18 +489,16 @@ const StorageSettingsSection: React.FC<StorageSettingsSectionProps> = ({
                                     {t('options.mediaCacheLimitDesc') || 'Once past this, the songs you have not played in longest are dropped first.'}
                                 </div>
                             </div>
-                            <select
-                                value={mediaCacheLimitGb}
-                                onChange={(event) => onSetMediaCacheLimitGb(Number(event.target.value))}
-                                className="shrink-0 rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm outline-none focus:border-white/25"
-                                style={{ color: 'var(--text-primary)' }}
-                            >
-                                {cacheLimitOptions.map((gigabytes) => (
-                                    <option key={gigabytes} value={gigabytes} className="bg-neutral-900">
-                                        {gigabytes === 0 ? (t('options.mediaCacheLimitNone') || 'No limit') : `${gigabytes} GB`}
-                                    </option>
-                                ))}
-                            </select>
+                            <div className="w-32 shrink-0">
+                                <CustomSelect
+                                    value={String(mediaCacheLimitGb)}
+                                    onChange={(value) => onSetMediaCacheLimitGb(Number(value))}
+                                    options={cacheLimitOptions}
+                                    ariaLabel={t('options.mediaCacheLimit') || 'Cache Limit'}
+                                    isDaylight={isDaylight}
+                                    theme={theme}
+                                />
+                            </div>
                         </div>
                     )}
 

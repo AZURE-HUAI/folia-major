@@ -198,8 +198,13 @@ export const planTransition = (
     // Eight beats of the outgoing track, then scaled: longer when the two keys sit together or the
     // tail wants riding, shorter when they clash. A clash is not removed, it is denied the time to
     // be noticed.
-    const wanted = (beat === null ? AUTOMIX_DEFAULT_OVERLAP_SEC : beat * AUTOMIX_DEFAULT_OVERLAP_BEATS)
-        * choice.lengthScale;
+    // Back to whole beats after scaling, or the point of counting in beats is lost on the way out:
+    // eight beats shortened by 0.6 is 4.8 of them, which is not a length any music has.
+    const wanted = toWholeBeats(
+        (beat === null ? AUTOMIX_DEFAULT_OVERLAP_SEC : beat * AUTOMIX_DEFAULT_OVERLAP_BEATS)
+        * choice.lengthScale,
+        beat,
+    );
     // The proven window is a CEILING on that length, never the length itself.
     //
     // It answers "where may a handover go", not "how long should one be", and spending all of it

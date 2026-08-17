@@ -382,21 +382,28 @@ export const prefetchNearbySongs = async (
         return;
     }
 
-    // Determine songs to prefetch
+    // Determine songs to prefetch.
+    //
+    // Forwards first, and the immediate next track before anything else. These run strictly one
+    // after another, so whatever is first in this list is the only one guaranteed to be finished
+    // soon - and the next track is the one every transition is planned against, while the previous
+    // track only matters if the listener presses back. Fetching backwards first put a whole song's
+    // URL resolve, lyric fetch and auto-match in front of the analysis a blend was waiting on, and
+    // a track skipped through inside ten seconds reached its transition still unmeasured.
     const songsToPrefetch: SongResult[] = [];
-
-    // Previous songs
-    for (let i = 1; i <= PREFETCH_COUNT_PREV; i++) {
-        const idx = currentIndex - i;
-        if (idx >= 0) {
-            songsToPrefetch.push(queue[idx]);
-        }
-    }
 
     // Next songs
     for (let i = 1; i <= PREFETCH_COUNT_NEXT; i++) {
         const idx = currentIndex + i;
         if (idx < queue.length) {
+            songsToPrefetch.push(queue[idx]);
+        }
+    }
+
+    // Previous songs
+    for (let i = 1; i <= PREFETCH_COUNT_PREV; i++) {
+        const idx = currentIndex - i;
+        if (idx >= 0) {
             songsToPrefetch.push(queue[idx]);
         }
     }
