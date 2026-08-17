@@ -244,6 +244,19 @@ export function usePlaybackAudioBridge({
 
     useEffect(() => {
         if (audioSrc && audioRef.current) {
+            // `audioRef` and `audioSrc` describe the same track almost always - but not while a
+            // blend is being armed. Automix repoints the ref at the incoming deck the instant it
+            // arms, and `audioSrc` keeps naming the OUTGOING track until playSong has resolved the
+            // next URL, which takes an await or two. Playing in that window starts whatever the
+            // incoming deck still had loaded from an earlier song AND spends the autoplay intent
+            // on it, so when the real source lands there is nothing left to press play with: the
+            // deck sits fully buffered at currentTime 0 in silence.
+            //
+            // The deck's own src attribute is written from `audioSrc`, so an exact match is the
+            // whole test. Bail WITHOUT spending the intent - this effect runs again on the commit
+            // that gives the deck its real source, and that run is the one meant to start it.
+            if (audioRef.current.getAttribute('src') !== audioSrc) return;
+
             if (shouldAutoPlayRef.current && !isLyricsLoading) {
                 shouldAutoPlayRef.current = false;
 

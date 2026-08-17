@@ -150,6 +150,10 @@ export function useAutomixDecks({
             // A pause the listener asked for is not a stall, and resuming it would be worse than
             // any silence this guards against.
             if (playerStateRef.current === PlayerState.PAUSED) return;
+            // A transition armed since this check was scheduled. An armed incoming deck is loaded
+            // and deliberately silent, so starting it here would fire the blend against a deck the
+            // session was not ready to hear - the very failure this check exists to rescue.
+            if (sessionRef.current!.getPhase() !== 'idle') return;
 
             const deck = sessionRef.current!.getActiveDeck();
             const element = elementsRef.current[deck];
@@ -158,18 +162,9 @@ export function useAutomixDecks({
                 // currentTime tells the two failures apart, and they have different causes: zero
                 // means nothing ever pressed play on this deck, non-zero means it DID play and
                 // something paused it again. Without it this line just says "it was silent".
-                // `phase` matters as much as the rest: this check is scheduled at settle, but by
-                // the time it runs a NEW transition may have armed, and an armed incoming deck is
-                // SUPPOSED to be loaded and silent. Starting that one early breaks a good blend.
                 console.log(
                     '[Automix] the deck holding the next track was never started, starting it',
-                    {
-                        deck,
-                        phase: sessionRef.current!.getPhase(),
-                        at: element.currentTime,
-                        readyState: element.readyState,
-                        ended: element.ended,
-                    },
+                    { deck, at: element.currentTime, readyState: element.readyState, ended: element.ended },
                 );
                 void element.play().catch(() => { });
                 return;
