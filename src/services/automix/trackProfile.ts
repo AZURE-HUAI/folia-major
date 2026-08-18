@@ -20,7 +20,7 @@ import {
 // are loud or decaying, the beat grid, the key - is about the *incoming* song.
 
 /** Bumped whenever the maths changes, so stored profiles from an older build are re-measured. */
-export const TRACK_PROFILE_VERSION = 4;
+export const TRACK_PROFILE_VERSION = 8;
 
 /**
  * What the analysis runs at.
@@ -114,6 +114,16 @@ const ENDPOINT_CHROMA_SEC = 20;
  */
 const OUTRO_TEMPO_SEC = 30;
 /**
+ * How far the head's own pulse may sit from the track's before its bar line is thrown away.
+ *
+ * Not a drift tolerance, and setting it as one would defeat the reading: a song that slows into its
+ * last chorus is exactly the case the head pass exists for, so a head that disagrees by a few
+ * percent is the answer rather than the error. What has to be caught is a head window that locked
+ * onto a subdivision instead of the beat, and those land a third or a half away. Ten percent sits
+ * in the wide gap between the two, well past any performance and well short of a 4:3.
+ */
+const HEAD_TEMPO_TOLERANCE = 0.1;
+/**
  * Frames whose spectrum is this flat are noise, and noise is not a chord.
  *
  * A kick and a snare are broadband: they pour energy into all twelve chroma bins evenly, which
@@ -122,10 +132,15 @@ const OUTRO_TEMPO_SEC = 30;
  */
 const CHROMA_MAX_FLATNESS = 0.28;
 
+/** Positive remainder. `%` is not it for negatives, and every phase folded here can be one. */
+const modulo = (value: number, span: number) => ((value % span) + span) % span;
+
 /** Feature rate for the structural analysis. Sections are tens of seconds; frames are wasted here. */
 const NOVELTY_BIN_SEC = 1;
 /** Half the checkerboard kernel, in bins. Eight seconds total is about two bars either side. */
 const NOVELTY_HALF_KERNEL = 4;
+/** How far the kernel is allowed to shrink at the ends. Below a bar either side it is guessing. */
+const NOVELTY_MIN_KERNEL = 2;
 /** A boundary earlier than this is a count-in or a fade-in, not the end of a section. */
 const NOVELTY_MIN_SEC = 2;
 /** How far above the novelty curve's own mean a peak has to stand to count as a boundary. */
@@ -237,6 +252,20 @@ export interface TrackProfile {
      * pattern to read a bar line off.
      */
     downbeatOffset: number | null;
+    /**
+     * The same bar line, read at the START of the track instead of extrapolated back to it.
+     *
+     * `downbeatOffset` is anchored on the last beat of the file, because that is where the tempo
+     * estimator can see one; the offset near zero is what is left after walking that phase back
+     * across the whole song. A period known to a tenth of a percent is half a beat out after five
+     * hundred of them, so the whole-track grid is exact where a track is LEFT and worthless where
+     * one is ENTERED - and entering is the only thing the incoming side of a transition does.
+     *
+     * Null when the head carries no readable bar line, or when its pulse disagrees with the
+     * track's: two different tempos are two different grids, and this field only exists to give
+     * the existing one a better phase.
+     */
+    headDownbeatOffset: number | null;
     /** Beats to the bar. Four; stated rather than assumed silently in three different files. */
     beatsPerBar: number;
     /** Tonic as a pitch class, 0 = C. -1 when nothing correlated well enough. */
@@ -447,17 +476,34 @@ const findBoundaries = (bins: readonly Float64Array[], binSec: number): number[]
 
     // Gaussian-tapered checkerboard: +1 on the two on-diagonal quadrants, -1 on the off-diagonal
     // ones, faded out at the edges so a boundary is not scored by the far corners of the window.
+    //
+    // The kernel SHRINKS towards the two ends of the track rather than refusing to score there.
+    // Refusing looks like the safe option and is not: with the first scorable bin four seconds in,
+    // a track whose intro ends before that does not report "no boundary", it reports its SECOND
+    // boundary as its first - so the shortest intros come out as the longest, which is the one
+    // direction this number must never be wrong in.
+    //
+    // It shrinks symmetrically, because a lopsided window is not a smaller measurement but a
+    // different one: with more future than past inside it, the two on-diagonal quadrants outweigh
+    // the off-diagonal pair and every edge bin scores high whatever the music is doing. Kept square
+    // and divided by its own taper mass, a four-second kernel and a two-second one answer on the
+    // same scale and can share one threshold.
     const novelty = new Array<number>(bins.length).fill(0);
-    for (let centre = half; centre < bins.length - half; centre += 1) {
+    const first = NOVELTY_MIN_KERNEL;
+    const last = bins.length - 1 - NOVELTY_MIN_KERNEL;
+    for (let centre = first; centre <= last; centre += 1) {
+        const reach = Math.min(half, centre, bins.length - 1 - centre);
         let score = 0;
-        for (let a = -half; a < half; a += 1) {
-            for (let b = -half; b < half; b += 1) {
+        let mass = 0;
+        for (let a = -reach; a < reach; a += 1) {
+            for (let b = -reach; b < reach; b += 1) {
                 const sign = (a < 0) === (b < 0) ? 1 : -1;
                 const taper = Math.exp(-(a * a + b * b) / (2 * (half / 2) ** 2));
                 score += sign * taper * similarity(centre + a, centre + b);
+                mass += taper;
             }
         }
-        novelty[centre] = score;
+        novelty[centre] = mass > 0 ? score / mass : 0;
     }
 
     const scored = novelty.slice(half, bins.length - half);
@@ -469,14 +515,34 @@ const findBoundaries = (bins: readonly Float64Array[], binSec: number): number[]
     const variance = scored.reduce((sum, value) => sum + (value - mean) ** 2, 0) / scored.length;
     const threshold = mean + NOVELTY_SIGMAS * Math.sqrt(variance);
 
-    // From half + 1, never half: novelty is only defined inside the kernel's reach, so the first
-    // scored bin has a zero to its left and wins "is a local maximum" by default. Measured on real
-    // tracks that artefact put four songs out of six at exactly the same boundary.
-    const earliest = Math.max(half + 1, Math.ceil(NOVELTY_MIN_SEC / binSec));
+    // Where inside its own bin the peak really sits, from how it leans against its two neighbours.
+    //
+    // A bin is a whole second and it is reported by its LEFT edge, so an unrefined peak is
+    // `floor(boundary)` - never late, never right, and short by half a second on average. That is
+    // not a rounding nicety downstream: the ceiling this number sets is spent by `quantiseToMusic`
+    // in whole bars, so a bar that misses by a tenth of a second is not shortened, it is dropped.
+    //
+    // Three points around a maximum define a parabola, and its vertex is the sub-bin position -
+    // the same refinement the tempo estimator already uses on its own peaks. Clamped to the bin
+    // because a near-flat top makes the denominator vanish and the vertex fly off.
+    const lean = (index: number) => {
+        const left = novelty[index - 1];
+        const right = novelty[index + 1];
+        const curve = left - 2 * novelty[index] + right;
+        if (!(Math.abs(curve) > 1e-12)) return 0;
+        return Math.max(-0.5, Math.min(0.5, (left - right) / (2 * curve)));
+    };
+
+    // One bin inside the scored range at each end, never on its edge: novelty is zero outside it,
+    // and a zero next to a real value wins "is a local maximum" by default. Measured on real tracks
+    // that artefact put four songs out of six at exactly the same boundary. With the kernel now
+    // reaching the ends, that leaves `NOVELTY_MIN_SEC` as the thing actually setting the floor -
+    // which is what it was written to be.
+    const earliest = Math.max(first + 1, Math.ceil(NOVELTY_MIN_SEC / binSec));
     const boundaries: number[] = [];
-    for (let index = earliest; index < bins.length - half - 1; index += 1) {
+    for (let index = earliest; index < last; index += 1) {
         const isPeak = novelty[index] > novelty[index - 1] && novelty[index] >= novelty[index + 1];
-        if (isPeak && novelty[index] > threshold) boundaries.push(index * binSec);
+        if (isPeak && novelty[index] > threshold) boundaries.push((index + lean(index)) * binSec);
     }
     return boundaries;
 };
@@ -700,6 +766,12 @@ export const analyseTrack = async (
     const sectionBins: Float64Array[] = Array.from({ length: binCount }, () => new Float64Array(12));
     /** Energy in each of the three regions, per second. Summed over an end, that end's tone. */
     const toneBins: Float64Array[] = Array.from({ length: binCount }, () => new Float64Array(3));
+    // The fourth use of the same chroma: this frame's alone, as a share, against the last frame
+    // that had any. Its flux is the second evidence for where the bar line is - see
+    // `estimateDownbeat`, which is blind to four-on-the-floor without it.
+    const frameChroma = new Float64Array(12);
+    const previousChroma = new Float64Array(12);
+    const chromaEnvelope: number[] = [];
     let frames = 0;
     let yieldBy = performance.now() + YIELD_BUDGET_MS;
 
@@ -753,12 +825,38 @@ export const analyseTrack = async (
         // less than the same chord over nothing. A cutoff would make the answer depend on which
         // side of one number a snare happened to land.
         const tonality = Math.max(0, 1 - flatness / CHROMA_MAX_FLATNESS);
+        frameChroma.fill(0);
         if (tonality > 0) {
             for (const index of chromaBinList) {
                 const contribution = magnitudes[index] * tonality;
                 chroma[binPitchClass[index]] += contribution;
                 sectionBin[binPitchClass[index]] += contribution;
+                frameChroma[binPitchClass[index]] += contribution;
             }
+        }
+
+        // How much of the harmony CHANGED since the last frame that had any.
+        //
+        // Normalised to a share of the frame before differencing, and that is the whole point of
+        // the measurement: without it this reads the arrangement getting louder, and the loudest
+        // moment of a bar is its downbeat only in the music where the kick could already have said
+        // so. As a share, a chord change reads the same whether it happens in a verse or a chorus.
+        //
+        // Only rises are counted. A chord change puts energy into pitch classes that were not
+        // there; adding the ones that left counts the same event twice.
+        let harmonicChange = 0;
+        let chromaSum = 0;
+        for (let pitchClass = 0; pitchClass < 12; pitchClass += 1) chromaSum += frameChroma[pitchClass];
+        if (chromaSum > 0) {
+            for (let pitchClass = 0; pitchClass < 12; pitchClass += 1) {
+                const share = frameChroma[pitchClass] / chromaSum;
+                harmonicChange += Math.max(0, share - previousChroma[pitchClass]);
+                frameChroma[pitchClass] = share;
+            }
+            // Carried forward only over frames that had harmony in them. A drum fill between two
+            // chords is not a chord change, and comparing the chord after it against the fill
+            // would report one exactly where fills like to sit - just before the bar line.
+            previousChroma.set(frameChroma);
         }
 
         if (side) {
@@ -783,6 +881,7 @@ export const analyseTrack = async (
             // The same measurement over the bottom of the spectrum only. That band is the kick
             // drum and nothing else, which is what marks the bar line.
             lowEnvelope.push(spectralFlux(spectrum, previous, lowFluxBins));
+            chromaEnvelope.push(harmonicChange);
         }
         previous.set(spectrum);
 
@@ -824,15 +923,47 @@ export const analyseTrack = async (
             tempo.periodSec,
             ((beatOffset - envelopeStartSec) % tempo.periodSec + tempo.periodSec) % tempo.periodSec,
             BEATS_PER_BAR,
+            chromaEnvelope,
         )
         : null;
 
     // A second pass over the last half minute only. The same code, a different slice - which is
     // the whole of what "a track has one tempo" was getting wrong.
-    const outroFrames = Math.round(OUTRO_TEMPO_SEC / hopSec);
-    const outroTempo = partial || envelope.length <= outroFrames
+    const tempoFrames = Math.round(OUTRO_TEMPO_SEC / hopSec);
+    const outroTempo = partial || envelope.length <= tempoFrames
         ? null
-        : estimateTempo(envelope.slice(-outroFrames), hopSec);
+        : estimateTempo(envelope.slice(-tempoFrames), hopSec);
+
+    // A third pass, at the other end, for the phase alone.
+    //
+    // The grid above is anchored on the newest beat in the file and everything before it is
+    // extrapolation. That is the right end to be exact at for the track being left, and the wrong
+    // one for the track being entered: `alignEntry` walks the incoming bar grid forward from the
+    // first few seconds, which is as far from the anchor as it is possible to get. Measuring the
+    // head directly turns that walk from five hundred periods into thirty seconds of them.
+    //
+    // Only the PHASE is taken. The period stays the whole-track one, so the result drops into the
+    // `barGrid(bpm, offset)` every consumer already calls without a second tempo entering the
+    // system - and a head window whose pulse is not the track's is dropped rather than reconciled,
+    // because a phase is only meaningful against the grid it was measured on.
+    const headTempo = tempo && envelope.length > tempoFrames
+        ? estimateTempo(envelope.slice(0, tempoFrames), hopSec)
+        : null;
+    // Everything inside the head window is counted in the head's OWN period, including the walk
+    // back from the beat it anchors on. Folding its phase with the whole-track period instead would
+    // reintroduce the error being removed, half a minute of it, which is most of what there is to
+    // lose here.
+    const headDownbeat = tempo && headTempo
+        && Math.abs(headTempo.periodSec / tempo.periodSec - 1) <= HEAD_TEMPO_TOLERANCE
+        ? estimateDownbeat(
+            lowEnvelope.slice(0, tempoFrames),
+            hopSec,
+            headTempo.periodSec,
+            modulo((tempoFrames - 1 - headTempo.beatOffsetHops) * hopSec, headTempo.periodSec),
+            BEATS_PER_BAR,
+            chromaEnvelope.slice(0, tempoFrames),
+        )
+        : null;
 
     // The two ends, in the units they are compared in. Bin indices rather than seconds because the
     // per-second accumulators are what both answers come out of.
@@ -887,9 +1018,15 @@ export const analyseTrack = async (
         bpm: tempo?.bpm ?? null,
         outroBpm: outroTempo?.bpm ?? null,
         beatOffset,
-        downbeatOffset: downbeat === null
+        downbeatOffset: downbeat === null ? null : modulo(downbeat + envelopeStartSec, barSec),
+        // Folded against the whole-track bar because that is the unit `barGrid` walks in. When the
+        // two ends really do run at different tempos the fold can shift the answer by the
+        // difference between the two bar lengths - a few hundredths of a second, against a walk of
+        // one or two bars. ponytail: good enough at entry range; store the head period too if
+        // anything ever needs the head grid further in than that.
+        headDownbeatOffset: headDownbeat === null
             ? null
-            : ((downbeat + envelopeStartSec) % barSec + barSec) % barSec,
+            : modulo(headDownbeat + envelopeStartSec, barSec),
         beatsPerBar: BEATS_PER_BAR,
         key: key.key,
         major: key.major,

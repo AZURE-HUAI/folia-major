@@ -134,6 +134,29 @@ describe('analyseTrack, finding the structure', () => {
         expect((await analyseTrack(chord(22, VERSE), RATE))?.sectionStart).toBeNull();
     });
 
+    it('reads a short intro as a short intro, not as the section after it', async () => {
+        // The kernel used to refuse to score the first four seconds, and the failure mode of
+        // refusing is not "no answer": the first boundary vanishes and the SECOND one is handed
+        // over as `sectionStart`. A three-second intro reported seventeen seconds of room to blend
+        // into - the shortest intros coming out as the longest, which is the one direction this
+        // number is read in. The planner spends it as a ceiling, so being generous is being wrong.
+        const short = await analyseTrack(
+            join(chord(3, VERSE), chord(14, CHORUS), chord(14, VERSE)), RATE,
+        );
+
+        expect(short!.sectionStart).toBeCloseTo(3, 0);
+    });
+
+    it('places a boundary inside its bin rather than on its left edge', async () => {
+        // The self-similarity matrix bins at one second and a peak is reported by its bin index, so
+        // an unrefined boundary is floor(truth) - never late, never right. Half a second does not
+        // sound like much until `quantiseToMusic` spends the ceiling in whole bars: a bar that
+        // misses by a tenth of a second is not shortened, it is dropped.
+        const profile = await analyseTrack(join(chord(8.5, VERSE), chord(14, CHORUS)), RATE);
+
+        expect(profile!.sectionStart).toBeGreaterThan(8.15);
+    });
+
     it('has nothing to say about a track too short to hold the kernel', async () => {
         expect((await analyseTrack(join(chord(2, VERSE), chord(2, CHORUS)), RATE))?.sectionStart)
             .toBeNull();
@@ -197,6 +220,61 @@ describe('analyseTrack, the fields a transition reads', () => {
         // Naming a downbeat from a signal that carries no pattern would be inventing evidence, and
         // a wrong bar line is worse than none: everything downstream would land a beat out.
         expect((await analyseTrack(track(), RATE))!.downbeatOffset).toBeNull();
+    });
+});
+
+describe('analyseTrack, the bar line at each end', () => {
+    /**
+     * A kick on the one, a tick above the bar-line band on the other three.
+     *
+     * Split that way on purpose. The downbeat vote reads the bottom 150Hz alone, so putting the
+     * kick there and nothing else makes the low end carry the bar line by itself, while the ticks
+     * keep a beat on every quarter for the tempo estimator to find. Four kicks to the bar - which
+     * is what most dance music actually is - is a different test, and the one the harmonic vote
+     * exists for.
+     */
+    const groove = (seconds: number, bpm: number, firstBeat: number) => {
+        const samples = new Float32Array(Math.round(seconds * RATE));
+        const kick = Math.round(0.09 * RATE);
+        const tick = Math.round(0.03 * RATE);
+        for (let beat = 0, at = firstBeat; at < seconds; beat += 1, at += 60 / bpm) {
+            const start = Math.round(at * RATE);
+            const [length, hz, level] = beat % 4 === 0 ? [kick, 60, 0.9] : [tick, 4000, 0.5];
+            for (let index = 0; index < length && start + index < samples.length; index += 1) {
+                samples[start + index] += level * (1 - index / length)
+                    * Math.sin((2 * Math.PI * hz * index) / RATE);
+            }
+        }
+        return samples;
+    };
+
+    /** Distance to the nearest line of a grid, which is a distance on a circle. */
+    const offBy = (offset: number, target: number, bar: number) => {
+        const gap = ((offset - target) % bar + bar) % bar;
+        return Math.min(gap, bar - gap);
+    };
+
+    it('reads the head bar line off the head instead of walking one back from the end', async () => {
+        // Four minutes at 128, dead steady - no ritardando, nothing exotic. The whole-track answer
+        // is still wrong here, and that is the point: it is anchored on the last beat in the file
+        // and folded back to zero through a period known to about a thousandth, so its error is
+        // whatever a thousandth of the track's length comes to. Measured across this same groove at
+        // 60s, 150s and 240s it went 0.10s, 0.24s, 0.38s - four fifths of a beat by the end, on the
+        // one number the incoming side of every transition is entered on.
+        const profile = await analyseTrack(groove(240, 128, 0.6), RATE);
+        const beat = 60 / profile!.bpm!;
+
+        expect(profile!.headDownbeatOffset).not.toBeNull();
+        const head = offBy(profile!.headDownbeatOffset!, 0.6, beat * profile!.beatsPerBar);
+        // A quarter beat is the loosest this can be and still mean anything; the head reading comes
+        // in at about a sixth of one, and it does not grow with the track.
+        expect(head).toBeLessThan(beat / 4);
+        expect(head).toBeLessThan(offBy(profile!.downbeatOffset!, 0.6, beat * profile!.beatsPerBar));
+    }, 30000);
+
+    it('has nothing to say about a head with no bar line in it', async () => {
+        expect((await analyseTrack(join(silence(0.5), tone(40, 220), silence(0.5)), RATE))!
+            .headDownbeatOffset).toBeNull();
     });
 });
 

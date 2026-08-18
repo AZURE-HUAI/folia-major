@@ -27,6 +27,7 @@ export const makeProfile = (overrides: Partial<TrackProfile> = {}): TrackProfile
     outroBpm: 120,
     beatOffset: 0,
     downbeatOffset: null,
+    headDownbeatOffset: null,
     beatsPerBar: 4,
     key: -1,
     major: true,

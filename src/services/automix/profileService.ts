@@ -243,7 +243,13 @@ export const ensureTrackProfile = async (request: ProfileRequest): Promise<void>
                     + `${profile.outroBpm && profile.bpm && Math.abs(profile.outroBpm - profile.bpm) > 1
                         ? ` (${Math.round(profile.outroBpm)} at the end)` : ''}`
                     + `${profile.bpm ? `, ${profile.downbeatOffset === null
-                        ? 'no bar line found' : `bar line at ${profile.downbeatOffset.toFixed(2)}s`}, ` : ''}`
+                        ? 'no bar line found' : `bar line at ${profile.downbeatOffset.toFixed(2)}s`}` : ''}`
+                    // The head's own reading of the same line, and the gap between the two is the
+                    // whole reason it is measured: that gap is how far the end-anchored grid has
+                    // walked off the music by the time a track is entered.
+                    + `${profile.downbeatOffset !== null && profile.headDownbeatOffset !== null
+                        ? ` (head ${profile.headDownbeatOffset.toFixed(2)}s)` : ''}`
+                    + `${profile.bpm ? ', ' : ''}`
                     + `${profile.loudness.toFixed(1)} LUFS,`
                     + ` lead-in ${profile.leadIn.toFixed(2)}s,`
                     + ` lead-out ${at(profile.leadOut)}, body ends ${at(profile.bodyOut)} early,`
