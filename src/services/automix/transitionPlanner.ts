@@ -261,6 +261,8 @@ export const planTransition = (
     to: TransitionTrack,
     /** Measured tempo of the outgoing track, when there is one. Sets the unit for the length. */
     bpm: number | null = null,
+    /** Where the outgoing track is right now. Everything behind it is not room, it is history. */
+    at: number = 0,
 ): TransitionPlan => {
     if (!Number.isFinite(from.duration) || from.duration <= 0) {
         return hardCut('outgoing duration unknown, nothing to schedule a fade against');
@@ -273,6 +275,14 @@ export const planTransition = (
 
     // Everything below is scheduled backwards from HERE, not from the end of the file.
     const { sounding: end, body } = endsOf(from);
+    // How much of that is still AHEAD of the playhead, which is the only part a blend can be put
+    // in. The two used to be the same number, because a plan was made while the track still had
+    // its whole tail in front of it - but nothing looks at a track while a previous blend is
+    // still fading, and a duration that arrives late blocks the look as well. So the first look
+    // can land after the handover point has already gone by, and a length chosen from the whole
+    // tail then loses exactly the part that is behind us: the execution clamps the blend to what
+    // is left and it comes out short, having been shaped for a length it never had.
+    const left = Math.max(0, end - at);
     const trimmed = from.duration - end;
     const silence = trimmed > 0.05 ? `, skipped ${round(trimmed)}s of silence at the end` : '';
 
@@ -293,9 +303,13 @@ export const planTransition = (
         const placeable = to.profile ? to.profile.leadIn + HEAD_BUDGET_SEC : CUT_LEAD_SEC;
         // A quarter of the MUSIC, not of the file: a track padded with silence has less of itself
         // to spend than its duration claims, and this is also what keeps the anchor off zero.
-        const room = Math.min(CUT_LEAD_SEC, end / 4, placeable);
+        const room = Math.min(CUT_LEAD_SEC, end / 4, placeable, left);
         if (room < AUTOMIX_MIN_CUT_ROOM_SEC) {
-            return hardCut(`track too short to place a cut in (${round(end)}s)`);
+            // Which bound, because "too short" is a claim about the track and this is usually a
+            // claim about when we looked.
+            return hardCut(room === left
+                ? `only ${round(left)}s of the outgoing track left to cut in`
+                : `track too short to place a cut in (${round(end)}s)`);
         }
         // No `body` here, and that is what a cut IS: the styles that reach this branch were chosen
         // because the outgoing track is still at full level when it stops, so its body runs to the
@@ -380,6 +394,8 @@ export const planTransition = (
         end / 4,
         tailRoom,
         introRoom,
+        // Only ever binds when the planning itself was late - see `left`.
+        left,
     );
     // Quantised last, so a blend forced into a narrow gap still comes out as a whole number of
     // phrases, bars or beats rather than as the gap.
@@ -395,7 +411,9 @@ export const planTransition = (
         // WHICH end ran out, because the two are fixed by opposite things: a short outro is the
         // outgoing song, a short intro is the incoming one, and naming the wrong one sends the
         // next person looking at the wrong track.
-        const bound = Number.isFinite(vocalRoom) && vocalRoom <= end / 4
+        const bound = ceiling === left
+            ? `only ${round(left)}s of the outgoing track left`
+            : Number.isFinite(vocalRoom) && vocalRoom <= end / 4
             ? tailRoom <= introRoom
                 ? `only ${round(tailRoom)}s after the outgoing track stops singing`
                 : `only ${round(introRoom)}s before the next track sings`
@@ -424,7 +442,9 @@ export const planTransition = (
     const length = `${beat === null ? 'default' : `${round(overlap / beat)} beats`}`
         + (overlap >= wanted - 0.05 ? ''
             : ceiling < wanted - 0.05
-                ? `, wanted ${round(wanted)}s, capped by what the pair has room for (${round(ceiling)}s)`
+                ? ceiling === left
+                    ? `, wanted ${round(wanted)}s, capped by the ${round(left)}s left of this track`
+                    : `, wanted ${round(wanted)}s, capped by what the pair has room for (${round(ceiling)}s)`
                 : `, wanted ${round(wanted)}s, rounded down to the grid`);
     // Three clauses, and the order between them is the whole decision.
     //
@@ -435,7 +455,10 @@ export const planTransition = (
     // lines stacked on each other is the one thing that makes an overlap sound wrong, and moving
     // the anchor earlier is exactly the way to cause it.
     const latest = end - overlap;
-    const anchor = Math.min(latest, Math.max(body, lastSung ?? 0));
+    // `at` for the same reason it bounds the ceiling: a handover cannot be placed in the part of
+    // the track that has already played. Safe against `latest` because the ceiling has already
+    // kept the overlap inside what is left, so `latest` is never behind the playhead either.
+    const anchor = Math.min(latest, Math.max(body, lastSung ?? 0, at));
     const rode = latest - anchor;
     const fadeOut = rode > 0.05 ? `, started ${round(rode)}s early to ride the fade-out` : '';
 

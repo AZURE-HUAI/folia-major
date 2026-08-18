@@ -359,6 +359,10 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             // The offline profile measured the whole file; the live tap only heard the last few
             // seconds. Prefer the profile, fall back to the tap for anything never analysed.
             request.from.profile?.bpm ?? outgoingTempo?.bpm ?? null,
+            // Where the track actually is. This function is not called on a schedule - it is
+            // called when nothing else is blocking it, and the previous blend blocks it for its
+            // whole length - so the first look at a track can land after its own handover point.
+            request.time,
         );
         // Early by the lead, not on the dot: everything between here and `outStart` is what the
         // next track gets to load in, instead of taking it out of the blend.
@@ -490,13 +494,20 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
 
         phase = 'fading';
 
-        // The one measurement that says whether AUTOMIX_ARM_LEAD_SEC is long enough. A blend
-        // shorter than planned means the incoming deck spent the whole lead loading and then some,
-        // so the remainder came out of the fade - the failure this lead exists to remove.
+        // Two independent ways to lose part of a blend, and the message used to name only one of
+        // them - the deck being slow. Which sent the next reader looking at load times for a
+        // clipped blend whose deck had started on time: the other way is the planning being late,
+        // and it takes seconds off rather than tenths. They are told apart by where the outgoing
+        // track was when its deck spoke, so print that rather than a conclusion drawn from it.
         if (overlap > 0 && overlap < plan.overlap - 0.05) {
+            const lateBy = position - plan.outStart;
             console.log(
-                `[Automix] blend clipped to ${overlap}s of the planned ${plan.overlap}s:`
-                + ` the next deck took more than its ${AUTOMIX_ARM_LEAD_SEC}s of lead to start`,
+                `[Automix] blend clipped to ${overlap}s of the planned ${plan.overlap}s: `
+                + (lateBy > 0.05
+                    ? `the handover point went by ${lateBy.toFixed(2)}s before this deck spoke`
+                    + ` (its ${AUTOMIX_ARM_LEAD_SEC}s of lead started later than that)`
+                    : `the outgoing track stops ${(plan.outStart + plan.overlap - tailElement.duration).toFixed(2)}s`
+                    + ' earlier than the plan was built for'),
             );
         }
 

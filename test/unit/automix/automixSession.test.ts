@@ -510,6 +510,10 @@ describe('automix session', () => {
         const harness = createHarness({ A: { bpm: 90 } });
 
         const plan = harness.arm({
+            // Eight bars of room is the point of the test, so the request has to be made while
+            // there is still eight bars of track: the planner bounds a blend by what is ahead of
+            // the playhead, and the harness default asks from five seconds out.
+            time: 78,
             from: { duration: 100, lines: [] },
             to: { duration: 100, lines: [] },
         });

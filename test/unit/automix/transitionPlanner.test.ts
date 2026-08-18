@@ -184,6 +184,29 @@ describe('planTransition', () => {
     it('cuts when the outgoing duration is unknown', () => {
         expect(planTransition(track(NaN, [line(10, 90)]), track(100, [line(10, 90)])).kind).toBe('hardCut');
     });
+
+    it('plans against the room still ahead of the playhead, not the whole tail', () => {
+        // Nothing calls this on a schedule: a blend in flight blocks it for its own whole length,
+        // and a duration that has not arrived blocks it too. So the FIRST look at a track can land
+        // well after the point its own handover was due, and a length chosen from the whole tail
+        // is then partly behind the playhead. Execution clamps it to what is left, and the blend
+        // comes out short having been shaped for a length it never had - which is what the log
+        // reported as "the next deck took more than its 1s of lead to start".
+        //
+        // 120 BPM over 100s: a phrase-and-a-half is 16s and the tail is wide open, so the
+        // unbounded answer is a 16s blend starting at 84 - eight seconds into the past.
+        const late = planTransition(track(100, null), track(100, null), 120, 90);
+        expect(late.kind).toBe('fade');
+        expect(late.outStart).toBeGreaterThanOrEqual(90);
+        expect(late.outStart + late.overlap).toBeLessThanOrEqual(100 + 1e-6);
+        // Still a whole number of beats, rather than the ten seconds that happen to be left.
+        expect(late.overlap).toBe(8);
+    });
+
+    it('cuts rather than blends when the handover point is already behind the playhead', () => {
+        const plan = planTransition(track(100, null), track(100, null), 120, 99.5);
+        expect(plan.kind).toBe('hardCut');
+    });
 });
 
 describe('resolveOverlap', () => {
