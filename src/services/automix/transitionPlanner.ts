@@ -108,12 +108,18 @@ export const AUTOMIX_DEFAULT_OVERLAP_SEC = 5;
  * A fixed number of seconds is the wrong unit: five seconds is two bars of a ballad and nearly four
  * of a fast track, so the same setting reads as leisurely on one song and frantic on the next.
  *
- * One phrase - four bars - rather than the two bars this started at. Two bars is the shortest span
- * that reads as a phrase at all, which made it the right floor and the wrong default: it is the
- * length of a fill, not of a mix. A phrase is the unit the arrangement itself is built in, and it
- * is what the scales below are multiplying against.
+ * Two phrases - eight bars. This has been raised twice, from two bars to one phrase to here, and
+ * the reason it kept being too short is worth writing down: the number is a CEILING that a chain of
+ * scales then multiplies down, so setting it to what a good blend should be guarantees that the
+ * typical blend is shorter than one. Measured on real transitions, the scales together land between
+ * a quarter and a half, so the default has to be about twice the target for the target to be the
+ * common case. Eight bars against those scales gives two to four bars, which is a mix; one phrase
+ * gave one to two, which is a fill.
+ *
+ * It stays a ceiling in the other sense too. Nothing here overrides how much room the pair actually
+ * has - `ceiling` below is still the vocal-free tail, and a blend that has to be short still is.
  */
-const AUTOMIX_DEFAULT_OVERLAP_BEATS = BEATS_PER_PHRASE;
+const AUTOMIX_DEFAULT_OVERLAP_BEATS = BEATS_PER_PHRASE * 2;
 
 /**
  * How far a handover may be moved to land on a bar line of the outgoing track.
@@ -332,8 +338,26 @@ export const planTransition = (
     // window. `sectionStart` came in EARLIER than the true vocal entry on every track it could be
     // checked against, and early is the harmless direction: the blend is over before anyone sings.
     const intro = to.profile?.sectionStart ?? null;
-    const vocalFree = tail !== null && intro !== null ? Math.min(tail, intro) : null;
-    const usesVocalFree = vocalFree !== null && vocalFree >= AUTOMIX_MIN_OVERLAP_SEC;
+    // TWO constraints, not one, and collapsing them into a single number was a hole rather than a
+    // tidiness: `min(tail, intro)` is null the moment EITHER side is unmeasured, so not knowing one
+    // of them threw away the other. An outgoing track with a known ten-second instrumental outro was
+    // therefore blended across its own last chorus whenever the incoming track had not been analysed
+    // yet - the ordinary state of the first transition after a cold start, and precisely the case
+    // the vocal floor exists for. It hid while blends were short: `anchor` is written
+    // `min(latest, max(body, lastSung))`, and only a long overlap drags `latest` in front of the
+    // last sung line for the min to hand it back.
+    //
+    // Each side bounds the overlap on its own now, and the pair is still bounded by the smaller of
+    // the two when both are known, which is all the single number was ever doing.
+    //
+    // Infinity for a window too small to blend inside, which keeps the standing decision that a
+    // track singing to its very last second is overlapped anyway rather than refused: this is a
+    // ceiling on how much room there is, and "none" is not a reason to abandon the transition.
+    const roomBefore = (window: number | null) => (
+        window !== null && window >= AUTOMIX_MIN_OVERLAP_SEC ? window : Infinity
+    );
+    const tailRoom = roomBefore(tail);
+    const introRoom = roomBefore(intro);
 
     // One phrase of the outgoing track, then scaled by everything that was measured about the pair:
     // longer when the keys sit together, when the tempos are locked, when the tail wants riding, or
@@ -354,7 +378,8 @@ export const planTransition = (
         AUTOMIX_MAX_OVERLAP_SEC,
         // Quarter-length cap so a very short track is not half crossfade.
         end / 4,
-        usesVocalFree ? vocalFree : Infinity,
+        tailRoom,
+        introRoom,
     );
     // Quantised last, so a blend forced into a narrow gap still comes out as a whole number of
     // phrases, bars or beats rather than as the gap.
@@ -366,8 +391,14 @@ export const planTransition = (
     // short to fade across (186.73s)", which reads as a fact about the track and was a fact about
     // three length penalties multiplying together.
     if (overlap < AUTOMIX_MIN_OVERLAP_SEC) {
-        const bound = usesVocalFree && vocalFree !== null && vocalFree <= end / 4
-            ? `only ${round(vocalFree)}s before the next track sings`
+        const vocalRoom = Math.min(tailRoom, introRoom);
+        // WHICH end ran out, because the two are fixed by opposite things: a short outro is the
+        // outgoing song, a short intro is the incoming one, and naming the wrong one sends the
+        // next person looking at the wrong track.
+        const bound = Number.isFinite(vocalRoom) && vocalRoom <= end / 4
+            ? tailRoom <= introRoom
+                ? `only ${round(tailRoom)}s after the outgoing track stops singing`
+                : `only ${round(introRoom)}s before the next track sings`
             : `a ${round(end)}s track leaves only ${round(end / 4)}s to fade across`;
         return hardCut(`no room to fade - ${bound}`);
     }
@@ -385,8 +416,16 @@ export const planTransition = (
         : intro === null
             ? introMissing
             : `outro ${round(tail)}s, intro ${round(intro)}s`;
+    // Which bound, and what was asked for - because the two bounds are heard as opposite things.
+    // A ceiling means the pair had no room for more; a scale means we CHOSE to be short. The old
+    // message said the first whenever either happened, and it was usually the second: a 63s outro
+    // against a 32s intro logged itself as "capped by what the pair has room for" while the real
+    // binder was a 0.6 for an incoming track that starts at full level.
     const length = `${beat === null ? 'default' : `${round(overlap / beat)} beats`}`
-        + (overlap < wanted - 0.05 ? ', capped by what the pair has room for' : '');
+        + (overlap >= wanted - 0.05 ? ''
+            : ceiling < wanted - 0.05
+                ? `, wanted ${round(wanted)}s, capped by what the pair has room for (${round(ceiling)}s)`
+                : `, wanted ${round(wanted)}s, rounded down to the grid`);
     // Three clauses, and the order between them is the whole decision.
     //
     // Latest: where the blend sits when the track just stops - flush against the last sounding
@@ -427,7 +466,10 @@ export const planTransition = (
     );
     const inStart = alignEntry(
         entryFloor,
-        barGrid(to.profile?.bpm, to.profile?.downbeatOffset),
+        // The head-anchored bar line by preference. Both describe the same grid; they differ in
+        // which end of the track their phase was measured at, and this walk starts in the first
+        // bars - where the whole-track one is at the far end of its extrapolation.
+        barGrid(to.profile?.bpm, to.profile?.headDownbeatOffset ?? to.profile?.downbeatOffset),
         // In WALL seconds, not the outgoing track's own: if it is being bent to meet the incoming
         // tempo, its bars arrive that much sooner than its media clock says they will.
         grid === null ? null : barPhase(grid, outStart) / choice.tempo.stretch,
@@ -464,7 +506,10 @@ export const planTransition = (
         inStart: round(inStart),
         overlap: round(overlap),
         minOverlap: AUTOMIX_MIN_OVERLAP_SEC,
-        reason: `${choice.style} ${round(overlap)}s ${length}`
+        // The style's own reason, which used to be computed here and then dropped on this branch
+        // only - so the log said how long a blend was and never why that length. The scales live in
+        // the choice, so without it a 1.95s blend and a 5.85s one read as the same decision.
+        reason: `${choice.style} ${round(overlap)}s ${length} - ${choice.reason}`
             + ` (${window}${key}${outgoingTail}${silence}${fadeOut}${placed}${bend}${entry})`,
     };
 };

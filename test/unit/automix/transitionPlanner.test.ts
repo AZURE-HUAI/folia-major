@@ -40,6 +40,21 @@ describe('planTransition', () => {
         expect(plan.inStart).toBe(0);
     });
 
+    it('never starts the blend before the outgoing track has stopped singing', () => {
+        // The floor that `anchor` claims to have and did not: it is written `Math.min(latest,
+        // max(body, lastSung))`, so a long enough overlap drags `latest` in front of the last sung
+        // line and the min quietly hands it back. The only thing holding it there was the ceiling,
+        // and the ceiling took `min(tail, intro)` - which is NULL as soon as either side is
+        // unmeasured. So an outgoing track with a known ten-second instrumental outro was blended
+        // across its own last chorus whenever the incoming track had not been analysed yet.
+        //
+        // No profile on the incoming track, which is the ordinary state of the very first
+        // transition after a cold start.
+        const plan = planTransition(track(200, [line(10, 190)]), track(200, null), 120);
+        expect(plan.kind).toBe('fade');
+        expect(plan.outStart).toBeGreaterThanOrEqual(190);
+    });
+
     it('does not stretch a blend just because the gap is generous', () => {
         // A 30s outro into a 30s intro is room, not an instruction. Spending it produced the
         // eight-second crossfade that reads as "the app is just fading" - the length comes from
@@ -49,12 +64,12 @@ describe('planTransition', () => {
         expect(plan.reason).not.toContain('capped by');
     });
 
-    it('keeps a fast track to a phrase rather than the ceiling', () => {
+    it('keeps a fast track to a musical length rather than the ceiling', () => {
         // The bug as heard: 185 BPM, a 26s outro into an 11s intro, and the blend took the whole
-        // cap rather than a musical length. A phrase of a fast track is short, and that is the
+        // cap rather than a musical length. Eight bars of a fast track is short, and that is the
         // right answer - the window says where a handover MAY go, never how long one should be.
         const plan = planTransition(track(200, [line(10, 173.66)]), track(200, null, 11), 185);
-        expect(plan.overlap).toBeCloseTo(BEATS_PER_PHRASE * 60 / 185, 2);
+        expect(plan.overlap).toBeCloseTo(BEATS_PER_PHRASE * 2 * 60 / 185, 2);
         expect(plan.overlap).toBeLessThan(AUTOMIX_MAX_OVERLAP_SEC);
     });
 
@@ -141,11 +156,11 @@ describe('planTransition', () => {
 
     it('measures the default blend in beats once a tempo is known', () => {
         // Five seconds is two bars of a ballad and nearly four of a fast track, so the same
-        // number reads as leisurely on one song and frantic on the next. A phrase does not.
+        // number reads as leisurely on one song and frantic on the next. Eight bars does not.
         expect(planTransition(track(100, null), track(100, null), 90).overlap)
-            .toBeCloseTo(BEATS_PER_PHRASE * 60 / 90, 2);
+            .toBeCloseTo(BEATS_PER_PHRASE * 2 * 60 / 90, 2);
         expect(planTransition(track(100, null), track(100, null), 160).overlap)
-            .toBeCloseTo(BEATS_PER_PHRASE * 60 / 160, 2);
+            .toBeCloseTo(BEATS_PER_PHRASE * 2 * 60 / 160, 2);
     });
 
     it('trims a proven vocal-free window back to whole bars', () => {
