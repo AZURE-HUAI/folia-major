@@ -122,7 +122,12 @@ export const resolveDeckSrc = ({
     if (deck !== activeDeck) return tailSrc ?? warm;
     // The track the app has actually moved to.
     if (audioSrc && audioSrc !== tailSrc) return audioSrc;
-    return warm;
+    // Left: `audioSrc` names the track the OTHER deck is holding, so it cannot be used here, and
+    // the warm source is what this deck is playing. If there is no warm source the app's own is
+    // still better than nothing - two decks briefly on one URL is a duplicated load, while an
+    // active deck with no `src` at all is an `error` event, and that one reaches the listener as
+    // "playback error, skipping in 4s". Never return undefined for the deck being listened to.
+    return warm ?? audioSrc ?? undefined;
 };
 
 type UseAutomixDecksParams = {
@@ -385,6 +390,17 @@ export function useAutomixDecks({
         const nextSong = resolveNextQueueSong(playQueue, currentSong, loopMode);
         if (!nextSong) return report(`${audioSrc}:queue-end`, 'nothing queued after this track');
 
+        // Nothing below applies while a transition is already in flight - `requestTransition`
+        // returns null on sight - and the write underneath it is not free. This function runs on
+        // every timeupdate, the deck it runs on becomes the INCOMING deck the moment anything arms,
+        // and by then `resolveNextQueueSong` is answering about a song after the one being blended
+        // in. Recomputing the warm source from that answer takes the source away from the deck the
+        // listener is currently hearing, which is where "playback error, skipping" came from: the
+        // common case is a track whose bytes are already in the media cache, the prefetcher reports
+        // that as 'CACHED_IN_DB', and the line below turns it into null. The warm slot belongs to
+        // the transition that is holding it until settle gives it back.
+        if (session.getPhase() !== 'idle') return;
+
         const prefetched = getPrefetchedData(nextSong, audioQuality);
         // Buffer ahead, well before anything arms. 'CACHED_IN_DB' is the prefetcher's sentinel for
         // "the bytes are in the media cache", and there is nothing to warm with in that case -
@@ -407,6 +423,7 @@ export function useAutomixDecks({
                 profile: getTrackProfile(nextSong),
             },
             nextKey: getPlaybackSongKey(nextSong),
+            fromKey: getPlaybackSongKey(currentSong),
         });
         if (!plan) return;
 
@@ -488,6 +505,13 @@ export function useAutomixDecks({
             suppressAutoplayRef.current = true;
         }
     }, [playerState, session]);
+
+    // A song change the transition did not ask for ends it. Watching `currentSong` rather than
+    // any playback event because this is a question about what the APP has committed to, and the
+    // deck that needs stopping is the one no player control points at any more.
+    useEffect(() => {
+        session.handleSongChanged(currentSong ? getPlaybackSongKey(currentSong) : null);
+    }, [currentSong, session]);
 
     useEffect(() => () => session.dispose(), [session]);
 

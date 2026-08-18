@@ -76,3 +76,27 @@ describe('deck sources, refusing to double up', () => {
         expect(at({ audioSrc: null })).toEqual({ A: undefined, B: undefined });
     });
 });
+
+describe('deck sources, when the warm source goes away mid-transition', () => {
+    it('never leaves the deck being listened to without a source', () => {
+        // The state this guards against is reachable, and it was reached: `checkTransitionPoint`
+        // runs on every timeupdate and used to recompute `warmSrc` from the queue before checking
+        // whether a transition was already in flight. Once armed, the deck it runs on IS the
+        // incoming deck, the queue has moved past the track being blended in, and a next track
+        // whose bytes are already in the media cache resolves to no warm source at all - so the
+        // recompute handed null to the deck the listener was hearing.
+        //
+        // Both halves are fixed, and this is the second one: whatever else is true, the active
+        // deck gets a source. Two decks on one URL is a duplicated load; an active deck with no
+        // src is an `error` event, and the listener sees "playback error, skipping in 4s".
+        expect(at({ activeDeck: 'B', audioSrc: A_SRC, tailSrc: A_SRC, warmSrc: null }))
+            .toEqual({ A: A_SRC, B: A_SRC });
+    });
+
+    it('still prefers the warm source when there is one', () => {
+        // Same shape, one deck holding a real warm source. It keeps playing what it was given -
+        // the fallback above is a floor, not a new preference.
+        expect(at({ activeDeck: 'B', audioSrc: A_SRC, tailSrc: A_SRC, warmSrc: B_SRC }))
+            .toEqual({ A: A_SRC, B: B_SRC });
+    });
+});

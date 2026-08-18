@@ -84,6 +84,7 @@ const createHarness = (readings: Partial<Record<AutomixDeckId, FakeAnalyserReadi
             from: BLENDABLE_FROM,
             to: BLENDABLE_TO,
             nextKey: 'local:next-song',
+            fromKey: 'local:this-song',
             ...overrides,
         })
     );
@@ -169,6 +170,12 @@ describe('automix session', () => {
         // second, under its own floor - so the blend would not run short, it would be dropped.
         const padded: TransitionTrack = {
             ...BLENDABLE_FROM,
+            // Its own lyric end rather than the shared fixture's 94s, which sings to one second
+            // before its music stops. Now that the vocal floor is a real floor, that fixture can
+            // only ever produce a one second blend - a correct answer to a different question,
+            // and it left this test measuring the floor rather than the lead. Eight seconds of
+            // instrumental tail is what this one needs to have a length worth measuring.
+            lines: [line(10, 87)],
             profile: makeProfile({ duration: 100, leadOut: 5 }),
         };
         const harness = createHarness();
@@ -444,6 +451,50 @@ describe('automix session', () => {
         expect(harness.session.getActiveDeck()).toBe('B');
     });
 
+    it('stops the tail when the listener picks a third song in the middle of the blend', () => {
+        const harness = createHarness();
+        harness.arm();
+        harness.session.handleActiveDeckPlaying('local:next-song');
+        expect(harness.session.getPhase()).toBe('fading');
+
+        // Two decks are sounding at this point and only one of them - the incoming one - is what
+        // any control on screen is pointing at. Without this the outgoing deck keeps its scheduled
+        // fade running underneath whatever the listener just chose, and nothing can reach it.
+        harness.session.handleSongChanged('local:something-else');
+
+        expect(harness.session.getPhase()).toBe('idle');
+        expect(harness.elements.A.pause).toHaveBeenCalled();
+        expect(finalTarget(harness.chains.B.fadeNode)).toBe(1);
+    });
+
+    it('leaves the blend alone for the two songs the blend is between', () => {
+        const harness = createHarness();
+        harness.arm();
+
+        // The advance the transition started IS a song change, and so is the app still showing the
+        // outgoing track through the lead. Treating either as a skip would mean no blend ever
+        // survives its own arming.
+        harness.session.handleSongChanged('local:next-song');
+        expect(harness.session.getPhase()).toBe('armed');
+        harness.session.handleSongChanged('local:this-song');
+        expect(harness.session.getPhase()).toBe('armed');
+    });
+
+    it('stops the tail when the listener asks for the outgoing track back mid-blend', () => {
+        const harness = createHarness();
+        harness.arm();
+        harness.session.handleActiveDeckPlaying('local:next-song');
+
+        // The one skip that cannot be left alone: the app's source now names the same file the
+        // tail deck is pinned to, so there is nothing distinct left to hand the active deck and it
+        // ends up with an empty source, which surfaces as a playback error on a perfectly good
+        // track. Ending the transition first is what leaves one deck, one source.
+        harness.session.handleSongChanged('local:this-song');
+
+        expect(harness.session.getPhase()).toBe('idle');
+        expect(harness.elements.A.pause).toHaveBeenCalled();
+    });
+
     it('forces a deck playing outside a transition back to unity', () => {
         const harness = createHarness();
         // A blend that was cancelled could have left this deck silent; nothing else would fix it.
@@ -455,7 +506,7 @@ describe('automix session', () => {
     });
 
     it('sets the blend length in beats of the outgoing track rather than in seconds', () => {
-        // 90 BPM: a phrase is 10.67s, where a fixed five seconds would be five.
+        // 90 BPM: eight bars is 21.33s, where a fixed five seconds would be five.
         const harness = createHarness({ A: { bpm: 90 } });
 
         const plan = harness.arm({
@@ -463,8 +514,8 @@ describe('automix session', () => {
             to: { duration: 100, lines: [] },
         });
 
-        expect(plan?.overlap).toBeCloseTo(60 / 90 * 16, 2);
-        expect(plan?.reason).toContain('16 beats');
+        expect(plan?.overlap).toBeCloseTo(60 / 90 * 32, 2);
+        expect(plan?.reason).toContain('32 beats');
     });
 
     it('alternates the decks across consecutive transitions', () => {

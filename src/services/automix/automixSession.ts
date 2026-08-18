@@ -122,6 +122,8 @@ export interface AutomixTransitionRequest {
     to: TransitionTrack;
     /** Playback key of the track the queue will advance to, checked again before the ramp. */
     nextKey: string;
+    /** Playback key of the track the outgoing deck is playing. */
+    fromKey: string;
 }
 
 export const createAutomixSession = (ports: AutomixSessionPorts) => {
@@ -130,6 +132,7 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
     let phase: AutomixPhase = 'idle';
     let plan: TransitionPlan | null = null;
     let plannedNextKey: string | null = null;
+    let plannedFromKey: string | null = null;
     /** Both offline profiles, kept from planning until the blend is actually scheduled. */
     let plannedFrom: TrackProfile | null = null;
     let plannedTo: TrackProfile | null = null;
@@ -332,6 +335,7 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         phase = 'idle';
         plan = null;
         plannedNextKey = null;
+        plannedFromKey = null;
         plannedFrom = null;
         plannedTo = null;
         ports.onTailSrcChange(null);
@@ -382,6 +386,7 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         phase = 'armed';
         plan = nextPlan;
         plannedNextKey = request.nextKey;
+        plannedFromKey = request.fromKey;
         plannedFrom = request.from.profile ?? null;
         plannedTo = request.to.profile ?? null;
 
@@ -645,6 +650,35 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
     };
 
     /**
+     * The app committed to a track this transition is not about - someone skipped, mid-blend.
+     *
+     * A transition owns two decks for as long as it lasts, and only one of them is the one the rest
+     * of the app can see. Pick a different song while the two are overlapping and the active deck
+     * takes the new source, as it should - while the other one plays on with its scheduled fade
+     * still running, because nothing was ever watching for this. The listener hears the track they
+     * chose underneath the tail of a track they skipped away from, and no control on screen points
+     * at the second one.
+     *
+     * `handleActiveDeckPlaying` already refuses a blend whose queue moved, but it can only refuse
+     * once, at the moment the incoming deck starts. This is the same check for the rest of the
+     * blend, which is where a listener actually does the skipping.
+     *
+     * The incoming key always passes - that advance is this transition's own doing. The OUTGOING
+     * key passes only while armed, and the asymmetry is the point: until the advance commits, the
+     * app is still legitimately showing the track that is finishing. Once the incoming deck is
+     * sounding, seeing the outgoing track's key again means a listener asked for it back, and that
+     * one is worse than an ordinary skip - the app's source then matches the source pinned to the
+     * OTHER deck, `resolveDeckSrc` has nothing distinct left to give the active one, and a media
+     * element handed an empty source raises an error the listener sees as a failed track.
+     */
+    const handleSongChanged = (key: string | null): void => {
+        if (phase === 'idle' || key === plannedNextKey) return;
+        if (phase === 'armed' && key === plannedFromKey) return;
+        console.log(`[Automix] transition dropped: the queue moved to "${key}" mid-blend`);
+        settle({ pauseTail: true });
+    };
+
+    /**
      * Any pause, from the UI, a media key or the OS.
      *
      * Returns true when it interrupted an armed transition, which the caller has to act on: the
@@ -665,6 +699,7 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         requestTransition,
         handleActiveDeckPlaying,
         handleTailEnded,
+        handleSongChanged,
         abort,
         dispose: clearTimers,
     };
