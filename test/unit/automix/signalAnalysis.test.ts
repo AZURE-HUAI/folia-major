@@ -97,6 +97,31 @@ describe('estimateTempo', () => {
         expect(estimate!.bpm).toBeCloseTo(80, 5);
     });
 
+    it('locks onto the beat rather than a harmonic of it under a syncopated kick', () => {
+        // 120 BPM played as a tresillo - 3+3+2 sixteenths, which is most of what modern pop is
+        // built on. The kick lands on hops 0/15/30 of every 40, so the envelope is genuinely
+        // periodic at lengths that are not the beat, and the single strongest lag has no reason
+        // to prefer the beat over them.
+        //
+        // Every one of these came back as 96 BPM before the multiples were summed - a clean 5:4
+        // of the truth. That was not a slightly wrong number: 25% out is exactly where `drifting`
+        // begins, so the pair was left unbent AND had its blend cut by the drift scale; and
+        // measured this way over one window and correctly over another, `settledBpm` threw both
+        // readings away and the track ended up with no tempo, no grid and no bar line at all.
+        const groove = (snare: number, hat: number) => Array.from({ length: 1600 }, (_, i) => {
+            let value = 0;
+            const inGroup = i % 40;
+            if (inGroup === 0 || inGroup === 15 || inGroup === 30) value += 10;
+            if (i % 80 === 20 || i % 80 === 60) value += snare;
+            if (i % 10 === 0) value += hat;
+            return value;
+        });
+
+        for (const [snare, hat] of [[0, 0], [2, 0], [5, 0], [8, 0], [0, 2]]) {
+            expect(estimateTempo(groove(snare, hat), HOP)!.bpm).toBeCloseTo(120, 5);
+        }
+    });
+
     it('refuses rather than guessing when there is no pulse to find', () => {
         expect(estimateTempo(new Array(320).fill(1), HOP)).toBeNull();
         expect(estimateTempo(new Array(320).fill(0), HOP)).toBeNull();
@@ -254,6 +279,41 @@ describe('estimateDownbeat', () => {
         expect(found! % (PERIOD * 4)).toBeCloseTo(0, 2);
     });
 
+    /** A kick on every beat. House, disco, most dance pop - and no phase for the low band. */
+    const fourOnTheFloor = (bars: number) => {
+        const envelope = new Array<number>(Math.round(bars * PERIOD * 4 / HOP)).fill(0.02);
+        for (let beat = 0; beat * PERIOD / HOP < envelope.length; beat += 1) {
+            envelope[Math.round(beat * PERIOD / HOP)] = 1;
+        }
+        return envelope;
+    };
+
+    /** A chord change on the one of every bar: what the kick above cannot show. */
+    const chordPerBar = (bars: number) => {
+        const envelope = new Array<number>(Math.round(bars * PERIOD * 4 / HOP)).fill(0.01);
+        for (let bar = 0; bar < bars; bar += 1) envelope[Math.round(bar * 4 * PERIOD / HOP)] = 0.8;
+        return envelope;
+    };
+
+    it('reads the bar off the harmony when a kick on every beat cannot say', () => {
+        // The blind spot that covered most of a real library. With a kick on all four beats the
+        // phases score identically, the contrast guard fires, and null is the correct answer to
+        // the only question being asked - which cost the bar-line snap, the phrase alignment, the
+        // live grid and any entry point other than 0.00s, on precisely the tracks whose grids are
+        // strongest and most worth aligning to.
+        expect(estimateDownbeat(fourOnTheFloor(8), HOP, PERIOD, 0)).toBeNull();
+        expect(estimateDownbeat(fourOnTheFloor(8), HOP, PERIOD, 0, 4, chordPerBar(8)))
+            .toBeCloseTo(0, 6);
+    });
+
+    it('follows the chord changes rather than the phase it was handed', () => {
+        // The grid arrives a beat late and the harmony has to drag it back, exactly as the kick
+        // does above. Getting this backwards puts every transition on that half of the library a
+        // quarter note out for its whole length.
+        const found = estimateDownbeat(fourOnTheFloor(8), HOP, PERIOD, PERIOD, 4, chordPerBar(8));
+        expect(found! % (PERIOD * 4)).toBeCloseTo(0, 2);
+    });
+
     it('declines when the four candidates are indistinguishable', () => {
         // Music with no drums has no bar line to read this way, and saying so is more useful than
         // naming one - a wrong downbeat is worse than an unknown one.
@@ -261,6 +321,75 @@ describe('estimateDownbeat', () => {
         expect(estimateDownbeat(flat, HOP, PERIOD, 0)).toBeNull();
         expect(estimateDownbeat(pattern(8), HOP, 0, 0)).toBeNull();
         expect(estimateDownbeat([], HOP, PERIOD, 0)).toBeNull();
+    });
+});
+
+describe('the beat grid, end to end', () => {
+    // The profiler's real numbers: a 2048-point FFT hopped 512 samples at 44.1kHz. Which makes one
+    // analysis frame 11.6ms, and that number is the whole point of this block.
+    const HOP = 512 / 44100;
+
+    /** Four minutes of a kick on the one and a weaker one on the three, at an arbitrary tempo. */
+    const realTrack = (bpm: number, seconds = 240) => {
+        const periodSec = 60 / bpm;
+        const frames = Math.floor(seconds / HOP);
+        const flux = new Array<number>(frames).fill(0.02);
+        const low = new Array<number>(frames).fill(0.02);
+        for (let beat = 0; beat * periodSec < seconds; beat += 1) {
+            const at = Math.round((beat * periodSec) / HOP);
+            if (at >= frames) break;
+            flux[at] = 1;
+            if (beat % 2 === 0) low[at] = beat % 4 === 0 ? 1 : 0.55;
+        }
+        return { flux, low, periodSec };
+    };
+
+    /**
+     * The failure this block exists for, and it was invisible from either function alone.
+     *
+     * A lag is a whole number of frames because that is how the correlation was sampled, and at
+     * 11.6ms per frame the available tempos near 130 BPM are 123.05, 129.20, 136.00 - five to seven
+     * apart. Every reading in a real log landed on one of those rungs, which looked like a library
+     * of suspiciously similar tracks and was actually a ruler with three marks on it.
+     *
+     * Half a frame of period is about one percent, and one percent is nothing until it is
+     * multiplied by five hundred beats: a grid laid across four minutes arrives five beats away
+     * from the music. Every consumer of a tempo extrapolates - the bar-line snap, the entry
+     * alignment, the phrase grid - so `estimateDownbeat` medians over bars that are no longer on
+     * any drum, all four phases score the same nothing, and it correctly reports that it cannot
+     * see a bar. Twenty-odd tracks in a row logged "no bar line found"; the one synthetic tempo
+     * that happened to be exactly 34 frames long was the only one that ever worked.
+     *
+     * So this asserts the seam, not either end of it: measure a tempo that is deliberately not a
+     * whole number of frames, then ask where the bar line it implies actually lands at the far end
+     * of the track - which is where a handover happens and the only place the answer matters.
+     */
+    it('holds a bar line across a whole track at a tempo between two analysis frames', () => {
+        for (const bpm of [88.4, 96, 110.5, 118, 123, 127.3, 134, 140.2, 165.7]) {
+            const { flux, low, periodSec } = realTrack(bpm);
+            const tempo = estimateTempo(flux, HOP);
+            expect(tempo, `${bpm} BPM`).not.toBeNull();
+
+            // Quarter of a percent. Whole frames alone cannot do better than about one percent
+            // here, and one percent is what costs the grid.
+            expect(Math.abs(tempo!.bpm - bpm) / bpm, `${bpm} BPM measured ${tempo!.bpm}`)
+                .toBeLessThan(0.0025);
+
+            const lastBeat = (flux.length - 1 - tempo!.beatOffsetHops) * HOP;
+            const offset = ((lastBeat % tempo!.periodSec) + tempo!.periodSec) % tempo!.periodSec;
+            const downbeat = estimateDownbeat(low, HOP, tempo!.periodSec, offset, 4);
+            expect(downbeat, `${bpm} BPM found no bar line`).not.toBeNull();
+
+            // Where the grid says a bar starts, against where one actually does, at the end of the
+            // track. A fifth of a beat is 100ms at this tempo - inside the window a handover has to
+            // land in, and two orders of magnitude better than the five beats it used to be out by.
+            const modelledBar = tempo!.periodSec * 4;
+            const near = 230;
+            const modelled = downbeat! + Math.round((near - downbeat!) / modelledBar) * modelledBar;
+            const truth = Math.round(near / (periodSec * 4)) * (periodSec * 4);
+            expect(Math.abs(modelled - truth) / periodSec, `${bpm} BPM grid at ${near}s`)
+                .toBeLessThan(0.2);
+        }
     });
 });
 

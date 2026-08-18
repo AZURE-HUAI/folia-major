@@ -27,6 +27,14 @@ export const MAX_TRIM_DB = 6;
 /** How far the beat grid is allowed to stretch or shorten a planned blend. */
 const BEAT_SNAP_TOLERANCE = 0.25;
 
+/**
+ * How many bars of evidence a bar-line vote is allowed to stand on.
+ *
+ * Long enough for a median to mean something, short enough that the grid has not walked off the
+ * music by the far end of it. See the extrapolation note in `votePhase` for why both halves bind.
+ */
+const DOWNBEAT_WINDOW_BARS = 24;
+
 const clamp = (value: number, low: number, high: number) => Math.min(high, Math.max(low, value));
 
 export const dbToGain = (db: number): number => 10 ** (db / 20);
@@ -79,6 +87,33 @@ export interface TempoEstimate {
 const tempoPrior = (bpm: number) => Math.exp(-0.5 * (Math.log2(bpm / 120) / 0.55) ** 2);
 
 /**
+ * How many multiples of a candidate period have to agree with it before it is believed.
+ *
+ * The prior above handles the octave, and `foldRatio` downstream forgives what is left of it. What
+ * neither touches is the 3:2 and the 4:3, and those are the ones that were actually costing us the
+ * tempo: a tresillo - 3+3+2 sixteenths, which is most of what modern pop is built on - is genuinely
+ * periodic at three quarters of the beat, so the single strongest lag has no reason to prefer the
+ * beat over it. Real logs carried "92 BPM, 123 at the end", which is 4:3 to within a rounding error,
+ * and `settledBpm` then correctly threw BOTH readings away. One window locking onto a subdivision is
+ * why so many tracks ended up with no tempo at all, and with no tempo there is no bend, no grid, no
+ * bar line and no entry alignment - the whole musical layer, lost to one wrong lag.
+ *
+ * What separates them: a true beat period repeats at every multiple of itself, so its 2x, 3x and 4x
+ * lags sit on real peaks too. Three quarters of a beat has exactly one of its first four multiples
+ * on a peak. Summing the multiples is the entire discrimination, and it reuses correlations the
+ * same pass is already computing.
+ */
+const TEMPO_HARMONICS = 4;
+
+/**
+ * How many beats back from the anchor the beat phase is measured over.
+ *
+ * Same bound and same reason as `DOWNBEAT_WINDOW_BARS`, one layer earlier: a phase is only as good
+ * as the grid it was summed along, and that grid is straight while the music is not.
+ */
+const PHASE_BEATS = 96;
+
+/**
  * Tempo and beat phase from an onset-strength envelope.
  *
  * Autocorrelation rather than a comb filter bank: one pass over a few hundred samples, no
@@ -109,19 +144,38 @@ export const estimateTempo = (envelope: readonly number[], hopSec: number): Temp
     }
     if (energy <= 0) return null;
 
-    let bestLag = 0;
-    let bestScore = 0;
-    let scoreSum = 0;
-    let scored = 0;
-
-    for (let lag = minLag; lag <= maxLag; lag += 1) {
+    // Correlated past `maxLag`, because the harmonic test asks about multiples of candidates that
+    // are themselves at the top of the range. Bounded by a third of the envelope as well: a lag
+    // with only a handful of samples left to correlate over is one loud coincidence away from
+    // outscoring everything, and this is the same reasoning as the length guard above.
+    const topLag = Math.min(Math.floor(count / 3), maxLag * TEMPO_HARMONICS);
+    const correlation = new Float64Array(topLag + 1);
+    for (let lag = minLag; lag <= topLag; lag += 1) {
         let sum = 0;
         for (let index = lag; index < count; index += 1) {
             sum += centred[index] * centred[index - lag];
         }
         // Divided by the overlap: a long lag correlates over fewer samples and would otherwise
         // lose to a short one purely by construction.
-        const score = (sum / (count - lag)) * tempoPrior(60 / (lag * hopSec));
+        correlation[lag] = sum / (count - lag);
+    }
+
+    let bestLag = 0;
+    let bestScore = 0;
+    let scoreSum = 0;
+    let scored = 0;
+
+    for (let lag = minLag; lag <= maxLag; lag += 1) {
+        // Weighted 1/k: the candidate itself is the claim, and each further multiple is weaker
+        // evidence for it, because a real performance drifts across a lag four beats long in a way
+        // it does not across one.
+        let sum = 0;
+        for (let harmonic = 1; harmonic <= TEMPO_HARMONICS; harmonic += 1) {
+            const at = lag * harmonic;
+            if (at > topLag) break;
+            sum += correlation[at] / harmonic;
+        }
+        const score = sum * tempoPrior(60 / (lag * hopSec));
         scoreSum += score;
         scored += 1;
         if (score > bestScore) {
@@ -133,13 +187,72 @@ export const estimateTempo = (envelope: readonly number[], hopSec: number): Temp
     const average = scored ? scoreSum / scored : 0;
     if (!bestLag || bestScore <= 0 || average <= 0) return null;
 
+    // The period to a FRACTION of a hop, which is the difference between having a beat grid and
+    // not having one.
+    //
+    // `bestLag` is a whole number of hops because the correlation was sampled at whole hops, and at
+    // 512 samples per hop the rungs of that ladder are 5 to 7 BPM apart around 130. Nothing in a
+    // real library lands on a rung: measured against synthesised click tracks, seven tempos out of
+    // eight came back between 0.3% and 1.1% wrong, and the eighth - the one whose period happened
+    // to be exactly 34 hops - came back exact. That error is invisible in a BPM readout and fatal
+    // one layer down, because every consumer EXTRAPOLATES it. A grid laid from one end of a four
+    // minute track walks off the music by five beats, so `estimateDownbeat` medians over bars that
+    // are no longer on the music and correctly reports that it cannot see a pattern. Handing the
+    // same detector the true period made it answer instantly. It was never the detector.
+    //
+    // Two ways the correlation itself carries more precision than its sampling:
+    //
+    // - The peak has a SHAPE. Three samples across it fix a parabola, and the parabola's vertex is
+    //   where the peak actually is. Standard, and it costs three array reads.
+    // - The peak repeats at every multiple of the period, and the h-th multiple sits h times
+    //   further along the lag axis - so reading it there and dividing by h divides the error by h
+    //   too. The multiples are already computed: the harmonic sum above needed them.
+    //
+    // Taken together the residual is a few hundredths of a hop rather than half of one.
+    const refinePeriod = (lag: number): number => {
+        for (let harmonic = TEMPO_HARMONICS; harmonic >= 1; harmonic -= 1) {
+            const centre = lag * harmonic;
+            if (centre + 1 > topLag) continue;
+            // `lag` is only known to half a hop, so its h-th multiple is only known to h halves of
+            // one. Search that far and no further: peaks sit a whole period apart and `minLag` is
+            // an order of magnitude more than TEMPO_HARMONICS, so this cannot reach the next one.
+            let peak = centre;
+            const from = Math.max(minLag + 1, centre - harmonic);
+            const to = Math.min(topLag - 1, centre + harmonic);
+            for (let at = from; at <= to; at += 1) if (correlation[at] > correlation[peak]) peak = at;
+            if (peak <= minLag || peak >= topLag) continue;
+
+            const before = correlation[peak - 1];
+            const after = correlation[peak + 1];
+            const curve = before - 2 * correlation[peak] + after;
+            // Not concave here means this multiple is sitting on a shoulder rather than a peak, and
+            // a parabola through it points anywhere. Fall to the next multiple down.
+            if (!(curve < 0)) continue;
+            const period = (peak + (before - after) / (2 * curve)) / harmonic;
+            // A refinement that moves further than the sampling error it exists to remove is not a
+            // refinement; it is a different peak. Keep looking.
+            if (Math.abs(period - lag) <= 0.5) return period;
+        }
+        return lag;
+    };
+    const period = refinePeriod(bestLag);
+
     // Which offset within the period the beats actually sit on: sum every sample the grid would
     // land on and keep the alignment that collects the most onset strength.
+    //
+    // Stepped by the refined period, and stopped after a bounded number of beats. Both for the one
+    // reason: this is an extrapolation like every other, and summing all the way back through a
+    // four minute track adds up hundreds of positions that the accumulated error has already walked
+    // off the music. Those contribute the same average nothing to every candidate offset, so the
+    // winner is decided by the near end anyway - but they are noise on the comparison, and the
+    // offset that wins by noise is a beat grid that is out by a fraction of a beat everywhere.
     let beatOffsetHops = 0;
     let bestPhase = -1;
     for (let offset = 0; offset < bestLag; offset += 1) {
         let sum = 0;
-        for (let index = count - 1 - offset; index >= 0; index -= bestLag) {
+        for (let beat = 0; beat < PHASE_BEATS; beat += 1) {
+            const index = Math.round(count - 1 - offset - beat * period);
+            if (index < 0) break;
             sum += centred[index];
         }
         if (sum > bestPhase) {
@@ -149,8 +262,8 @@ export const estimateTempo = (envelope: readonly number[], hopSec: number): Temp
     }
 
     return {
-        bpm: 60 / (bestLag * hopSec),
-        periodSec: bestLag * hopSec,
+        bpm: 60 / (period * hopSec),
+        periodSec: period * hopSec,
         confidence: clamp((bestScore / average - 1) / 2, 0, 1),
         beatOffsetHops,
     };
@@ -522,48 +635,53 @@ export const kWeight = (samples: Float32Array, sampleRate: number): Float32Array
 /** How many beats a bar is taken to be. Everything this player is likely to meet is in four. */
 export const BEATS_PER_BAR = 4;
 
+/** Which of a bar's phases one kind of evidence votes for, and how hard. */
+interface PhaseVote {
+    phase: number;
+    /** The winner over the average of all phases. 1 is four phases that cannot be told apart. */
+    contrast: number;
+}
+
 /**
- * Which beat of the bar is the "one", from where the kick drum falls.
+ * Which phase of the bar an evidence envelope puts its weight on.
  *
- * A beat grid says when the pulses are; it does not say which of them a bar starts on, and that is
- * the difference between a transition that lands and one that is a quarter note out for its whole
- * length. The evidence is in the bottom of the spectrum: on essentially all of the music this plays,
- * the bass drum marks the downbeat and the snare marks the backbeat, so summing low-band onset
- * strength at each of the four candidate phases and keeping the strongest is the whole method.
- *
- * A trained classifier does this better. This does not have to be better, it has to beat picking a
- * phase at random, which is what the alternative is.
- *
- * Returns seconds from the start of the envelope to a downbeat, or null when there is no grid or the
- * four phases are indistinguishable - a track with no drums has no downbeat to find this way, and
- * saying so is more useful than naming one.
+ * Shared by the two kinds of evidence below, because the question and the guards are identical for
+ * both and only the array differs. Returns null when the phases are indistinguishable, which is
+ * what "this envelope has no opinion" must look like for the caller to prefer the other one.
  */
-export const estimateDownbeat = (
-    lowEnvelope: readonly number[],
+const votePhase = (
+    envelope: readonly number[],
     hopSec: number,
     periodSec: number,
-    /** Seconds from the start of the envelope to any beat of the grid. */
     beatOffsetSec: number,
-    beatsPerBar = BEATS_PER_BAR,
-): number | null => {
-    if (!(hopSec > 0) || !(periodSec > 0) || lowEnvelope.length < beatsPerBar * 4) return null;
-
-    // The strongest frame within one hop either side, not the frame the arithmetic lands on. A kick
-    // is one or two frames wide at this hop, and the grid is an estimate: sampling a single index
-    // means a grid half a frame out reads the shoulder of every hit instead of the hit.
+    beatsPerBar: number,
+): PhaseVote | null => {
+    // The strongest frame within an eighth of a beat, not the frame the arithmetic lands on.
+    //
+    // Two errors to absorb and they are different sizes. A kick is one or two frames wide, so a
+    // grid half a frame out already reads the shoulder of every hit instead of the hit. On top of
+    // that the grid is an extrapolation from a period known to about a thousandth, so bars further
+    // from the anchor land progressively further off - a few frames by the far end of the window.
+    // One frame either side covers the first and not the second, and a phase that reads the gap
+    // beside its own hits scores like a phase that has none.
+    //
+    // An eighth of a beat is the widest this can be without answering a different question: the
+    // four candidate phases sit a WHOLE beat apart, so a window of a quarter beat around each can
+    // never reach the next one's hits, and the vote still measures what it says it measures.
+    const radius = Math.max(1, Math.round(periodSec / hopSec / 8));
     const at = (seconds: number) => {
         const centre = Math.round(seconds / hopSec);
-        if (centre < 0 || centre >= lowEnvelope.length) return null;
-        let peak = lowEnvelope[centre];
-        for (const index of [centre - 1, centre + 1]) {
-            if (index >= 0 && index < lowEnvelope.length && lowEnvelope[index] > peak) {
-                peak = lowEnvelope[index];
+        if (centre < 0 || centre >= envelope.length) return null;
+        let peak = envelope[centre];
+        for (let index = centre - radius; index <= centre + radius; index += 1) {
+            if (index >= 0 && index < envelope.length && envelope[index] > peak) {
+                peak = envelope[index];
             }
         }
         return peak;
     };
 
-    // The TYPICAL onset strength on each candidate phase, not the average one.
+    // The TYPICAL strength on each candidate phase, not the average one.
     //
     // A median rather than a mean, and that is the whole robustness of this. A downbeat is a thing
     // that happens every bar; an average is moved by one event, so a single loud moment anywhere in
@@ -576,12 +694,27 @@ export const estimateDownbeat = (
         return values[values.length >> 1];
     };
     const scores: number[] = [];
-    const span = lowEnvelope.length * hopSec;
+    const span = envelope.length * hopSec;
     const barSec = periodSec * beatsPerBar;
     for (let phase = 0; phase < beatsPerBar; phase += 1) {
         const hits: number[] = [];
-        for (let bar = 0; beatOffsetSec + phase * periodSec + bar * barSec <= span; bar += 1) {
-            const value = at(beatOffsetSec + phase * periodSec + bar * barSec);
+        const first = beatOffsetSec + phase * periodSec;
+        // Only the last stretch of bars, because a grid is a straight line and music is not.
+        //
+        // One period times a bar number is an EXTRAPOLATION, and it is only as good as the period
+        // it multiplies. The period is measured to about a thousandth; four minutes is five hundred
+        // beats; a thousandth of five hundred beats is half a beat. `at` forgives one frame - a
+        // fiftieth of a beat - so past a couple of dozen bars from the anchor the arithmetic is
+        // landing between the hits, on every phase equally, and four equal medians is exactly what
+        // "no bar line" is made of. Synthesised click tracks: unbounded, five tempos out of eight
+        // found nothing; bounded, eight out of eight.
+        //
+        // Counted back from the end of what it was handed, because that is where the phase is
+        // anchored - `estimateTempo` reports the most recent beat, not the first. Which end of a
+        // track the window covers is the caller's to decide, by choosing what to pass in.
+        const bars = Math.floor((span - first) / barSec) + 1;
+        for (let bar = Math.max(0, bars - DOWNBEAT_WINDOW_BARS); bar < bars; bar += 1) {
+            const value = at(first + bar * barSec);
             if (value !== null) hits.push(value);
         }
         scores.push(middle(hits));
@@ -593,17 +726,75 @@ export const estimateDownbeat = (
 
     // Two guards, ruling out two different kinds of nothing.
     //
-    // Contrast: four phases that carry the same amount of onset are a track with no drums, or one
-    // whose kick is on every beat, and picking the largest of four equal numbers is picking noise.
+    // Contrast: phases carrying the same amount of evidence cannot be told apart, and picking the
+    // largest of four equal numbers is picking noise.
     //
     // Height: the winning phase has to stand above the envelope's own floor. Contrast alone passes
     // on a signal with no onsets at all, because the ratio between four tiny numbers is still a
     // ratio.
     let floor = 0;
-    for (const value of lowEnvelope) floor += value;
-    floor /= lowEnvelope.length;
+    for (const value of envelope) floor += value;
+    floor /= envelope.length;
     if (!(mean > 0) || scores[best] < mean * 1.25 || scores[best] < floor * 1.5) return null;
 
-    return ((beatOffsetSec + best * periodSec) % (periodSec * beatsPerBar) + periodSec * beatsPerBar)
-        % (periodSec * beatsPerBar);
+    return { phase: best, contrast: scores[best] / mean };
+};
+
+/**
+ * Which beat of the bar is the "one".
+ *
+ * A beat grid says when the pulses are; it does not say which of them a bar starts on, and that is
+ * the difference between a transition that lands and one that is a quarter note out for its whole
+ * length. A null here is not one missing feature but four: no bar-line snap for the handover, no
+ * phrase alignment, no bar grid for the live tap, and an incoming track that can only ever be
+ * entered at 0.00s. The cost of answering "I do not know" is much higher than it looks from here.
+ *
+ * TWO kinds of evidence, because the first one has a blind spot that covers most of a real library.
+ *
+ * The kick drum is the obvious one, and it was here alone: the bass drum marks the downbeat and the
+ * snare marks the backbeat, so the bottom of the spectrum votes. But on four-on-the-floor - house,
+ * disco, most dance pop, a lot of anything with a mastered bottom end - there is a kick on EVERY
+ * beat. All four phases then score the same, the contrast guard fires, and the answer is null.
+ * Correct on that evidence and useless in effect: the tracks it fails on are precisely the ones
+ * whose grids are strongest and most worth aligning to.
+ *
+ * Harmony is the second, and it sees exactly where the first is blind. Chords change on bar lines,
+ * and they do not change with the kick pattern - so a four-on-the-floor track with a chord per bar
+ * answers clearly on evidence the low band cannot carry. What it reads is per-frame chroma flux,
+ * taken from a spectrum the profiler was computing anyway.
+ *
+ * Whichever votes with more contrast wins. Deliberately not an average of the two: they disagree by
+ * whole beats when they disagree at all, and the mean of two phases is a third phase that neither
+ * of them proposed.
+ *
+ * A trained classifier does this better. This does not have to be better, it has to beat picking a
+ * phase at random, which is what the alternative is.
+ *
+ * Returns seconds from the start of the envelope to a downbeat, or null when neither kind of
+ * evidence can tell the phases apart.
+ */
+export const estimateDownbeat = (
+    lowEnvelope: readonly number[],
+    hopSec: number,
+    periodSec: number,
+    /** Seconds from the start of the envelope to any beat of the grid. */
+    beatOffsetSec: number,
+    beatsPerBar = BEATS_PER_BAR,
+    /** Per-frame harmonic change, on the same time base as `lowEnvelope`. */
+    harmonicEnvelope?: readonly number[],
+): number | null => {
+    if (!(hopSec > 0) || !(periodSec > 0) || lowEnvelope.length < beatsPerBar * 4) return null;
+
+    const kick = votePhase(lowEnvelope, hopSec, periodSec, beatOffsetSec, beatsPerBar);
+    const harmony = harmonicEnvelope && harmonicEnvelope.length >= beatsPerBar * 4
+        ? votePhase(harmonicEnvelope, hopSec, periodSec, beatOffsetSec, beatsPerBar)
+        : null;
+
+    const winner = kick === null ? harmony
+        : harmony === null ? kick
+            : harmony.contrast > kick.contrast ? harmony : kick;
+    if (winner === null) return null;
+
+    const barSec = periodSec * beatsPerBar;
+    return ((beatOffsetSec + winner.phase * periodSec) % barSec + barSec) % barSec;
 };
