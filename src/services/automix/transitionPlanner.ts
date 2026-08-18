@@ -122,13 +122,14 @@ export const AUTOMIX_DEFAULT_OVERLAP_SEC = 5;
 const AUTOMIX_DEFAULT_OVERLAP_BEATS = BEATS_PER_PHRASE * 2;
 
 /**
- * How far a handover may be moved to land on a bar line of the outgoing track.
+ * How far a handover may be moved to land on a line of the outgoing track's grid.
  *
- * One beat. Enough to reach a bar line from anywhere inside the beat it is already in, and not
- * enough to become a different handover: past this the transition is no longer where the evidence
- * put it, it is where the grid put it.
+ * One beat. Enough to reach a beat from anywhere, and not enough to become a different handover:
+ * past this the transition is no longer where the evidence put it, it is where the grid put it.
+ * It used to have to cover the reach to a BAR line, which is up to two beats away and so was often
+ * out of range - and a snap that did not happen looks exactly like one that was not needed.
  */
-const BAR_SNAP_BEATS = 1;
+const GRID_SNAP_BEATS = 1;
 /**
  * How far a handover may be moved to land on a structural boundary instead.
  *
@@ -194,6 +195,35 @@ const ENTRY_MARGIN_SEC = 0.1;
 /** Seconds from a moment to the next line of a grid. */
 const barPhase = (grid: Grid, seconds: number) =>
     ((grid.offset - seconds) % grid.period + grid.period) % grid.period;
+
+/**
+ * The grid a transition is aligned on. The BEAT grid - deliberately not the bar grid.
+ *
+ * A bar grid is the beat grid with three lines in four thrown away, and which three is decided by
+ * `estimateDownbeat`, a vote between four candidates one beat apart. Measured against Beat This!
+ * over thirty tracks from a real library, that vote answers on 12 and is right about half of those.
+ * Picking the nearest line of a grid thinned by a coin flip cannot beat picking the nearest line of
+ * the whole grid: it can only add the coin's error, and it makes the walk four times longer.
+ *
+ * Simulated over the 58 tempo-matched pairs those thirty tracks make, at 44100 - the rate the app
+ * decodes at - measuring how far the incoming track enters from one of its OWN real beats:
+ *
+ *     bar line, else no alignment (what this did)   0.255 beats   15 of 58 inside an eighth
+ *     the beat grid, both sides                     0.118         30 of 58
+ *     no alignment at all                           0.250          -        <- chance
+ *
+ * The first row is chance, so the feature had never worked - and it was not free: reaching a bar
+ * line walks the entry forward by up to a whole bar, deleting up to 2.14s of the incoming track's
+ * opening to buy nothing. On the beat grid the same walk is at most 0.54s.
+ *
+ * Everything above was first measured at 22050, the rate the beat tracker is fed, and came out
+ * differently enough to have justified a different change. Analysis has to be graded at the rate it
+ * will actually run at.
+ */
+const entryGrid = (
+    bpm: number | null | undefined,
+    beatOffset: number | null | undefined,
+) => barGrid(bpm, beatOffset, 1);
 
 /** The closest of a set of moments, if one is close enough and lands somewhere usable. */
 const nearestWithin = (
@@ -485,28 +515,38 @@ export const planTransition = (
     // A structural boundary first, because it is the stronger claim: a bar line says the count
     // restarts, a section edge says the music does.
     const boundary = nearestWithin(from.profile?.sections, anchor, SECTION_SNAP_SEC, withinRange);
-    const grid = barGrid(bpm, from.profile?.downbeatOffset);
-    const snapped = snapToGrid(boundary ?? anchor, grid, beat === null ? 0 : beat * BAR_SNAP_BEATS);
+    const grid = entryGrid(bpm, from.profile?.beatOffset);
+    const snapped = snapToGrid(boundary ?? anchor, grid, beat === null ? 0 : beat * GRID_SNAP_BEATS);
     const outStart = withinRange(snapped) ? snapped : boundary ?? anchor;
     const placed = boundary !== null
         ? ', on a section edge'
-        : Math.abs(outStart - anchor) > 0.01 ? ', on a bar line' : '';
+        : Math.abs(outStart - anchor) > 0.01 ? ', on a beat' : '';
 
     // Where the incoming track is started from. Two separate reasons to move it off zero, and they
     // compose: its own leading silence is not music and should not be faded through, and once that
-    // is skipped the entry can be walked forward to whichever of its bar lines lands on one of the
+    // is skipped the entry can be walked forward to whichever of its beats lands on one of the
     // outgoing track's. That second half is the part a gain curve can never stand in for - two
-    // tracks whose bars are a quarter note apart stay a quarter note apart however the levels move.
+    // tracks a third of a beat apart stay a third of a beat apart however the levels move.
     const entryFloor = Math.min(
         MAX_TRIMMED_TAIL_SEC,
         Math.max(0, (to.profile?.leadIn ?? 0) - ENTRY_MARGIN_SEC),
     );
     const inStart = alignEntry(
         entryFloor,
-        // The head-anchored bar line by preference. Both describe the same grid; they differ in
-        // which end of the track their phase was measured at, and this walk starts in the first
-        // bars - where the whole-track one is at the far end of its extrapolation.
-        barGrid(to.profile?.bpm, to.profile?.headDownbeatOffset ?? to.profile?.downbeatOffset),
+        // The SAME phase estimator as the outgoing side above, and that is the whole point.
+        //
+        // A head-measured phase is a better description of the incoming track's first thirty
+        // seconds - graded against Beat This! it is 18 of 28 inside an eighth of a beat against
+        // 13 of 30 for the whole-track one extrapolated there. Substituting it here makes the
+        // ENTRY worse, 0.246 against 0.118, and that is not a contradiction: `alignEntry` returns
+        // a DIFFERENCE between two grids, and a difference is blind to any bias the two share.
+        // Two estimates made the same way carry the same bias and it cancels; mixing in a better
+        // one on a single side breaks the cancellation and leaves its bias behind, uncancelled.
+        //
+        // Same shape as the balance correction, which measured the incoming track with one kind of
+        // loudness and the outgoing track with another. Both sides of a comparison have to be the
+        // same measurement before either side is allowed to be a good one.
+        entryGrid(to.profile?.bpm, to.profile?.beatOffset),
         // In WALL seconds, not the outgoing track's own: if it is being bent to meet the incoming
         // tempo, its bars arrive that much sooner than its media clock says they will.
         grid === null ? null : barPhase(grid, outStart) / choice.tempo.stretch,

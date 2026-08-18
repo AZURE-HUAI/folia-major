@@ -31,6 +31,34 @@ const track = (duration: number, lines: Line[] | null, intro?: number | null): T
 });
 
 describe('planTransition', () => {
+    it('aligns the entry on the beat grid, not on a bar line it cannot find', () => {
+        // Both tracks are 120, so their beats coincide only if the entry is placed on one. The
+        // profile has no downbeat at all, which is a third of a real library - and used to mean no
+        // alignment whatsoever, leaving the incoming track at a random fraction of a beat.
+        const grid = { bpm: 120, beatOffset: 0, downbeatOffset: null, headDownbeatOffset: null };
+        const plan = planTransition(
+            { duration: 100, lines: [line(10, 94)], profile: makeProfile(grid) },
+            // 1.3s of leading silence, so the entry floor is 1.2 - deliberately not on a beat of a
+            // 0.5s grid, which is what makes this test able to fail.
+            {
+                duration: 100,
+                lines: null,
+                profile: makeProfile({ ...grid, leadIn: 1.3, sectionStart: 4 }),
+            },
+            120,
+        );
+        expect(plan.kind).toBe('fade');
+        // Locked means the two media clocks differ by a whole number of beats, which is exactly the
+        // condition for every beat of one to land on a beat of the other.
+        const apart = Math.abs(plan.inStart - plan.outStart) % 0.5;
+        expect(Math.min(apart, 0.5 - apart)).toBeLessThan(0.011);
+        // And on the BEAT grid, so the walk is at most one beat. On the bar grid it was up to four,
+        // deleting up to 1.84s of the incoming track's opening to reach a line chosen by a vote
+        // that measures at chance.
+        expect(plan.inStart).toBeGreaterThanOrEqual(1.2);
+        expect(plan.inStart).toBeLessThan(1.2 + 0.5);
+    });
+
     it('lets the next track sing over an outro that has stopped singing', () => {
         // The two windows are proxies for ONE requirement - never two vocal lines at once - and
         // holding both as ceilings asked for a different, stricter thing: no voice inside the blend
