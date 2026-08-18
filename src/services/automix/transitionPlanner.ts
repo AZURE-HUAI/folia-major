@@ -372,6 +372,20 @@ export const planTransition = (
     );
     const tailRoom = roomBefore(tail);
     const introRoom = roomBefore(intro);
+    // The two windows are proxies for ONE requirement, and `anchor` states it below: two vocal
+    // lines stacked on each other is the thing that makes an overlap sound wrong. Holding both as
+    // ceilings asks for something stricter and different - no voice AT ALL inside the blend.
+    //
+    // When `tailRoom` binds, the overlap fits inside the outgoing track's instrumental outro, so
+    // that side is silent for the blend's whole length by construction. An incoming vocal arriving
+    // over a departing instrumental is then a single voice, and a single voice is not a collision -
+    // it is the move. So the incoming window only has to bind when the outgoing side cannot vouch
+    // for itself: never measured, or singing to within a second of its own end.
+    //
+    // What it cost while both bound: a wanted 11.88s blend came out at 2.04s on a pair whose
+    // outgoing track had a 34.42s instrumental outro, because the incoming one's first section
+    // began 2.92s in. Half a minute of nobody singing, and the blend was refused all of it.
+    const introBinds = !Number.isFinite(tailRoom);
 
     // One phrase of the outgoing track, then scaled by everything that was measured about the pair:
     // longer when the keys sit together, when the tempos are locked, when the tail wants riding, or
@@ -393,7 +407,7 @@ export const planTransition = (
         // Quarter-length cap so a very short track is not half crossfade.
         end / 4,
         tailRoom,
-        introRoom,
+        introBinds ? introRoom : Infinity,
         // Only ever binds when the planning itself was late - see `left`.
         left,
     );
@@ -516,6 +530,12 @@ export const planTransition = (
         : choice.tempo.relation === 'drifting' ? `, tempos ${apart}% apart, left to drift`
             : choice.tempo.relation === 'far' ? `, tempos ${apart}% apart, too far to overlap` : '';
     const entry = inStart > 0.05 ? `, entering the next track at ${round(inStart)}s` : '';
+    // The one place a blend is allowed past a measured window, so it says so. A listener who hears
+    // the next vocal arrive while the last track is still audible should be able to find out from
+    // the log whether that was intended, and this is the line that answers it.
+    const sungOver = !introBinds && intro !== null && inStart + overlap > intro
+        ? ', the next track sings over the outgoing instrumental'
+        : '';
 
     return {
         kind: 'fade',
@@ -533,7 +553,7 @@ export const planTransition = (
         // only - so the log said how long a blend was and never why that length. The scales live in
         // the choice, so without it a 1.95s blend and a 5.85s one read as the same decision.
         reason: `${choice.style} ${round(overlap)}s ${length} - ${choice.reason}`
-            + ` (${window}${key}${outgoingTail}${silence}${fadeOut}${placed}${bend}${entry})`,
+            + ` (${window}${sungOver}${key}${outgoingTail}${silence}${fadeOut}${placed}${bend}${entry})`,
     };
 };
 

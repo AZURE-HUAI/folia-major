@@ -31,13 +31,51 @@ const track = (duration: number, lines: Line[] | null, intro?: number | null): T
 });
 
 describe('planTransition', () => {
-    it('overlaps only the vocal-free outro and intro', () => {
-        // outro = 100 - 94 = 6s, intro = 4s -> the smaller one bounds the blend
+    it('lets the next track sing over an outro that has stopped singing', () => {
+        // The two windows are proxies for ONE requirement - never two vocal lines at once - and
+        // holding both as ceilings asked for a different, stricter thing: no voice inside the blend
+        // at all. Once the overlap fits in the outgoing instrumental outro that side is silent for
+        // its whole length, and a lone incoming vocal over a departing instrumental is the move,
+        // not a collision.
+        //
+        // outro = 100 - 94 = 6s, intro = 4s. The outro alone bounds it; the 4s intro does not.
         const plan = planTransition(track(100, [line(10, 94)]), track(100, null, 4));
         expect(plan.kind).toBe('fade');
-        expect(plan.overlap).toBe(4);
-        expect(plan.outStart).toBe(96);
+        expect(plan.overlap).toBeGreaterThan(4);
+        expect(plan.overlap).toBeLessThanOrEqual(6);
         expect(plan.inStart).toBe(0);
+        // And it is not silent about having done so.
+        expect(plan.reason).toContain('sings over the outgoing instrumental');
+    });
+
+    it('still holds the blend inside the intro when the outro cannot vouch for itself', () => {
+        // The release above is earned by `tailRoom` binding. Without it there is nothing saying the
+        // outgoing track has stopped singing, so the incoming window is the only thing standing
+        // between the plan and two stacked vocals - and it has to keep binding.
+        //
+        // No lyrics for the outgoing track: the ordinary state of an instrumental, and of the log
+        // line that reads `no lyrics for the outgoing track`.
+        const blind = planTransition(track(100, null), track(100, null, 4));
+        expect(blind.overlap).toBeLessThanOrEqual(4);
+        expect(blind.reason).not.toContain('sings over the outgoing instrumental');
+
+        // Singing to within a second of the end: measured, and measured as no room at all.
+        const toTheEnd = planTransition(track(100, [line(10, 99.5)]), track(100, null, 4));
+        expect(toTheEnd.overlap).toBeLessThanOrEqual(4);
+    });
+
+    it('gives a long instrumental outro to the blend instead of to the intro', () => {
+        // The case as heard. A 34.42s instrumental outro into a track whose first section began
+        // 2.92s in: the pair wanted 11.88s and the log said `capped by what the pair has room for
+        // (2.92s)`, so the blend came out at 2.04s. Half a minute of nobody singing, and the blend
+        // was refused all of it.
+        const plan = planTransition(
+            { duration: 200, lines: [line(10, 160)], profile: makeProfile({ duration: 200 }) },
+            track(200, null, 2.92),
+            120,
+        );
+        expect(plan.kind).toBe('fade');
+        expect(plan.overlap).toBeGreaterThan(8);
     });
 
     it('never starts the blend before the outgoing track has stopped singing', () => {
@@ -293,10 +331,13 @@ describe('a blend aims at where the music stops', () => {
         // and the fade then plays out underneath the incoming one.
         const from: TransitionTrack = {
             duration: 100,
-            // Sung to 80s against a six second window, so the blend is short enough for the top of
-            // the decay to be EARLIER than where it would otherwise start. That is the only case
-            // the ride exists for: a long blend already begins in front of the decay.
-            lines: [line(10, 80)],
+            // No lyrics, which is what makes this a test of the decay and nothing else: `anchor`
+            // reads `min(latest, max(body, lastSung, at))`, so a sung line in here would be a
+            // second thing setting the floor and the assertion could no longer say which one did.
+            // It also keeps the blend short - an unmeasured outro is what the incoming window is
+            // still allowed to bound - and a short blend is the only case the ride exists for. A
+            // long one already begins in front of the decay, which is the same goal by other means.
+            lines: null,
             profile: makeProfile({ duration: 100, leadOut: 1, bodyOut: 8 }),
         };
         const plan = planTransition(from, track(100, null, 6), 120);
@@ -320,8 +361,11 @@ describe('a blend aims at where the music stops', () => {
         // A two-minute ambient outro is not how the song ends, it is the song. Riding all of it
         // would start the next track while this one still had a third of itself to play.
         const from: TransitionTrack = {
+            // No lyrics, so the clamp is the only thing holding the anchor up. With a sung line at
+            // 150s the vocal floor was doing that work and this assertion passed whether the clamp
+            // fired or not - it could never have reached the eighty its own comment names.
             duration: 200,
-            lines: [line(10, 150)],
+            lines: null,
             profile: makeProfile({ duration: 200, leadOut: 0, bodyOut: 120 }),
         };
         // Ten seconds back from the end, which is where the clamp puts it - not eighty, which is
