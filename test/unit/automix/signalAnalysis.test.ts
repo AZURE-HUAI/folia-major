@@ -258,6 +258,20 @@ describe('estimateDownbeat', () => {
     // of the music this plays, and the reason the bottom of the spectrum is where the bar is.
     const HOP = 0.01;
     const PERIOD = 0.5;
+
+    /**
+     * The answer, having first insisted there is one.
+     *
+     * `null - 0` is 0 in JavaScript and so is `null % 2`, which means `toBeCloseTo(0)` - on the
+     * answer or on a remainder of it - is PASSED by a null. That is the single answer every test
+     * in this block exists to rule out, and four of them were asserting nothing whatsoever. It is
+     * also why a green suite had nothing at all to say while six of the nine tracks in a listening
+     * log came back with no bar line.
+     */
+    const answered = (value: number | null): number => {
+        expect(value).not.toBeNull();
+        return value as number;
+    };
     const pattern = (bars: number, strong = 1, mid = 0.4) => {
         const envelope = new Array<number>(Math.round(bars * PERIOD * 4 / HOP)).fill(0.02);
         for (let bar = 0; bar < bars; bar += 1) {
@@ -269,14 +283,14 @@ describe('estimateDownbeat', () => {
     };
 
     it('picks the beat the kick drum is on out of the four candidates', () => {
-        expect(estimateDownbeat(pattern(8), HOP, PERIOD, 0)).toBeCloseTo(0, 6);
+        expect(answered(estimateDownbeat(pattern(8), HOP, PERIOD, 0))).toBeCloseTo(0, 6);
     });
 
     it('follows the pattern rather than the grid when the two disagree', () => {
         // Offset the grid by one beat: the answer has to move with the drum, not with the phase it
         // was handed. Getting this backwards puts every transition a quarter note out.
-        const found = estimateDownbeat(pattern(8), HOP, PERIOD, PERIOD);
-        expect(found! % (PERIOD * 4)).toBeCloseTo(0, 2);
+        const found = answered(estimateDownbeat(pattern(8), HOP, PERIOD, PERIOD));
+        expect(found % (PERIOD * 4)).toBeCloseTo(0, 2);
     });
 
     /** A kick on every beat. House, disco, most dance pop - and no phase for the low band. */
@@ -302,7 +316,7 @@ describe('estimateDownbeat', () => {
         // live grid and any entry point other than 0.00s, on precisely the tracks whose grids are
         // strongest and most worth aligning to.
         expect(estimateDownbeat(fourOnTheFloor(8), HOP, PERIOD, 0)).toBeNull();
-        expect(estimateDownbeat(fourOnTheFloor(8), HOP, PERIOD, 0, 4, chordPerBar(8)))
+        expect(answered(estimateDownbeat(fourOnTheFloor(8), HOP, PERIOD, 0, 4, chordPerBar(8))))
             .toBeCloseTo(0, 6);
     });
 
@@ -310,8 +324,45 @@ describe('estimateDownbeat', () => {
         // The grid arrives a beat late and the harmony has to drag it back, exactly as the kick
         // does above. Getting this backwards puts every transition on that half of the library a
         // quarter note out for its whole length.
-        const found = estimateDownbeat(fourOnTheFloor(8), HOP, PERIOD, PERIOD, 4, chordPerBar(8));
-        expect(found! % (PERIOD * 4)).toBeCloseTo(0, 2);
+        const found = answered(estimateDownbeat(fourOnTheFloor(8), HOP, PERIOD, PERIOD, 4, chordPerBar(8)));
+        expect(found % (PERIOD * 4)).toBeCloseTo(0, 2);
+    });
+
+    /**
+     * Loud for most of its length, then a fade-out: the shape of very nearly every track in a real
+     * library - every single one the profiler analysed across two listening logs printed
+     * `decays out` - and the shape six of nine of them answered `no bar line found` on.
+     *
+     * The realism the helpers above are missing is that the noise floor MOVES WITH THE SECTION. A
+     * chorus is not a kick on silence, it is a kick on top of everything else that is playing, and
+     * spectral flux reads all of it. That is what makes a whole-track mean the wrong number to hold
+     * an outro up against.
+     */
+    const decaysOut = (loudBars: number, outroBars: number) => {
+        const bars = loudBars + outroBars;
+        const frames = Math.round(bars * PERIOD * 4 / HOP);
+        const envelope = new Array<number>(frames).fill(0);
+        for (let bar = 0; bar < bars; bar += 1) {
+            // Full level through the body, then down to a tenth of it across the outro.
+            const level = bar < loudBars ? 1 : 1 - 0.9 * ((bar - loudBars + 1) / outroBars);
+            const from = Math.round(bar * 4 * PERIOD / HOP);
+            for (let index = from; index < from + Math.round(4 * PERIOD / HOP) && index < frames; index += 1) {
+                envelope[index] = 0.5 * level;
+            }
+            const at = (beat: number) => Math.round((bar * 4 + beat) * PERIOD / HOP);
+            envelope[at(0)] = level;
+            envelope[at(2)] = 0.7 * level;
+        }
+        return envelope;
+    };
+
+    it('reads the bar off a fade-out without holding it up against the choruses', () => {
+        // The vote is taken over the LAST two dozen bars, because a beat grid extrapolated from the
+        // end of a track is only straight near the end. So the floor it is checked against has to
+        // come from those same bars. Measured over the whole file instead, the number being cleared
+        // is an average of music this stretch is not - on anything that fades out, a louder one -
+        // and the kick that is plainly there gets rejected for not being as loud as the chorus.
+        expect(answered(estimateDownbeat(decaysOut(36, 24), HOP, PERIOD, 0))).toBeCloseTo(0, 2);
     });
 
     it('declines when the four candidates are indistinguishable', () => {

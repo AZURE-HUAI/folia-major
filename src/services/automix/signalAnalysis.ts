@@ -732,9 +732,25 @@ const votePhase = (
     // Height: the winning phase has to stand above the envelope's own floor. Contrast alone passes
     // on a signal with no onsets at all, because the ratio between four tiny numbers is still a
     // ratio.
+    //
+    // That floor is measured over the same bars the scores were, and it has to be. The vote above
+    // only looks at the last two dozen, for the extrapolation reason; a mean over the whole file
+    // then puts a different piece of music on the other side of the inequality - and on anything
+    // that fades out, which is very nearly every track there is, a LOUDER one. The choruses are
+    // inside that mean and the outro being measured is not, so the kick that is plainly there gets
+    // rejected for not being as loud as the chorus was. Six of the nine tracks in one listening log
+    // answered `no bar line found` this way, every one of them profiled `decays out`, several at a
+    // rock-steady tempo - and it is a near miss rather than a rout, which is why the next log went
+    // three for three: on the synthetic fade-out in the tests the winner clears the window's own
+    // floor comfortably and lands about 20% under the whole file's. Costing, each time it does not
+    // clear it, all four of the things named below.
+    const windowStart = Math.min(
+        envelope.length - 1,
+        Math.max(0, Math.round((span - DOWNBEAT_WINDOW_BARS * barSec) / hopSec)),
+    );
     let floor = 0;
-    for (const value of envelope) floor += value;
-    floor /= envelope.length;
+    for (let index = windowStart; index < envelope.length; index += 1) floor += envelope[index];
+    floor /= envelope.length - windowStart;
     if (!(mean > 0) || scores[best] < mean * 1.25 || scores[best] < floor * 1.5) return null;
 
     return { phase: best, contrast: scores[best] / mean };
