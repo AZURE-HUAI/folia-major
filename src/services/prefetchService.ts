@@ -94,8 +94,17 @@ export const getPrefetchedData = (song: SongResult, requiredQuality?: AudioQuali
         cached.audioUrl = toSafePlaybackUrl(cached.audioUrl) ?? null;
     }
 
+    // 'CACHED_IN_DB' is not a URL. It says the bytes are already in the media cache, so it has no
+    // expiry to run out and no quality to match against - `audioUrlQuality` stays null for one.
+    // Both checks below fired on it anyway (null never equals the required quality), and each one
+    // ANSWERED by nulling the sentinel. So the first read of a media-cached track threw away the
+    // fact that it was cached, and the next prefetch pass rediscovered it from scratch - which is
+    // the "Starting prefetch for X" / "Audio already cached for X" pair repeating for the same
+    // song every time the queue moves.
+    const hasUrl = Boolean(cached.audioUrl) && cached.audioUrl !== 'CACHED_IN_DB';
+
     // Check if URL is expired
-    if (cached.audioUrl && !isUrlValid(cached.audioUrlFetchedAt)) {
+    if (hasUrl && !isUrlValid(cached.audioUrlFetchedAt)) {
         console.log(`[Prefetch] URL expired for song ${songId}, will refetch`);
         cached.audioUrl = null;
         cached.audioUrlQuality = null;
@@ -103,7 +112,7 @@ export const getPrefetchedData = (song: SongResult, requiredQuality?: AudioQuali
     }
 
     // Check if quality matches (if requiredQuality is specified)
-    if (cached.audioUrl && requiredQuality && cached.audioUrlQuality !== requiredQuality) {
+    if (hasUrl && requiredQuality && cached.audioUrlQuality !== requiredQuality) {
         console.log(`[Prefetch] Quality mismatch for song ${songId}: cached=${cached.audioUrlQuality}, required=${requiredQuality}`);
         // Don't use cached URL, but keep other data (lyrics, cover)
         cached.audioUrl = null;
