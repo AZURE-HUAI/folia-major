@@ -56,6 +56,14 @@ const MID_BELL_Q = 0.8;
 
 /** Longest a scheduled band curve is allowed to still be running once its deck is alone. */
 const TONE_RESET_SEC = 0.12;
+/**
+ * How far past a curve's end its reset is scheduled.
+ *
+ * Two render quanta at 48kHz. The engine's clock only moves in quanta, so a `currentTime` read just
+ * before a curve is inserted can be one behind the one the engine compares against - and the tail
+ * of a curve is not a boundary that forgives being crossed.
+ */
+const CURVE_TAIL_GUARD_SEC = 0.006;
 
 /**
  * How long the thrown echo takes to repeat, when there is no tempo to derive it from.
@@ -208,18 +216,36 @@ export const scheduleBandBlend = (
 ): boolean => {
     const curves = buildBandCurves(request);
     const bands = (stack: AutomixToneStack) => [stack.low, stack.mid, stack.high];
+    // A curve asked to start in the past does not start in the past. The engine slides it forward to
+    // `currentTime` and keeps its full duration, so it ENDS later than the arithmetic says - and an
+    // event placed at `startAt + seconds` then lands INSIDE the running curve, which the engine
+    // refuses outright rather than nudging. The whole three-band shaping is lost with it.
+    //
+    // Two render quanta of main-thread lateness was all it took, measured off a real log: the curve
+    // came back reported at a start 5.33ms after the one asked for. And a blend running late is not
+    // a rare accident - it is the blend that was already short of time, which is why the log line
+    // sits directly under "the next deck took more than its 1s of lead to start".
+    //
+    // Anchoring everything on the clamped start is the same move `scheduleEchoThrow` already makes
+    // with its own `opensAt`.
+    const begins = Math.max(startAt, context.currentTime);
+    // Past the end rather than on it, because the clock ticks in quanta: the `currentTime` read here
+    // can be one quantum behind the one the engine clamps against a microsecond later, and a curve's
+    // end is a boundary where being on the wrong side is refused rather than rounded. The param
+    // spends the guard holding the value the curve left it at, so it costs nothing audible.
+    const resetAt = begins + seconds + CURVE_TAIL_GUARD_SEC;
     try {
         ([[bands(outgoing), curves.out], [bands(incoming), curves.in]] as const).forEach(
             ([filters, shapes]) => filters.forEach((filter, band) => {
-                // No event AT startAt ahead of the curve: the engine refuses a curve that overlaps
+                // No event AT the start ahead of the curve: the engine refuses a curve that overlaps
                 // any other automation, and that includes its own first instant. The curve's first
                 // value lands there of its own accord.
-                filter.gain.cancelScheduledValues(startAt);
-                filter.gain.setValueCurveAtTime(shapes[band], startAt, seconds);
+                filter.gain.cancelScheduledValues(begins);
+                filter.gain.setValueCurveAtTime(shapes[band], begins, seconds);
                 // Explicitly back to flat straight after the curve. A setValueCurveAtTime leaves
                 // the param at its last value forever, and "forever" here is the next track.
-                filter.gain.setValueAtTime(shapes[band][shapes[band].length - 1], startAt + seconds);
-                filter.gain.linearRampToValueAtTime(0, startAt + seconds + TONE_RESET_SEC);
+                filter.gain.setValueAtTime(shapes[band][shapes[band].length - 1], resetAt);
+                filter.gain.linearRampToValueAtTime(0, resetAt + TONE_RESET_SEC);
             }),
         );
         return true;

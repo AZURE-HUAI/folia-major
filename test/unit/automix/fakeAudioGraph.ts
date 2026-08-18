@@ -21,23 +21,44 @@ export interface FakeGainNode {
 export const createFakeGainNode = (): FakeGainNode => {
     const events: GainEvent[] = [];
     let value = 1;
+    // The one engine rule this recorder has to enforce rather than record: no automation may land
+    // inside a running setValueCurveAtTime. A real AudioParam throws, the whole schedule around it
+    // is abandoned, and a double that quietly accepts it cannot see the difference between a blend
+    // that works and one the engine will refuse. It let a real bug through, so it is modelled here.
+    // Chrome's own bound: [start, start + duration) is closed at the start and open at the end.
+    let curve: { start: number; end: number } | null = null;
+    const guard = (what: string, time: number) => {
+        if (curve && time >= curve.start && time < curve.end) {
+            throw new Error(
+                `${what}(${time}) overlaps setValueCurveAtTime(..., ${curve.start}, ${curve.end - curve.start})`,
+            );
+        }
+    };
 
     const gain = {
         get value() { return value; },
         set value(next: number) { value = next; },
-        cancelScheduledValues: (time: number) => { events.push({ type: 'cancel', time }); },
+        cancelScheduledValues: (time: number) => {
+            if (curve && curve.start >= time) curve = null;
+            events.push({ type: 'cancel', time });
+        },
         setValueAtTime: (next: number, time: number) => {
+            guard('setValueAtTime', time);
             value = next;
             events.push({ type: 'set', time, value: next });
         },
         linearRampToValueAtTime: (next: number, time: number) => {
+            guard('linearRampToValueAtTime', time);
             events.push({ type: 'ramp', time, value: next });
         },
         exponentialRampToValueAtTime: (next: number, time: number) => {
+            guard('exponentialRampToValueAtTime', time);
             events.push({ type: 'exp', time, value: next });
         },
-        setValueCurveAtTime: (curve: Float32Array, time: number, duration: number) => {
-            events.push({ type: 'curve', time, duration, curve });
+        setValueCurveAtTime: (next: Float32Array, time: number, duration: number) => {
+            guard('setValueCurveAtTime', time);
+            curve = { start: time, end: time + duration };
+            events.push({ type: 'curve', time, duration, curve: next });
         },
     } as unknown as AudioParam;
 

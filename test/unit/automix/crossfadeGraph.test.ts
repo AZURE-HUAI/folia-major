@@ -151,6 +151,38 @@ describe('scheduleBandBlend', () => {
         };
     };
 
+    it('measures the reset from where the curve really starts, not from a start already gone', () => {
+        // The engine slides a curve whose start is in the past forward to `currentTime` and keeps
+        // its full duration, so it ends LATER than `startAt + seconds`. Scheduling the reset at that
+        // arithmetic end puts it inside the running curve, and the engine refuses the event rather
+        // than nudging it - taking the whole three-band shaping down with it, live, as
+        // "band shaping rejected by the audio engine, blending flat".
+        //
+        // Two render quanta of lateness was enough to do it in the wild, and a late blend is not a
+        // rare accident: it is a blend that was already short of time.
+        const context = createFakeContext(20);
+        const outgoing = stack();
+        const incoming = stack();
+
+        expect(scheduleBandBlend(context, outgoing.nodes, incoming.nodes, 19.5, 2, {
+            crossover: 0.5, swapBass: true, sweepOut: true, tiltDb: [0, 0],
+        })).toBe(true);
+
+        for (const params of [outgoing.params, incoming.params]) {
+            for (const param of params) {
+                const curve = lastCurve(param)!;
+                expect(curve.time).toBeGreaterThanOrEqual(context.currentTime);
+                const after = param.events.filter(
+                    event => event.type === 'set' || event.type === 'ramp',
+                );
+                expect(after.length).toBeGreaterThan(0);
+                for (const event of after) {
+                    expect(event.time).toBeGreaterThan(curve.time + curve.duration);
+                }
+            }
+        }
+    });
+
     const run = (request: Partial<Parameters<typeof scheduleBandBlend>[5]> = {}) => {
         const context = createFakeContext(0);
         const outgoing = stack();
