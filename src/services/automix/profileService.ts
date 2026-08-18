@@ -244,10 +244,20 @@ export const ensureTrackProfile = async (request: ProfileRequest): Promise<void>
                         ? ` (${Math.round(profile.outroBpm)} at the end)` : ''}`
                     + `${profile.bpm ? `, ${profile.downbeatOffset === null
                         ? 'no bar line found' : `bar line at ${profile.downbeatOffset.toFixed(2)}s`}` : ''}`
-                    // The head's own reading of the same line, and the gap between the two is the
-                    // whole reason it is measured: that gap is how far the end-anchored grid has
-                    // walked off the music by the time a track is entered.
-                    + `${profile.downbeatOffset !== null && profile.headDownbeatOffset !== null
+                    // The head's own reading of the same line, printed whether or not the
+                    // whole-track pass found one - and the two cases say different things.
+                    //
+                    // With both, the gap between them is the point: it is how far the end-anchored
+                    // grid has walked off the music by the time a track is entered.
+                    //
+                    // With only this one, the point is larger. The head pass reads the FIRST thirty
+                    // seconds against its own period; the whole-track pass reads the LAST two dozen
+                    // bars against the track's. So a head answer beside `no bar line found` says the
+                    // evidence for a bar line is in the audio and the whole-track window or period
+                    // is what could not use it - and a track with neither is a track with no bar
+                    // line to read. Requiring both to print threw exactly that distinction away, on
+                    // precisely the tracks that needed explaining.
+                    + `${profile.bpm && profile.headDownbeatOffset !== null
                         ? ` (head ${profile.headDownbeatOffset.toFixed(2)}s)` : ''}`
                     + `${profile.bpm ? ', ' : ''}`
                     + `${profile.loudness.toFixed(1)} LUFS,`
