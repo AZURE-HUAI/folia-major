@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { X, Command, MousePointer2, Keyboard, Settings2, Trash2, Database, Monitor, PlayCircle, Loader2, Server, Check, AlertCircle, FlaskConical, ChevronLeft, ChevronRight, RefreshCw, Download, ExternalLink, Sparkles, Palette, CircleHelp, Languages, Moon, Sun } from 'lucide-react';
+import { X, Command, MousePointer2, Keyboard, Settings2, Trash2, Database, Monitor, PlayCircle, Loader2, Server, Check, AlertCircle, FlaskConical, ChevronLeft, ChevronRight, RefreshCw, Download, ExternalLink, Sparkles, Palette, CircleHelp, Languages, Moon, Sun, Terminal } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { getCacheUsageByCategory, clearCacheByCategory, clearAllData } from '../../services/db';
 import { DualTheme, StageStatus, StageSource, Theme, ThemeMode, type CadenzaTuning, type CappellaEmojiImage, type CappellaTuning, type FumeTuning, type NowPlayingConnectionStatus, type PartitaTuning, type ReplayGainMode, type TiltTuning, type StoredCustomLyricsFont, type VisualizerMode } from '../../types';
@@ -16,6 +16,7 @@ import GeneralSettingsSubview from './settings/GeneralSettingsSubview';
 import IntegrationSettingsSubview from './settings/IntegrationSettingsSubview';
 import type { PlayerCapConnectionStatus } from '../../types/playerCap';
 import LabSettingsModal from './settings/LabSettingsModal';
+import DeveloperSettingsSubview from './settings/DeveloperSettingsSubview';
 import PlaybackSettingsSubview from './settings/PlaybackSettingsSubview';
 import StorageSettingsSection from './settings/StorageSettingsSection';
 import { AiHelpPromptModal } from './AiHelpPromptModal';
@@ -1126,7 +1127,8 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
         { id: 'integration', icon: Server, label: t('options.integrationSettings') },
         { id: 'storage', icon: Database, label: t('options.storageSettings') },
         ...(isElectron ? [{ id: 'desktop', icon: Command, label: t('options.desktopSettings') }] : []),
-        { id: 'lab', icon: FlaskConical, label: t('options.labSettings') }
+        { id: 'lab', icon: FlaskConical, label: t('options.labSettings') },
+        { id: 'developer', icon: Terminal, label: t('options.developerSettings') }
     ];
 
     return (
@@ -1474,6 +1476,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                                                     {activeSettingsSection === 'storage' && (t('options.storageSettings') || "Storage Settings")}
                                                     {activeSettingsSection === 'desktop' && (t('options.desktopSettings') || "Desktop Settings")}
                                                     {activeSettingsSection === 'lab' && (t('options.labSettings') || "Lab Settings")}
+                                                    {activeSettingsSection === 'developer' && (t('options.developerSettings') || "Developer")}
                                                 </h2>
                                                 <p className="text-xs opacity-50 mt-1" style={{ color: 'var(--text-secondary)' }}>
                                                     {activeSettingsSection === 'appearance' && (t('options.visualSettingsPanelDesc') || "Customize the look and feel of Folia.")}
@@ -1483,6 +1486,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                                                     {activeSettingsSection === 'storage' && (t('options.storageSettingsPanelDesc') || "Manage cache and local data.")}
                                                     {activeSettingsSection === 'desktop' && (t('options.desktopSettingsPanelDesc') || "System integration and updates.")}
                                                     {activeSettingsSection === 'lab' && (t('options.labSettingsDesc') || "Experimental features.")}
+                                                    {activeSettingsSection === 'developer' && (t('options.developerSettingsDesc') || "What the app logged while it was running.")}
                                                 </p>
                                             </div>
                                             {activeSettingsSection === 'appearance' && (
@@ -1689,6 +1693,14 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                                                     supported: isElectron && typeof navigator !== 'undefined' && navigator.userAgent.toLowerCase().includes('win'),
                                                     onToggle: () => onToggleVoiceInputPause(!voiceInputPauseEnabled),
                                                 }}
+                                            />
+                                        )}
+                                        {activeSettingsSection === 'developer' && (
+                                            <DeveloperSettingsSubview
+                                                isDaylight={isDaylight}
+                                                settingsCardClass={settingsCardClass}
+                                                theme={theme}
+                                                toggleOffBackgroundClass={toggleOffBackgroundClass}
                                             />
                                         )}
                                     </div>

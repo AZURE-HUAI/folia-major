@@ -61,7 +61,44 @@ const format = (value: unknown): string => {
     }
 };
 
+const CAPTURE_KEY = 'console_log_capture';
+
+/**
+ * Whether lines are recorded at all.
+ *
+ * Default ON, and that is the only defensible default: the whole reason this buffer exists is that
+ * the packaged desktop build has no console, so a log that has to be switched on BEFORE the problem
+ * happens is a log nobody ever has when they need one. The switch is here for someone who wants the
+ * app to spend nothing on it, not as a gate on the feature.
+ */
+let capturing = (() => {
+    if (typeof window === 'undefined') return true;
+    try {
+        return localStorage.getItem(CAPTURE_KEY) !== 'off';
+    } catch {
+        return true;
+    }
+})();
+
+export const isConsoleCaptureEnabled = () => capturing;
+
+export const setConsoleCaptureEnabled = (enabled: boolean) => {
+    capturing = enabled;
+    try {
+        localStorage.setItem(CAPTURE_KEY, enabled ? 'on' : 'off');
+    } catch {
+        // Blocked storage: the choice still applies to this session, it just does not last.
+    }
+    // Holding on to lines somebody just said they did not want is the wrong answer, and it also
+    // makes the panel's line count lie about what is still being collected.
+    if (!enabled) clearConsoleLog();
+    listeners.forEach(listener => listener());
+};
+
 const push = (level: ConsoleLevel, args: unknown[]) => {
+    // Before the formatting, not after: turning capture off has to stop the work, not just the
+    // storing. Serialising every console argument is the expensive half.
+    if (!capturing) return;
     const text = args.map(format).join(' ');
     // A new array rather than a mutated one: useSyncExternalStore compares snapshots by identity,
     // and a buffer changed in place would leave the panel rendering a list it thinks is current.

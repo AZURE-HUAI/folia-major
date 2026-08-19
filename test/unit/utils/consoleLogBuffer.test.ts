@@ -4,6 +4,8 @@ import {
     formatConsoleLog,
     getConsoleLogEntries,
     installConsoleLogCapture,
+    isConsoleCaptureEnabled,
+    setConsoleCaptureEnabled,
 } from '../../../src/utils/consoleLogBuffer';
 
 // The suite runs on the node environment. Capture also listens for uncaught errors on `window`,
@@ -53,5 +55,36 @@ describe('consoleLogBuffer scopes', () => {
         expect(text).toContain('[A] first');
         expect(text).toContain('[A] third');
         expect(text).not.toContain('second');
+    });
+});
+
+describe('console capture switch', () => {
+    beforeEach(() => {
+        setConsoleCaptureEnabled(true);
+        clearConsoleLog();
+    });
+
+    it('records by default - a log that has to be switched on first is never there when needed', () => {
+        expect(isConsoleCaptureEnabled()).toBe(true);
+    });
+
+    it('stops recording, and drops what it was holding', () => {
+        console.log('[A] before');
+        expect(getConsoleLogEntries()).toHaveLength(1);
+
+        setConsoleCaptureEnabled(false);
+        expect(getConsoleLogEntries()).toHaveLength(0);
+
+        console.log('[A] after');
+        expect(getConsoleLogEntries()).toHaveLength(0);
+    });
+
+    it('records again once switched back on', () => {
+        setConsoleCaptureEnabled(false);
+        console.log('[A] ignored');
+        setConsoleCaptureEnabled(true);
+        console.log('[A] kept');
+
+        expect(getConsoleLogEntries().map(entry => entry.text)).toEqual(['[A] kept']);
     });
 });
