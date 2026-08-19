@@ -8,7 +8,9 @@ import {
     getConsoleLogEntries,
     subscribeToConsoleLog,
     type ConsoleLevel,
+    type ConsoleLogEntry,
 } from '../utils/consoleLogBuffer';
+import { readConsoleLogFilters, writeConsoleLogFilters } from '../utils/consoleLogFilters';
 
 export interface DevDebugLineSnapshot {
     text: string | null;
@@ -602,20 +604,110 @@ const TabButton: React.FC<{
     );
 };
 
+const CONSOLE_LEVELS: ConsoleLevel[] = ['log', 'info', 'warn', 'error', 'debug'];
+/** Lines with no `[Module]` prefix. Grouped under one chip so they are mutable like the rest. */
+const UNSCOPED = '(untagged)';
+
 /**
- * Everything the app has logged this session, with a way to get it back out.
+ * Everything the app has logged this session, narrowed down to the part worth reading.
  *
- * Copy exists because reading a log is rarely the point - handing it to someone else is, and on the
- * desktop build there is no console to select text in. Clear exists so a problem can be reproduced
- * against an empty buffer instead of being hunted for inside a session's worth of history.
+ * Nobody opens a log to read a log. They open it having just seen something go wrong, and every
+ * second between opening it and finding the line that explains the problem is wasted. Three
+ * things account for nearly all of that time, and this panel is built around them:
+ *
+ * - The line is buried in noise. A prefetch pass writes forty lines saying it had nothing to do,
+ *   between the two lines somebody came here for. So: mute by module and by level, and remember
+ *   it, because the noise is the same noise next session.
+ * - You cannot tell what is missing. So: chips carry counts, and the header says how many lines
+ *   the filters are hiding - a filtered view that silently drops the answer is worse than noise.
+ * - Reading it is not the point; handing it over is. So: select the lines that matter and copy
+ *   those, rather than a thousand lines somebody else now has to triage.
+ *
+ * Clear stays because reproducing a problem against an empty buffer beats hunting through a
+ * session's history for where the attempt started.
  */
 const ConsoleDebugPanel: React.FC<{ isDaylight: boolean; panelClass: string; }> = ({ isDaylight, panelClass }) => {
     const entries = useSyncExternalStore(subscribeToConsoleLog, getConsoleLogEntries);
     const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
+    const [query, setQuery] = useState('');
+    const [hiddenScopes, setHiddenScopes] = useState<Set<string>>(
+        () => new Set(readConsoleLogFilters().hiddenScopes),
+    );
+    const [hiddenLevels, setHiddenLevels] = useState<Set<ConsoleLevel>>(
+        () => new Set(readConsoleLogFilters().hiddenLevels),
+    );
+    const [selected, setSelected] = useState<Set<number>>(() => new Set());
+    /** Where a shift-click measures its range from - the last line clicked without a modifier. */
+    const anchorRef = useRef<number | null>(null);
+
+    useEffect(() => {
+        writeConsoleLogFilters({
+            hiddenScopes: [...hiddenScopes],
+            hiddenLevels: [...hiddenLevels],
+        });
+    }, [hiddenLevels, hiddenScopes]);
+
+    // Every scope the session has produced, with how much of the log each one accounts for. The
+    // counts are the point: they are what tells you which chip to press to get your log back.
+    const scopeCounts = useMemo(() => {
+        const counts = new Map<string, number>();
+        entries.forEach(entry => {
+            const scope = entry.scope ?? UNSCOPED;
+            counts.set(scope, (counts.get(scope) ?? 0) + 1);
+        });
+        return [...counts.entries()].sort((a, b) => b[1] - a[1]);
+    }, [entries]);
+
+    const visible = useMemo(() => {
+        const needle = query.trim().toLowerCase();
+        return entries.filter(entry => {
+            if (hiddenLevels.has(entry.level)) return false;
+            if (hiddenScopes.has(entry.scope ?? UNSCOPED)) return false;
+            return needle === '' || entry.text.toLowerCase().includes(needle);
+        });
+    }, [entries, hiddenLevels, hiddenScopes, query]);
+
+    // A selection is a set of lines the reader picked out of a view. Change the view and it is a
+    // set of lines nobody can see any more - which then quietly copies itself instead of what is
+    // on screen. Dropping it is the only behaviour that never lies about what Copy will produce.
+    useEffect(() => {
+        setSelected(new Set());
+        anchorRef.current = null;
+    }, [hiddenLevels, hiddenScopes, query]);
+
+    const toggle = <T,>(set: Set<T>, value: T): Set<T> => {
+        const next = new Set(set);
+        if (!next.delete(value)) next.add(value);
+        return next;
+    };
+
+    const handleRowClick = (entry: ConsoleLogEntry, event: React.MouseEvent) => {
+        if (event.shiftKey && anchorRef.current !== null) {
+            // Ranges run over what is ON SCREEN, not over the buffer: picking two lines either
+            // side of a filtered-out block should hand you the block you can see between them.
+            const from = visible.findIndex(item => item.id === anchorRef.current);
+            const to = visible.findIndex(item => item.id === entry.id);
+            if (from >= 0 && to >= 0) {
+                const [start, end] = from < to ? [from, to] : [to, from];
+                setSelected(new Set(visible.slice(start, end + 1).map(item => item.id)));
+                return;
+            }
+        }
+        anchorRef.current = entry.id;
+        if (event.ctrlKey || event.metaKey) {
+            setSelected(current => toggle(current, entry.id));
+            return;
+        }
+        // A plain click on the only selected line clears it, so getting out of a selection does
+        // not need a button anyone has to find first.
+        setSelected(current => (current.size === 1 && current.has(entry.id) ? new Set() : new Set([entry.id])));
+    };
+
+    const copyTarget = selected.size > 0 ? visible.filter(entry => selected.has(entry.id)) : visible;
 
     const handleCopy = async () => {
         try {
-            await navigator.clipboard.writeText(formatConsoleLog());
+            await navigator.clipboard.writeText(formatConsoleLog(copyTarget));
             setCopyState('copied');
         } catch {
             setCopyState('failed');
@@ -628,34 +720,102 @@ const ConsoleDebugPanel: React.FC<{ isDaylight: boolean; panelClass: string; }> 
         if (level === 'warn') return isDaylight ? 'text-amber-700' : 'text-amber-300';
         return 'opacity-75';
     };
+    const selectedClass = isDaylight ? 'bg-black/[0.09]' : 'bg-white/[0.14]';
+    const inputClass = isDaylight
+        ? 'border-black/10 bg-black/[0.03] placeholder:text-black/35'
+        : 'border-white/10 bg-white/[0.05] placeholder:text-white/35';
+
+    const hiddenCount = entries.length - visible.length;
 
     return (
         <section className={panelClass}>
             <div className="flex items-center justify-between gap-2 px-3 pt-3">
                 <div className="text-[10px] uppercase tracking-[0.16em] opacity-60">
-                    Console ({entries.length})
+                    Console ({visible.length}
+                    {hiddenCount > 0 ? ` of ${entries.length}` : ''}
+                    {selected.size > 0 ? `, ${selected.size} picked` : ''})
                 </div>
                 <div className="flex gap-2">
                     <TabButton
-                        label={copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Failed' : 'Copy'}
-                        isActive={false}
+                        label={
+                            copyState === 'copied' ? 'Copied'
+                                : copyState === 'failed' ? 'Failed'
+                                    : selected.size > 0 ? `Copy ${selected.size}` : `Copy ${visible.length}`
+                        }
+                        isActive={selected.size > 0}
                         onClick={() => { void handleCopy(); }}
                         isDaylight={isDaylight}
                     />
                     <TabButton label="Clear" isActive={false} onClick={clearConsoleLog} isDaylight={isDaylight} />
                 </div>
             </div>
-            {entries.length === 0 ? (
+
+            <div className="flex flex-col gap-2 px-3 pt-2">
+                <input
+                    type="search"
+                    value={query}
+                    onChange={event => setQuery(event.target.value)}
+                    placeholder="Search this session's log"
+                    className={`w-full rounded-md border px-2 py-1 text-[11px] outline-none transition-colors focus:border-current ${inputClass}`}
+                />
+                <div className="flex flex-wrap gap-1.5">
+                    {CONSOLE_LEVELS.map(level => (
+                        <TabButton
+                            key={level}
+                            label={level}
+                            isActive={!hiddenLevels.has(level)}
+                            onClick={() => setHiddenLevels(current => toggle(current, level))}
+                            isDaylight={isDaylight}
+                        />
+                    ))}
+                </div>
+                {scopeCounts.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-1.5">
+                        {/* All and None first, because narrowing to one module out of nine is the
+                            common move and doing it by unpicking the other eight is not a filter. */}
+                        <TabButton
+                            label="All"
+                            isActive={false}
+                            onClick={() => setHiddenScopes(new Set())}
+                            isDaylight={isDaylight}
+                        />
+                        <TabButton
+                            label="None"
+                            isActive={false}
+                            onClick={() => setHiddenScopes(new Set(scopeCounts.map(([scope]) => scope)))}
+                            isDaylight={isDaylight}
+                        />
+                        <span className="mx-0.5 h-4 w-px shrink-0 bg-current opacity-15" />
+                        {scopeCounts.map(([scope, count]) => (
+                            <TabButton
+                                key={scope}
+                                label={`${scope} ${count}`}
+                                isActive={!hiddenScopes.has(scope)}
+                                onClick={() => setHiddenScopes(current => toggle(current, scope))}
+                                isDaylight={isDaylight}
+                            />
+                        ))}
+                    </div>
+                )}
+            </div>
+
+            {visible.length === 0 ? (
                 <div className="px-3 pb-3 pt-2 text-[11px] opacity-70">
-                    Nothing logged yet.
+                    {entries.length === 0
+                        ? 'Nothing logged yet.'
+                        : `Nothing matches. ${entries.length} lines are hidden by the filters above.`}
                 </div>
             ) : (
                 // column-reverse over a reversed list, so the newest line is pinned to the bottom by
                 // the scroll container itself. Scrolling up to read then stays put as lines arrive,
                 // which no amount of scrollTop bookkeeping manages reliably.
-                <div className="mt-2 flex max-h-[26rem] flex-col-reverse overflow-y-auto overscroll-contain px-1 pb-2">
-                    {entries.slice().reverse().map(entry => (
-                        <div key={entry.id} className={`flex gap-2 px-2 py-[3px] text-[10px] leading-4 ${levelClass(entry.level)}`}>
+                <div className="mt-2 flex max-h-[26rem] select-none flex-col-reverse overflow-y-auto overscroll-contain px-1 pb-2">
+                    {visible.slice().reverse().map(entry => (
+                        <div
+                            key={entry.id}
+                            onClick={event => handleRowClick(entry, event)}
+                            className={`flex cursor-pointer gap-2 rounded px-2 py-[3px] text-[10px] leading-4 ${levelClass(entry.level)} ${selected.has(entry.id) ? selectedClass : ''}`}
+                        >
                             <span className="shrink-0 tabular-nums opacity-50">
                                 {new Date(entry.at).toLocaleTimeString()}
                             </span>

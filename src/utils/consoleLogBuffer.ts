@@ -14,7 +14,21 @@ export interface ConsoleLogEntry {
     at: number;
     level: ConsoleLevel;
     text: string;
+    /** The `[Module]` this line announced itself as, or null when it did not. See `readScope`. */
+    scope: string | null;
 }
+
+/**
+ * The subsystem a line came from, read off the `[Prefix]` almost every call site already writes.
+ *
+ * Free structure: `[Automix]`, `[Prefetch]`, `[KugouLibrary]` and the rest are a convention the
+ * whole app follows, and nothing was reading them. Recorded per line rather than re-parsed per
+ * render because it is a property OF the line and never changes after it is written.
+ *
+ * Left in `text` on purpose. Stripping it would make every copied log a slightly different format
+ * from the one people already recognise, for no gain.
+ */
+const readScope = (text: string): string | null => /^\[([^\]\s]{1,40})\]/.exec(text)?.[1] ?? null;
 
 /** Bounded, because this runs for the whole life of the app and a long session logs a lot. */
 const LIMIT = 1000;
@@ -48,13 +62,15 @@ const format = (value: unknown): string => {
 };
 
 const push = (level: ConsoleLevel, args: unknown[]) => {
+    const text = args.map(format).join(' ');
     // A new array rather than a mutated one: useSyncExternalStore compares snapshots by identity,
     // and a buffer changed in place would leave the panel rendering a list it thinks is current.
     entries = entries.concat({
         id: nextId += 1,
         at: Date.now(),
         level,
-        text: args.map(format).join(' '),
+        text,
+        scope: readScope(text),
     });
     if (entries.length > LIMIT) entries = entries.slice(entries.length - LIMIT);
     listeners.forEach(listener => listener());
@@ -72,8 +88,14 @@ export const clearConsoleLog = () => {
     listeners.forEach(listener => listener());
 };
 
-/** The whole buffer as plain text, which is the form it is useful in outside the app. */
-export const formatConsoleLog = () => entries
+/**
+ * Lines as plain text, which is the form they are useful in outside the app.
+ *
+ * Takes a list rather than always using the whole buffer: the reason to copy a log is to hand it
+ * to someone, and a thousand lines is not a handover. What is worth pasting is the handful around
+ * the problem, so the panel passes in whatever the reader has narrowed the view down to.
+ */
+export const formatConsoleLog = (list: readonly ConsoleLogEntry[] = entries) => list
     .map(entry => `${new Date(entry.at).toLocaleTimeString()} [${entry.level}] ${entry.text}`)
     .join('\n');
 
