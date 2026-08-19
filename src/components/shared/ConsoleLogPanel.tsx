@@ -1,8 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { createPortal } from 'react-dom';
 import {
     clearConsoleLog,
     formatConsoleLog,
     getConsoleLogEntries,
+    isConsoleCaptureEnabled,
     subscribeToConsoleLog,
     type ConsoleLevel,
     type ConsoleLogEntry,
@@ -59,12 +61,32 @@ const Pill: React.FC<{
     );
 };
 
+/** One line of a dropdown: a tick, a name, and how much of the log it accounts for. */
+const MenuRow: React.FC<{
+    label: string;
+    count?: number;
+    isOn: boolean;
+    onClick: () => void;
+    isDaylight: boolean;
+}> = ({ label, count, isOn, onClick, isDaylight }) => (
+    <button
+        type="button"
+        onClick={onClick}
+        className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[11px] transition-colors ${isDaylight ? 'hover:bg-black/[0.06]' : 'hover:bg-white/[0.08]'} ${isOn ? '' : 'opacity-45'}`}
+    >
+        <span aria-hidden="true" className="w-3 shrink-0 text-center">{isOn ? '✓' : ''}</span>
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+        {count !== undefined && <span className="shrink-0 tabular-nums opacity-50">{count}</span>}
+    </button>
+);
+
 /**
- * A filter as one line that opens into a list.
+ * A filter as one line that opens a list under it.
  *
- * Laid out inline rather than as a floating popover on purpose: this panel is hosted inside two
- * different scroll containers, and an absolutely positioned menu gets clipped by whichever one has
- * the overflow. Pushing the page down cannot be clipped by anything.
+ * The list is portalled to the body and positioned fixed rather than being absolutely positioned
+ * inside the panel: this panel is hosted in two different scroll containers - the debug overlay and
+ * the settings modal - and either one clips a menu that belongs to the document flow. Fixed to the
+ * viewport, measured off the button, is the only placement neither of them can cut off.
  */
 const FilterMenu: React.FC<{
     label: string;
@@ -72,27 +94,68 @@ const FilterMenu: React.FC<{
     isDaylight: boolean;
     children: React.ReactNode;
 }> = ({ label, summary, isDaylight, children }) => {
-    const [isOpen, setIsOpen] = useState(false);
+    const [at, setAt] = useState<{ top: number; left: number; width: number } | null>(null);
+    const buttonRef = useRef<HTMLButtonElement>(null);
+
+    const place = () => {
+        const box = buttonRef.current?.getBoundingClientRect();
+        if (box) setAt({ top: box.bottom + 4, left: box.left, width: Math.max(box.width, 176) });
+    };
+
+    // Anything that moves the button moves the menu out from under it, and a menu floating beside
+    // its own control is worse than one that is not there. Closing is the honest response.
+    useEffect(() => {
+        if (!at) return;
+        const close = () => setAt(null);
+        const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') close(); };
+        // Capture, so a scroll inside the modal body counts as well as one on the window.
+        window.addEventListener('scroll', close, true);
+        window.addEventListener('resize', close);
+        window.addEventListener('keydown', onKey);
+        return () => {
+            window.removeEventListener('scroll', close, true);
+            window.removeEventListener('resize', close);
+            window.removeEventListener('keydown', onKey);
+        };
+    }, [at]);
+
     const frameClass = isDaylight
         ? 'border-black/10 bg-black/[0.03] hover:bg-black/[0.05]'
         : 'border-white/10 bg-white/[0.04] hover:bg-white/[0.07]';
-    // An open menu takes the whole row: the pills are the content, and squeezing a dozen of them
-    // into half the width is the crush this replaced.
+    const sheetClass = isDaylight
+        ? 'border-black/10 bg-white text-zinc-900 shadow-xl'
+        : 'border-white/10 bg-zinc-900 text-white shadow-2xl';
+
     return (
-        <div className={`min-w-0 flex-1 ${isOpen ? 'basis-full' : ''}`}>
+        <div className="min-w-0 flex-1">
             <button
+                ref={buttonRef}
                 type="button"
-                onClick={() => setIsOpen(open => !open)}
-                aria-expanded={isOpen}
+                onClick={() => (at ? setAt(null) : place())}
+                aria-expanded={at !== null}
                 className={`flex w-full items-center justify-between gap-2 rounded-md border px-2 py-1 text-[10px] uppercase tracking-[0.14em] transition-colors ${frameClass}`}
             >
                 <span className="truncate">{label}</span>
                 <span className="flex shrink-0 items-center gap-1 opacity-60">
                     {summary}
-                    <span aria-hidden="true">{isOpen ? '▴' : '▾'}</span>
+                    <span aria-hidden="true">{at ? '▴' : '▾'}</span>
                 </span>
             </button>
-            {isOpen && <div className="flex flex-wrap gap-1.5 pt-2">{children}</div>}
+            {at && createPortal(
+                <>
+                    {/* Takes the next click wherever it lands, so the menu closes the way every
+                        other menu does rather than only when the button is hit again. */}
+                    <div className="fixed inset-0 z-[999]" onMouseDown={() => setAt(null)} />
+                    <div
+                        role="menu"
+                        className={`fixed z-[1000] max-h-[16rem] overflow-y-auto overscroll-contain rounded-lg border p-1 ${sheetClass}`}
+                        style={{ top: at.top, left: at.left, minWidth: at.width }}
+                    >
+                        {children}
+                    </div>
+                </>,
+                document.body,
+            )}
         </div>
     );
 };
@@ -131,6 +194,12 @@ export const ConsoleLogPanel: React.FC<ConsoleLogPanelProps> = ({
             counts.set(scope, (counts.get(scope) ?? 0) + 1);
         });
         return [...counts.entries()].sort((a, b) => b[1] - a[1]);
+    }, [entries]);
+
+    const levelCounts = useMemo(() => {
+        const counts = new Map<ConsoleLevel, number>();
+        entries.forEach(entry => counts.set(entry.level, (counts.get(entry.level) ?? 0) + 1));
+        return counts;
     }, [entries]);
 
     const visible = useMemo(() => {
@@ -200,6 +269,22 @@ export const ConsoleLogPanel: React.FC<ConsoleLogPanelProps> = ({
         ? 'border-black/10 bg-black/[0.03] placeholder:text-black/35'
         : 'border-white/10 bg-white/[0.05] placeholder:text-white/35';
 
+    // Read on every render, and it re-renders because the switch notifies the same listeners the
+    // buffer does. The panel owning this rather than each host is the point: the debug chord and
+    // the settings page are two doors into ONE recorder, and a door that still opens after the
+    // recorder was switched off says the switch did nothing.
+    if (!isConsoleCaptureEnabled()) {
+        return (
+            <section className={className}>
+                <div className="px-3 py-3 text-[11px] leading-relaxed opacity-60">
+                    Not recording. Nothing from this session can be read back or copied.
+                    <br />
+                    Switch the session log back on in Settings &rarr; Developer.
+                </div>
+            </section>
+        );
+    }
+
     const hiddenCount = entries.length - visible.length;
     const mutedLevels = hiddenLevels.size;
     const mutedScopes = scopeCounts.filter(([scope]) => hiddenScopes.has(scope)).length;
@@ -242,10 +327,11 @@ export const ConsoleLogPanel: React.FC<ConsoleLogPanelProps> = ({
                         isDaylight={isDaylight}
                     >
                         {CONSOLE_LEVELS.map(level => (
-                            <Pill
+                            <MenuRow
                                 key={level}
                                 label={level}
-                                isActive={!hiddenLevels.has(level)}
+                                count={levelCounts.get(level) ?? 0}
+                                isOn={!hiddenLevels.has(level)}
                                 onClick={() => setHiddenLevels(current => toggle(current, level))}
                                 isDaylight={isDaylight}
                             />
@@ -262,24 +348,28 @@ export const ConsoleLogPanel: React.FC<ConsoleLogPanelProps> = ({
                     >
                         {/* All and None first: narrowing to one module out of a dozen is the common
                             move, and doing it by unpicking the other eleven is not a filter. */}
-                        <Pill
-                            label="All"
-                            isActive={false}
-                            onClick={() => setHiddenScopes(new Set())}
-                            isDaylight={isDaylight}
-                        />
-                        <Pill
-                            label="None"
-                            isActive={false}
-                            onClick={() => setHiddenScopes(new Set(scopeCounts.map(([scope]) => scope)))}
-                            isDaylight={isDaylight}
-                        />
-                        <span className="mx-0.5 h-4 w-px shrink-0 self-center bg-current opacity-15" />
+                        <div className="flex gap-1 px-1 pb-1">
+                            <button
+                                type="button"
+                                onClick={() => setHiddenScopes(new Set())}
+                                className={`flex-1 rounded px-2 py-1 text-[10px] uppercase tracking-[0.14em] ${isDaylight ? 'bg-black/[0.05] hover:bg-black/[0.09]' : 'bg-white/[0.07] hover:bg-white/[0.12]'}`}
+                            >
+                                All
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setHiddenScopes(new Set(scopeCounts.map(([scope]) => scope)))}
+                                className={`flex-1 rounded px-2 py-1 text-[10px] uppercase tracking-[0.14em] ${isDaylight ? 'bg-black/[0.05] hover:bg-black/[0.09]' : 'bg-white/[0.07] hover:bg-white/[0.12]'}`}
+                            >
+                                None
+                            </button>
+                        </div>
                         {scopeCounts.map(([scope, count]) => (
-                            <Pill
+                            <MenuRow
                                 key={scope}
-                                label={`${scope} ${count}`}
-                                isActive={!hiddenScopes.has(scope)}
+                                label={scope}
+                                count={count}
+                                isOn={!hiddenScopes.has(scope)}
                                 onClick={() => setHiddenScopes(current => toggle(current, scope))}
                                 isDaylight={isDaylight}
                             />

@@ -46,8 +46,18 @@ const DeveloperSettingsSubview: React.FC<DeveloperSettingsSubviewProps> = ({
                             <ScrollText size={14} />
                         </div>
                         <div className="min-w-0 space-y-1">
-                            <div className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
-                                {t('options.consoleLogCapture') || 'Session log'}
+                            <div className="flex items-center gap-2">
+                                <span className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
+                                    {t('options.consoleLogCapture') || 'Session log'}
+                                </span>
+                                {/* The same log is a keystroke away on the player page, and nobody
+                                    finds a chord that is never written down. */}
+                                <kbd
+                                    className={`shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-normal tracking-wide ${isDaylight ? 'border-black/10 bg-black/[0.04]' : 'border-white/10 bg-white/[0.06]'}`}
+                                    style={{ color: 'var(--text-secondary)' }}
+                                >
+                                    Alt+Shift+D
+                                </kbd>
                             </div>
                             <div className="text-xs opacity-50" style={{ color: 'var(--text-secondary)' }}>
                                 {t('options.consoleLogCaptureDesc')
@@ -66,18 +76,13 @@ const DeveloperSettingsSubview: React.FC<DeveloperSettingsSubviewProps> = ({
                     </button>
                 </div>
 
-                {capturing ? (
-                    <ConsoleLogPanel
-                        isDaylight={isDaylight}
-                        className={`rounded-xl border ${isDaylight ? 'border-black/10 bg-black/[0.03]' : 'border-white/10 bg-black/15'}`}
-                        listMaxHeightClass="max-h-[22rem]"
-                    />
-                ) : (
-                    <div className="text-xs opacity-50" style={{ color: 'var(--text-secondary)' }}>
-                        {t('options.consoleLogCaptureOff')
-                            || 'Not recording. Nothing from this session can be read back or copied.'}
-                    </div>
-                )}
+                {/* Rendered either way: the panel answers for the switch itself, so this page and
+                    the Alt+Shift+D overlay cannot disagree about whether anything is being kept. */}
+                <ConsoleLogPanel
+                    isDaylight={isDaylight}
+                    className={`rounded-xl border ${isDaylight ? 'border-black/10 bg-black/[0.03]' : 'border-white/10 bg-black/15'}`}
+                    listMaxHeightClass="max-h-[22rem]"
+                />
             </div>
 
             <div className="text-[11px] leading-relaxed opacity-45" style={{ color: 'var(--text-secondary)' }}>

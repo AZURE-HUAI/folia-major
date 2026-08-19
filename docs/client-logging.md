@@ -46,17 +46,21 @@ about that is in their way.
 
 ## Reading it
 
-Two ways in:
+Two doors, one recorder:
 
 - **Settings → 开发者 (Developer)** — the log, plus the switch that stops recording entirely.
 - **Alt+Shift+D** on the player page, Console tab — the same panel inside the debug overlay.
+
+The switch governs both. Turning it off does not hide the panel behind the shortcut, it empties it —
+the panel itself refuses to show a log it is not keeping, so neither door can imply the recorder is
+running when it is not.
 
 In the panel:
 
 | | |
 |---|---|
 | Search | Substring match over the whole line. |
-| Level / Module | Collapsed by default. Each module carries its share of the log, so you can see what is drowning you. `None` then one module is the fast way to isolate one subsystem. |
+| Level / Module | Dropdowns. Each entry carries its share of the log, so you can see what is drowning you. `None` then one module is the fast way to isolate one subsystem. The menu stays open while you pick, because muting is rarely one choice. |
 | Selection | Click a line, shift-click for a range, ctrl/cmd-click to add or remove one. |
 | Copy | The selection if there is one, otherwise everything currently visible — never the raw buffer. |
 | Clear | Empties the buffer, so a problem can be reproduced against a clean log. |
@@ -70,7 +74,7 @@ app later shows up on its own rather than being silently filtered out by an old 
 |---|---|
 | `src/utils/consoleLogBuffer.ts` | Patches `console`, parses the `[Module]` prefix, keeps the last 1000 lines, formats them for the clipboard. Also catches `window` `error` and `unhandledrejection`, which never go through `console`. |
 | `src/utils/consoleLogFilters.ts` | Persists muted modules and levels. |
-| `src/components/shared/ConsoleLogPanel.tsx` | The panel. Take this if you need a log surface somewhere else; do not build a second list. |
+| `src/components/shared/ConsoleLogPanel.tsx` | The panel — list, filters, selection, copy, and the off state. Take this if you need a log surface somewhere else; do not build a second list. |
 | `src/components/modal/settings/DeveloperSettingsSubview.tsx` | Settings page host. |
 | `src/components/DevDebugOverlay.tsx` | Player overlay host. |
 

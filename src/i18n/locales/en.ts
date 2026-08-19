@@ -745,7 +745,6 @@ export default {
     "developerSettingsDesc": "What the app logged while it was running.",
     "consoleLogCapture": "Session log",
     "consoleLogCaptureDesc": "Keep what the app logs while it runs, so a problem can be read back and handed over. The packaged build has no console of its own.",
-    "consoleLogCaptureOff": "Not recording. Nothing from this session can be read back or copied.",
     "consoleLogConvention": "Lines are grouped by the [Module] prefix they start with, so anything logged as console.log('[YourModule] …') can be filtered on its own. See docs/client-logging.md.",
     "labPerformanceSection": "Performance & Background",
     "labPerformanceSectionDesc": "Controls for animation workload and the home background.",

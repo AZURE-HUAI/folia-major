@@ -616,7 +616,6 @@ export default {
     "developerSettingsDesc": "Apa yang dicatat aplikasi saat berjalan.",
     "consoleLogCapture": "Log sesi",
     "consoleLogCaptureDesc": "Simpan yang dicatat aplikasi saat berjalan, agar masalah bisa dibaca ulang dan diteruskan.",
-    "consoleLogCaptureOff": "Tidak merekam. Tidak ada dari sesi ini yang bisa dibaca ulang atau disalin.",
     "consoleLogConvention": "Baris dikelompokkan menurut awalan [Modul]. Lihat docs/client-logging.md.",
     "labPerformanceSection": "Performa & Latar Belakang",
     "labPerformanceSectionDesc": "Kontrol beban animasi dan latar belakang beranda.",
