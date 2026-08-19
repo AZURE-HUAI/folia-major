@@ -1,6 +1,10 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electron', {
+    // Beat This! inference. Returns null whenever the weights or the runtime are not there,
+    // which is the browser build's permanent answer and any desktop install missing the model.
+    runBeatThis: (chunks) => ipcRenderer.invoke('automix-beat-this', chunks),
+    separateStems: (request) => ipcRenderer.invoke('automix-htdemucs', request),
     getSettings: () => ipcRenderer.invoke('get-settings'),
     saveSettings: (key, value) => ipcRenderer.invoke('save-settings', key, value),
     setPlaybackDisplaySleepBlockingActive: (active) => ipcRenderer.invoke('playback-display-sleep-set-active', active),

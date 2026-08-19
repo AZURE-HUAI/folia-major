@@ -15,6 +15,7 @@ const { createLyricApi } = require('./lyricApi.cjs');
 const { createLocalCoverAssetStore, getLocalCoverAssetDirectory } = require('./localCoverAssets.cjs');
 const { getReleaseUrl, getUpdateProviderConfig, resolveReleaseChannel } = require('./updateChannels.cjs');
 const { resolveCacheLimit, selectEvictions } = require('./audioCachePrune.cjs');
+const { createAnalysisHost } = require('./analysis/host.cjs');
 const { sanitizeDualTheme: sanitizeGeneratedDualTheme } = require('../shared/themeSanitizer.cjs');
 const useLinuxGraphicsDebugMode = process.env.ELECTRON_LINUX_PACKAGED_GRAPHICS === 'true';
 const isAppImageRuntime =
@@ -412,6 +413,9 @@ const voiceInputPauseMonitor = createVoiceInputPauseMonitor({
   getOwnExePath: () => process.execPath,
 });
 const displaySleepBlocker = createDisplaySleepBlocker(powerSaveBlocker);
+// Both models, in a child process. Registers their IPC handlers; the renderer falls back to its
+// own estimators whenever they answer null, which is what the web build always gets.
+createAnalysisHost({ app, ipcMain });
 
 function buildPlaybackSyncBridgeStatus() {
   return {

@@ -17,6 +17,8 @@ import { migratePreferredLyricSource } from '../utils/lyrics/sourcePriority';
 import { applyAppLanguagePreference, readStoredAppLanguagePreference, type AppLanguagePreference } from '../i18n/config';
 import { normalizeFontFamilyStack, normalizeFontWeight } from '../utils/fontStacks';
 import i18n from '../i18n/config';
+import { clampCrossfadeSeconds, CROSSFADE_DEFAULT_SEC } from '../services/automix/crossfadePlanner';
+import { DEFAULT_TRANSITION_SETTINGS, isTransitionMode, type TransitionMode } from '../services/automix/transitionStrategy';
 import type { AudioQualityPreference } from '../types/onlineMusic';
 import {
     normalizePinnedCommandIds,
@@ -43,6 +45,8 @@ export const MEDIA_CACHE_LIMIT_GB_KEY = 'folia_media_cache_limit_gb';
 /** Gigabytes of cached audio to keep. Zero is the listener asking for no ceiling at all. */
 export const DEFAULT_MEDIA_CACHE_LIMIT_GB = 5;
 const AUTOMIX_ENABLED_KEY = 'folia_automix_enabled';
+const TRANSITION_MODE_KEY = 'folia_transition_mode';
+const CROSSFADE_MAX_SEC_KEY = 'folia_crossfade_max_sec';
 const LAST_SEEN_GUIDE_VERSION_STORAGE_KEY = 'folia_last_seen_guide_version';
 
 export type AudioQuality = AudioQualityPreference;
@@ -129,6 +133,18 @@ export const readStoredMediaCacheLimitGb = (): number => {
     const saved = localStorage.getItem(MEDIA_CACHE_LIMIT_GB_KEY);
     const parsed = saved === null ? NaN : Number(saved);
     return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_MEDIA_CACHE_LIMIT_GB;
+};
+
+const readStoredTransitionMode = (): TransitionMode => {
+    if (typeof window === 'undefined') return DEFAULT_TRANSITION_SETTINGS.mode;
+    const saved = localStorage.getItem(TRANSITION_MODE_KEY);
+    return isTransitionMode(saved) ? saved : DEFAULT_TRANSITION_SETTINGS.mode;
+};
+
+const readStoredCrossfadeMaxSec = (): number => {
+    if (typeof window === 'undefined') return CROSSFADE_DEFAULT_SEC;
+    const saved = localStorage.getItem(CROSSFADE_MAX_SEC_KEY);
+    return saved === null ? CROSSFADE_DEFAULT_SEC : clampCrossfadeSeconds(Number(saved));
 };
 
 export const readSystemThemeIsDaylight = (): boolean | null => {
@@ -1207,6 +1223,10 @@ export type SettingsUiState = {
     /** Gigabytes of cached audio to keep before the oldest is dropped. Zero means no ceiling. */
     mediaCacheLimitGb: number;
     automixEnabled: boolean;
+    /** Which strategy plans a song change once blending is on. */
+    transitionMode: TransitionMode;
+    /** Seconds. The crossfade mode's ceiling; automix computes its own and ignores this. */
+    crossfadeMaxSec: number;
     backgroundOpacity: number;
     subtitleOverlayOpacity: number;
     subtitleOverlayBackground: boolean;
@@ -1337,6 +1357,8 @@ export type SettingsUiState = {
     handleToggleMediaCache: (enable: boolean) => void;
     handleSetMediaCacheLimitGb: (gigabytes: number) => void;
     handleToggleAutomix: (enable: boolean) => void;
+    handleSetTransitionMode: (mode: TransitionMode) => void;
+    handleSetCrossfadeMaxSec: (seconds: number) => void;
     handleSetBackgroundOpacity: (opacity: number) => void;
     handleSetSubtitleOverlayOpacity: (opacity: number) => void;
     handleToggleSubtitleOverlayBackground: (enabled: boolean) => void;
@@ -1472,6 +1494,8 @@ export const useSettingsUiStore = create<SettingsUiState>((set, get) => ({
     enableMediaCache: readStoredEnableMediaCache(),
     mediaCacheLimitGb: readStoredMediaCacheLimitGb(),
     automixEnabled: getStoredBoolean(AUTOMIX_ENABLED_KEY, false),
+    transitionMode: readStoredTransitionMode(),
+    crossfadeMaxSec: readStoredCrossfadeMaxSec(),
     backgroundOpacity: readStoredBackgroundOpacity(),
     subtitleOverlayOpacity: readStoredSubtitleOverlayOpacity(),
     subtitleOverlayBackground: getStoredBoolean(SUBTITLE_OVERLAY_BACKGROUND_STORAGE_KEY, true),
@@ -1852,6 +1876,20 @@ export const useSettingsUiStore = create<SettingsUiState>((set, get) => ({
     handleToggleAutomix: (enable) => {
         setStoredBoolean(AUTOMIX_ENABLED_KEY, enable);
         set({ automixEnabled: enable });
+    },
+    handleSetTransitionMode: (mode) => {
+        if (!isTransitionMode(mode)) return;
+        if (typeof window !== 'undefined') {
+            localStorage.setItem(TRANSITION_MODE_KEY, mode);
+        }
+        set({ transitionMode: mode });
+    },
+    handleSetCrossfadeMaxSec: (seconds) => {
+        const next = clampCrossfadeSeconds(seconds);
+        if (typeof window !== 'undefined') {
+            localStorage.setItem(CROSSFADE_MAX_SEC_KEY, String(next));
+        }
+        set({ crossfadeMaxSec: next });
     },
     handleSetBackgroundOpacity: (opacity) => {
         if (typeof window !== 'undefined') {

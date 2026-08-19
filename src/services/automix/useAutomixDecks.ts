@@ -6,6 +6,7 @@ import type { AudioQualityPreference } from '../../types/onlineMusic';
 import { getPlaybackSongKey } from '../../utils/appPlaybackGuards';
 import { getPrefetchedData } from '../prefetchService';
 import { getTrackProfile, recordPlayedTail } from './profileService';
+import { canSeparateStems, ensureStems, getStemsByKey } from './stems';
 import { connectAutomixDeck, type AutomixDeckChain } from './crossfadeGraph';
 import {
     createAutomixSession,
@@ -14,6 +15,7 @@ import {
     type AutomixSession,
 } from './automixSession';
 import { AUTOMIX_MAX_OVERLAP_SEC } from './transitionPlanner';
+import type { TransitionSettings } from './transitionStrategy';
 
 // src/services/automix/useAutomixDecks.ts
 // The React shell around the automix state machine: two audio elements, which one the app's
@@ -149,8 +151,10 @@ type UseAutomixDecksParams = {
     loopMode: StageLoopMode;
     audioQuality: AudioQualityPreference;
     playerState: PlayerState;
-    /** False when automix is switched off, or while another subsystem owns playback. */
+    /** False when blending is switched off, or while another subsystem owns playback. */
     isEnabled: boolean;
+    /** Which strategy plans each song change, and the crossfade mode's length setting. */
+    transition: TransitionSettings;
     /** Runs the queue's normal advance, exactly as the end of a track would. */
     onAdvanceTrack: () => void;
 };
@@ -168,6 +172,7 @@ export function useAutomixDecks({
     audioQuality,
     playerState,
     isEnabled,
+    transition,
     onAdvanceTrack,
 }: UseAutomixDecksParams) {
     const [activeDeck, setActiveDeck] = useState<AutomixDeckId>('A');
@@ -267,6 +272,19 @@ export function useAutomixDecks({
         window.setTimeout(check, STALL_GRACE_MS);
     }, []);
 
+    /**
+     * The pair separation is currently being spent on. Read only to decide whether to keep going.
+     *
+     * Deliberately a MOVING value, which is the whole of its job: a skip rewrites it, and a window
+     * queued for the pair that was abandoned stops before it reaches the model. The session does
+     * not read this - it names the pair it armed with, by key. Those are opposite requirements on
+     * the same two songs, and serving both from here is what hid a bug for the stems' whole life:
+     * every gesture asked this ref for "the outgoing track" a beat after it had already advanced,
+     * so it got the incoming one, whose tail nobody had separated. Not once in a whole session did
+     * the stem gesture run.
+     */
+    const stemSongsRef = useRef<{ from: SongResult | null; to: SongResult | null }>({ from: null, to: null });
+
     const sessionRef = useRef<AutomixSession | null>(null);
     if (!sessionRef.current) {
         sessionRef.current = createAutomixSession({
@@ -297,6 +315,10 @@ export function useAutomixDecks({
             },
             onAutoplayHoldChange: setAutoplayHeld,
             advanceTrack: () => advanceRef.current(),
+            // Read through a ref, at the moment the gesture is scheduled rather than when the plan
+            // was made: separation runs on its own clock and a window that lands inside that gap
+            // is still worth using.
+            getStems: (key, role) => getStemsByKey(key, role),
         });
     }
     const session = sessionRef.current;
@@ -385,6 +407,9 @@ export function useAutomixDecks({
         if (duration - time > AUTOMIX_MAX_OVERLAP_SEC + AUTOMIX_ARM_LEAD_SEC) return;
 
         if (!isEnabled) return report('disabled', 'off - the Blend icon at the end of the volume row switches it on');
+        // The report keys carry the mode: switching strategy mid-track otherwise reads as the same
+        // decision as the last one and the log stays silent about the change.
+        const modeTag = `${transition.mode}:`;
         if (loopMode === 'one') return report('loop-one', 'single-track loop, nothing to blend into');
 
         const nextSong = resolveNextQueueSong(playQueue, currentSong, loopMode);
@@ -422,19 +447,20 @@ export function useAutomixDecks({
                 lines: prefetched?.lyrics?.lines ?? null,
                 profile: getTrackProfile(nextSong),
             },
+            settings: transition,
             nextKey: getPlaybackSongKey(nextSong),
             fromKey: getPlaybackSongKey(currentSong),
         });
         if (!plan) return;
 
         if (session.getPhase() === 'armed') {
-            report(`${audioSrc}:armed`, `blending ${plan.overlap}s - ${plan.reason}`);
+            report(`${audioSrc}:${modeTag}armed`, `blending ${plan.overlap}s - ${plan.reason}`);
         } else if (plan.kind !== 'fade') {
-            report(`${audioSrc}:cut`, `plain cut - ${plan.reason}`);
+            report(`${audioSrc}:${modeTag}cut`, `plain cut - ${plan.reason}`);
         } else if (time >= plan.outStart) {
-            report(`${audioSrc}:unwired`, `wanted a ${plan.overlap}s blend but the decks are not on the audio graph`);
+            report(`${audioSrc}:${modeTag}unwired`, `wanted a ${plan.overlap}s blend but the decks are not on the audio graph`);
         }
-    }, [audioQuality, audioSrc, currentSong, duration, isEnabled, loopMode, lyrics, playQueue, report, session]);
+    }, [audioQuality, audioSrc, currentSong, duration, isEnabled, loopMode, lyrics, playQueue, report, session, transition]);
 
     /**
      * Reads the ref rather than the `currentSong` prop, and that is the whole correctness of it.
@@ -490,6 +516,57 @@ export function useAutomixDecks({
         }, ANALYSER_INTERVAL_MS);
         return () => clearInterval(timer);
     }, [audioContextRef, isEnabled, playerState, session, tailSrc]);
+
+    /**
+     * Separates the two ends a transition will need, as soon as the track that needs them starts.
+     *
+     * The lead time is the whole point. Separation is seconds of transformer per window - four
+     * times faster than realtime on a fast machine and possibly slower than realtime on a slow one
+     * - so asking for it when the transition arms, a second before it runs, would guarantee it was
+     * never ready. Asked for at the top of the track instead, which is minutes rather than seconds.
+     *
+     * Deliberately fire-and-forget. Nothing waits on it and nothing fails if it does not finish:
+     * the session reads whatever is there when the gesture is scheduled and falls back to the
+     * master crossfade otherwise, which is what every build before stems did.
+     */
+    useEffect(() => {
+        if (!isEnabled || !currentSong || transition.mode !== 'automix') return;
+        if (!canSeparateStems()) return;
+        const context = audioContextRef.current;
+        if (!context) return;
+
+        const next = resolveNextQueueSong(playQueue, currentSong, loopMode);
+        stemSongsRef.current = { from: currentSong, to: next };
+        // Read through the same ref the session reads, so "still wanted" means exactly "still the
+        // pair a transition would use" - a skip rewrites this on the next render and every window
+        // queued for the abandoned pair stops before it reaches the model.
+        const stillPaired = (song: SongResult, end: 'from' | 'to') => () => {
+            const held = stemSongsRef.current[end];
+            return Boolean(held && getPlaybackSongKey(held) === getPlaybackSongKey(song));
+        };
+        // The outgoing end first: it carries the vocal exit, which is the half of the gesture the
+        // listening tests actually isolated. If only one window is ever ready this should be it -
+        // though the session needs both before it will use either.
+        void ensureStems({
+            song: currentSong,
+            role: 'tail',
+            audioUrl: audioSrc,
+            context,
+            stillWanted: stillPaired(currentSong, 'from'),
+        });
+        if (next) {
+            const prefetched = getPrefetchedData(next, audioQuality);
+            void ensureStems({
+                song: next,
+                role: 'head',
+                audioUrl: prefetched?.audioUrl && prefetched.audioUrl !== 'CACHED_IN_DB'
+                    ? prefetched.audioUrl
+                    : null,
+                context,
+                stillWanted: stillPaired(next, 'to'),
+            });
+        }
+    }, [audioContextRef, audioQuality, audioSrc, currentSong, isEnabled, loopMode, playQueue, playerState, transition.mode]);
 
     // Any pause, from the UI, a media key or the OS, ends a transition. Watching player state
     // rather than the element's pause event matters: while armed the active deck is the silent

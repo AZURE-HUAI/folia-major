@@ -57,6 +57,48 @@ export const rmsDb = (samples: Float32Array): number => {
  * energy leaving is just the previous sound decaying - counting decay too would smear every onset
  * into the sustain that follows it and leave nothing periodic to find.
  */
+/**
+ * Iterative radix-2 FFT, in place, real input.
+ *
+ * Hand-rolled rather than pulled in: it is thirty lines, it runs once per track in the background,
+ * and the alternative is a dependency in the bundle of a music player that already ships an FFT in
+ * the browser it runs on - just not one reachable from a decoded buffer.
+ */
+export const fft = (real: Float64Array, imag: Float64Array) => {
+    const n = real.length;
+    for (let i = 1, j = 0; i < n; i += 1) {
+        let bit = n >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) {
+            [real[i], real[j]] = [real[j], real[i]];
+            [imag[i], imag[j]] = [imag[j], imag[i]];
+        }
+    }
+    for (let len = 2; len <= n; len <<= 1) {
+        const angle = (-2 * Math.PI) / len;
+        const wReal = Math.cos(angle);
+        const wImag = Math.sin(angle);
+        for (let i = 0; i < n; i += len) {
+            let curReal = 1;
+            let curImag = 0;
+            for (let k = 0; k < len / 2; k += 1) {
+                const aReal = real[i + k];
+                const aImag = imag[i + k];
+                const bReal = real[i + k + len / 2] * curReal - imag[i + k + len / 2] * curImag;
+                const bImag = real[i + k + len / 2] * curImag + imag[i + k + len / 2] * curReal;
+                real[i + k] = aReal + bReal;
+                imag[i + k] = aImag + bImag;
+                real[i + k + len / 2] = aReal - bReal;
+                imag[i + k + len / 2] = aImag - bImag;
+                const nextReal = curReal * wReal - curImag * wImag;
+                curImag = curReal * wImag + curImag * wReal;
+                curReal = nextReal;
+            }
+        }
+    }
+};
+
 export const spectralFlux = (current: Float32Array, previous: Float32Array, bins: number): number => {
     const limit = Math.min(bins, current.length, previous.length);
     let flux = 0;

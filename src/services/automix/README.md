@@ -10,12 +10,17 @@
 | --- | --- | --- |
 | 证据 | `trackProfile.ts` | 这个音频文件本身是什么样：BPM（全曲 + 尾段）、小节线在哪、响度（LUFS）、两端各自的调、三段频谱占比、段落边界表、前奏到哪结束、结尾是收还是断 |
 | | `signalAnalysis.ts` | 上下都要用的数学：K 计权、自相关测速、小节线定位（`estimateDownbeat`）、重拍相位、交叉曲线、分频段曲线、平衡修正 |
+| | `stems.ts` | 拆轨的**窗口**：只拆一首歌的头 30 秒或尾 30 秒，缓存三个窗口，并回答「这个构建能不能拆」 |
+| | `stemGesture.ts` | 第十一轮那套手法的**算术**：人声怎么退场、鼓/贝斯/其余各在什么时刻交接。纯函数，无音频节点 |
+| | `beatThis.ts` | Beat This! 这个模型的**契约**：它要的梅尔频谱、分块方式、峰值挑选、以及把结果折成 `{offset, period}` 格子。**不含模型本身** |
 | | `profileService.ts` | 字节从哪来、什么时候允许下载、测完存哪。`trackProfile` 的不纯的那一半 |
 | | `deckAnalyser.ts` | 正在响的那一路此刻是什么样：实时电平（同样 K 计权）、下一个拍点在哪 |
 | | `deckClock.ts` | 这一路**此刻播到第几秒**——把 `currentTime` 的台阶拟合成直线，精度进到毫秒 |
 | 决策 | `musicalTime.ts` | 音乐的单位：拍/小节/乐句取整、两首歌速度关系（含二倍等价）、入场点对齐 |
 | | `transitionChooser.ts` | 这两首歌该用四种接法里的哪一种（beatCut / bassSwap / tailRide / plainBlend），以及音色差多少、要不要抛回声 |
 | | `transitionPlanner.ts` | 这一次接多长、落在出场曲的哪个位置、下一首从第几秒进 |
+| | `crossfadePlanner.ts` | 另一套策略：用户设定的长度，永远同一个形状，什么都不看 |
+| | `transitionStrategy.ts` | 这次换歌交给上面哪一个规划器 |
 | 执行 | `automixSession.ts` | 状态机 `idle → armed → fading`，以及每一步反悔的条件 |
 | | `crossfadeGraph.ts` | Web Audio 那一半：两路 deck 的节点链、增益曲线、三段频谱各自的接缝、回声抛掷 |
 | | `tempoBend.ts` | 把出场曲拉到进场曲的速度上（`playbackRate` + `preservesPitch`，音高由浏览器保住） |
@@ -28,9 +33,106 @@
 | 谁 | 用了什么 | 为什么 |
 | --- | --- | --- |
 | `src/App.tsx` | `useAutomixDecks`、`clearTrackProfileRuntime` | 渲染两个 `<audio>`，把事件转进来；切换音源商时清运行时缓存 |
-| `src/hooks/usePlaybackAudioBridge.ts` | `rampGain`、`AutomixDeckChain`、`autoplayHeld` | 播放桥拥有节点链上 ReplayGain 那一级；过渡待命期间它得压住自动播放 |
+| `src/hooks/usePlaybackAudioBridge.ts` | `rampGain`、`AutomixDeckChain`、`autoplayHeld` | 播放桥拥有节点链上 ReplayGain 那一级；过渡待命期间它得压住自动播放。**两路 deck 都接进同一个 `gainNode`，均衡器接在它后面**——所以均衡器永远作用在两首歌的和上，两种模式一视同仁，换模式碰不到它 |
 | `src/services/prefetchService.ts` | `ensureTrackProfile` | 预取下几首时顺手把它们测了 |
-| `src/stores/useSettingsUiStore.ts` | `automixEnabled` | 开关本身，UI 在 `components/panelTab/controls/VolumeRow.tsx` |
+| `electron/analysis/worker.cjs` | `onnxruntime-node` + `models/*.onnx` | 两个模型都在这里，跑在一个**不拥有窗口的进程**里。见下面那一节——这不是洁癖，是唯一能跑的地方 |
+| `electron/analysis/host.cjs` | `utilityProcess` | 主进程这一侧：拉起 worker、对上请求和回复、闲置两分钟杀掉（比释放 session 干净：整个进程的内存都还回去）。worker 崩了自动重试一次 |
+| `electron/preload.cjs` / `electron/main.cjs` | `automix-beat-this`、`automix-htdemucs` | 两个 IPC 通道，主进程只做转发 |
+| `src/stores/useSettingsUiStore.ts` | `automixEnabled`、`transitionMode`、`crossfadeMaxSec` | 总开关 + 选哪套策略 + 交叉淡化的长度。总开关同时挂在 `components/panelTab/controls/VolumeRow.tsx` 的图标上，完整设置区在 `components/modal/settings/TransitionSettingsSection.tsx` |
+
+## 两种模式是两个规划器，不是一个规划器加一个开关
+
+`Folia Crossfade` 和 `Folia Automix` 各自是一个纯函数，各自返回同一个 `TransitionPlan`，
+`transitionStrategy.ts` 只负责选一个。执行层（`automixSession` + `crossfadeGraph`）一行没改，
+它从来就只认计划、不认是谁写的——**这个接缝本来就在**，两种模式是把它用起来，不是为它新加的抽象。
+加第三种就是这里再加一个文件，下游一行不动。
+
+两者的区别不是「参数不同」，是**允许看什么**：交叉淡化只看两个时长和用户设的秒数（外加两端的数字静音，
+那和 duration 一样是事实不是判断），自动混音看全部离线测量。所以交叉淡化那个文件里**没有**速度、调性、
+段落、人声窗口的字眼——一旦有了，它就不再是那个可预测的一半了。
+
+**降级判据必须对着「规划器真正吃什么」写，不是对着「有没有档案」写。** 第一版写成
+`from.profile || to.profile`，一分钟内就被既有测试打回来：一首没有离线档案的歌**照样有速度**——
+正在响的那一路自己测的——而那个速度正是「接八个小节」和「接五秒」的差别。只看档案，
+21.3 秒的乐句级过渡被换成 5 秒交叉淡化，**一个用来保护功能的判断把功能关掉了**。
+现在 `hasEvidence` 三个来源一起看：任一侧的档案、任何来源的速度、出场曲的歌词时间轴。
+
+## Beat This! —— 前处理是**契约**，不是参数
+
+`beatThis.ts` 顶上那一串常数（22050、n_fft 1024、hop 441、Slaney mel 30–11000Hz、`log1p(1000x)`、
+分块 1500 帧、边界 6 帧）**一个都不能动**。它们是那份权重训练时用的值，改任何一个，模型不会报错，
+它会给出一个**很有把握的错答案**——而这正是这个项目已经栽过三次的失败方式。
+
+**验收方式已经存在，别重新发明**：`beats.json` 是官方 Python `Audio2Beats(final0, dbn=False)`
+在 30 首真实曲库歌曲上的输出，`tracks/*.raw` 是喂给它的同一份采样。这份 TS 移植跑同样的输入，
+**拍点和小节线 F-measure 都是 1.0000，平均偏差 0.00 ms，每首歌连拍数都一模一样**。
+速度 58 倍实时（一首四分钟的歌约 4 秒）。任何一次「格子好像有点不对」，先跑这个再改代码。
+
+**它替换而不是修正。** 有模型时 `bpm` / `outroBpm` / `beatOffset` / `downbeatOffset` /
+`headDownbeatOffset` / `beatsPerBar` 六个字段全部来自它，`estimateTempo` / `estimateDownbeat`
+一行不改地留着当**回退**——浏览器版本、权重缺失、推理失败时它们是唯一的答案。
+**两个估计不混用**：相位只在它被测出来的那个格子上有意义，半个这个格子配半个那个格子谁都不是。
+
+**`fft` 从 `trackProfile.ts` 搬到了 `signalAnalysis.ts`。** 因为 `beatThis.ts` 也要用它，
+留在原处就是 `trackProfile → beatThis → trackProfile` 一个真的环。按 README 自己的分层，
+「上下都要用的数学」本来就该在 `signalAnalysis`。
+
+**权重不进 git，进安装包。** 83MB 一个永远不变的文件，不该让每一次 clone 都背着它的历史；
+但许可证是 MIT，分发是允许的，而拿不到 GitHub 的用户在这里是常态不是例外。
+`build/fetchModels.mjs` 下载并**校验 sha256**——「下载成功」不等于「能用」，
+一个被截断或被镜像替换的 ONNX 不会响，它会加载成功然后自信地答错。
+
+## 拆轨：为什么是四条 buffer，而不是一条修正流
+
+四条 stem 加起来就是原曲，所以理论上**只要多一条人声轨**就够了——把元素的整体增益当作「其余部分」的包络，
+再加一条带符号的人声进去补差，`g_vocal = α - β`。少三条流，少一半的图。
+
+**实测把这条路否掉了。** 那条修正流在人声要被切掉时是在做**相减**，而相减要求 buffer 和
+`<audio>` 元素对齐到样本。测下来（[reference_element_buffer_alignment]）：
+
+| 文件 | 相位取反后的对消深度 |
+|---|---|
+| WAV | **-222 dB**（表底，即逐样本相等），9 秒零漂移 |
+| 有损（Opus） | **+3.8 dB** —— 不但没抵消，还更响了 |
+
+原因不在编解码器（把元素的实际输出和 `decodeAudioData` 做互相关，滞后是 **0**），
+而在 `el.currentTime`：压缩流上它被量化到编解码器自己的帧，buffer 就会差出一帧去。
+
+所以：**播四条 buffer，把元素淡出**，永远不靠对消。切换用 **8 毫秒**的交叉淡化——
+对齐时它是透明的，没对齐时也只是几毫秒的梳状滤波，而硬切在前一种情况下完美、在后一种情况下是「咔」一声。
+
+`other` 用**相减**得到（`mix - vocals - drums - bass`），不是模型的第四行输出。
+htdemucs 自己那四行只能重建到 -31 dB；相减让四条**精确**加回原曲，
+而这正是「窗口开头四条都在 1.0 时，stem 之和与元素逐样本相同」这个换手前提所要求的。
+
+## 推理不能待在拥有窗口的进程里
+
+`onnxruntime-node` 的 `run()` **看起来是异步的，其实不是**。它的 JS 包装是
+`new Promise(r => setImmediate(() => r(session.run(...))))`，里面那个 `session.run` 是同步的
+N-API 调用——`setImmediate` 只决定这一坨阻塞从哪个 tick 开始，决定不了它是不是阻塞。
+拿一个 10ms 的定时器围着一段 htdemucs 量：**该触发 150 次的地方只触发了 1 次**，模型加载期间
+361 次里触发 0 次。
+
+放在主进程里这不是「慢」，是「死」。主进程拥有窗口的消息循环和每一个 `ipcMain` 处理器，
+所以事件循环被堵住 = Windows 把窗口画成「无响应」+ 渲染进程每一次 `invoke` 都排在 transformer 后面。
+一首歌要 1 次 Beat This!（~5.7s）+ 2 个 30 秒拆轨窗口（~16s 和 ~10s），
+**每首歌约 30–45 秒窗口完全无响应**。这就是「所有 UI 交互都卡」的来源。
+
+所以模型搬进 `utilityProcess`。同一台机器实测：主进程最长停顿从 ~1450ms 降到 **25ms**，
+主进程 RSS 从 530MB+ 降到 131MB（530MB 现在在子进程里，闲置两分钟连进程一起杀掉）。
+
+**`intraOpNumThreads` 必须设，默认值是错的。** onnxruntime 默认一个逻辑核一个线程，
+24 核机器上实测每段 3547ms——比 12 线程的 1438ms **慢 2.5 倍**，线程在自己跟自己抢。
+取核数的四分之一：真正要守的量是**留给渲染帧和音频线程的机器比例**，而这个比例不该随机器大小变化。
+拆轨有几分钟的提前量、没有截止时间，它不需要快，它需要看不见。
+
+| intraOp | 每段 | 机器 CPU | 30 秒窗口 |
+| --- | --- | --- | --- |
+| 默认（24） | 3547ms | 51% | 21.3s |
+| 12 | 1438ms | 66% | 8.6s |
+| 6 | 1602ms | 42% | 9.6s |
+| 4 | 1873ms | 32% | 11.2s |
+| 2 | 2908ms | 19% | 17.4s |
 
 ## 两条要守住的线
 

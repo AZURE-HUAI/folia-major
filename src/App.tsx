@@ -162,6 +162,14 @@ export default function App() {
         openAudioEqualizer: state.openAudioEqualizer,
     })));
     const automixEnabled = useSettingsUiStore(state => state.automixEnabled);
+    const transitionMode = useSettingsUiStore(state => state.transitionMode);
+    const crossfadeMaxSec = useSettingsUiStore(state => state.crossfadeMaxSec);
+    // Memoised because it is a dependency of the planning callback: a fresh object every render
+    // would rebuild that callback on every frame of playback.
+    const transitionSettings = useMemo(
+        () => ({ mode: transitionMode, crossfadeMaxSec }),
+        [transitionMode, crossfadeMaxSec],
+    );
     const setThemeQuickEditorContext = useThemeQuickEditorStore(state => state.setContext);
     const openThemeQuickEditor = useThemeQuickEditorStore(state => state.openEditor);
     const canOpenThemeQuickEditor = useThemeQuickEditorStore(state => state.canOpenEditor);
@@ -1417,6 +1425,7 @@ export default function App() {
         audioQuality,
         playerState,
         isEnabled: automixEnabled && !isNowPlayingStageActive,
+        transition: transitionSettings,
         onAdvanceTrack: () => {
             // Same advance the end of a track would trigger, only early enough for the outgoing
             // deck to still be sounding when the next one starts.

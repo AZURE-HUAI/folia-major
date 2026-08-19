@@ -134,6 +134,9 @@ export const createFakeChain = (readings: FakeAnalyserReadings = {}): FakeDeckCh
 
     return {
         source: {} as MediaElementAudioSourceNode,
+        // The shared mix point. Never reached by these tests - a stem gesture needs real buffers -
+        // but the chain has to be shaped like the real one.
+        output: {} as AudioNode,
         replayGain: replayGainNode as unknown as GainNode,
         trim: trimNode as unknown as GainNode,
         tone: { low: low.node, mid: mid.node, high: high.node },

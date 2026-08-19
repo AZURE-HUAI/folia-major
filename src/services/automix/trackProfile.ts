@@ -1,6 +1,8 @@
+import { gridFromBeats, type BeatGrid } from './beatThis';
 import {
     estimateDownbeat,
     estimateTempo,
+    fft,
     kWeight,
     rmsDb,
     spectralFlux,
@@ -20,7 +22,7 @@ import {
 // are loud or decaying, the beat grid, the key - is about the *incoming* song.
 
 /** Bumped whenever the maths changes, so stored profiles from an older build are re-measured. */
-export const TRACK_PROFILE_VERSION = 8;
+export const TRACK_PROFILE_VERSION = 9;
 
 /**
  * What the analysis runs at.
@@ -284,48 +286,6 @@ export interface TrackProfile {
     introKey: KeyEstimate;
     outroKey: KeyEstimate | null;
 }
-
-/**
- * Iterative radix-2 FFT, in place, real input.
- *
- * Hand-rolled rather than pulled in: it is thirty lines, it runs once per track in the background,
- * and the alternative is a dependency in the bundle of a music player that already ships an FFT in
- * the browser it runs on - just not one reachable from a decoded buffer.
- */
-const fft = (real: Float64Array, imag: Float64Array) => {
-    const n = real.length;
-    for (let i = 1, j = 0; i < n; i += 1) {
-        let bit = n >> 1;
-        for (; j & bit; bit >>= 1) j ^= bit;
-        j ^= bit;
-        if (i < j) {
-            [real[i], real[j]] = [real[j], real[i]];
-            [imag[i], imag[j]] = [imag[j], imag[i]];
-        }
-    }
-    for (let len = 2; len <= n; len <<= 1) {
-        const angle = (-2 * Math.PI) / len;
-        const wReal = Math.cos(angle);
-        const wImag = Math.sin(angle);
-        for (let i = 0; i < n; i += len) {
-            let curReal = 1;
-            let curImag = 0;
-            for (let k = 0; k < len / 2; k += 1) {
-                const aReal = real[i + k];
-                const aImag = imag[i + k];
-                const bReal = real[i + k + len / 2] * curReal - imag[i + k + len / 2] * curImag;
-                const bImag = real[i + k + len / 2] * curImag + imag[i + k + len / 2] * curReal;
-                real[i + k] = aReal + bReal;
-                imag[i + k] = aImag + bImag;
-                real[i + k + len / 2] = aReal - bReal;
-                imag[i + k + len / 2] = aImag - bImag;
-                const nextReal = curReal * wReal - curImag * wImag;
-                curImag = curReal * wImag + curImag * wReal;
-                curReal = nextReal;
-            }
-        }
-    }
-};
 
 /** Krumhansl-Schmuckler key profiles: how much each scale degree is used in major and minor. */
 const MAJOR_PROFILE = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
@@ -707,6 +667,16 @@ export const analyseTrack = async (
         partial?: boolean;
         /** (L-R)/2, the off-centre half of the mix. Null for a mono file; then no voice is findable. */
         side?: Float32Array | null;
+        /**
+         * Beats and downbeats from Beat This!, when the model was able to run.
+         *
+         * Replaces the six grid fields outright rather than correcting them. The autocorrelation
+         * and the downbeat vote below stay as the fallback for every environment the model is not
+         * in - the browser build, a missing weights file, an inference error - and are still the
+         * ONLY answer for those. Two estimates are not blended: a phase is meaningful against the
+         * grid it was measured on, and half of one grid with half of another is neither.
+         */
+        grid?: BeatGrid | null;
     } = {},
 ): Promise<TrackProfile | null> => {
     const duration = mono.length / sampleRate;
@@ -897,6 +867,10 @@ export const analyseTrack = async (
     const edges = measureEdges(levels, hopSec, FFT_SIZE / sampleRate);
     if (!edges) return null;
 
+    // Null whenever the model did not run, or ran and produced too few beats to fit a grid to -
+    // and then every line that reads it falls through to the estimator below, unchanged.
+    const measured = options.grid ? gridFromBeats(options.grid, { partial: options.partial }) : null;
+
     const tempo = estimateTempo(envelope, hopSec);
     // estimateTempo reports the phase relative to the END of the envelope; the grid is wanted from
     // the start of the track, so it is walked back a whole number of periods.
@@ -916,7 +890,10 @@ export const analyseTrack = async (
     // in the track's, because every consumer of this counts from the start of the file.
     const envelopeStartSec = FFT_SIZE / (2 * sampleRate);
     const barSec = tempo && tempo.periodSec > 0 ? tempo.periodSec * BEATS_PER_BAR : 0;
-    const downbeat = tempo && barSec > 0
+    // Skipped outright when the model answered: this is the estimate it replaces, it is the most
+    // expensive thing in this pass, and running it to throw the answer away is how an analysis
+    // budget gets spent on nothing.
+    const downbeat = !measured && tempo && barSec > 0
         ? estimateDownbeat(
             lowEnvelope,
             hopSec,
@@ -953,7 +930,7 @@ export const analyseTrack = async (
     // back from the beat it anchors on. Folding its phase with the whole-track period instead would
     // reintroduce the error being removed, half a minute of it, which is most of what there is to
     // lose here.
-    const headDownbeat = tempo && headTempo
+    const headDownbeat = !measured && tempo && headTempo
         && Math.abs(headTempo.periodSec / tempo.periodSec - 1) <= HEAD_TEMPO_TOLERANCE
         ? estimateDownbeat(
             lowEnvelope.slice(0, tempoFrames),
@@ -1015,19 +992,23 @@ export const analyseTrack = async (
         tailDb: partial ? null : edges.tailDb,
         introTone: toneOver(firstBin, firstBin + toneWindow),
         outroTone: partial ? null : toneOver(lastBin - toneWindow, lastBin),
-        bpm: tempo?.bpm ?? null,
-        outroBpm: outroTempo?.bpm ?? null,
-        beatOffset,
-        downbeatOffset: downbeat === null ? null : modulo(downbeat + envelopeStartSec, barSec),
+        bpm: measured?.bpm ?? tempo?.bpm ?? null,
+        outroBpm: measured ? measured.outroBpm : outroTempo?.bpm ?? null,
+        beatOffset: measured?.beatOffset ?? beatOffset,
+        downbeatOffset: measured
+            ? measured.downbeatOffset
+            : downbeat === null ? null : modulo(downbeat + envelopeStartSec, barSec),
         // Folded against the whole-track bar because that is the unit `barGrid` walks in. When the
         // two ends really do run at different tempos the fold can shift the answer by the
         // difference between the two bar lengths - a few hundredths of a second, against a walk of
         // one or two bars. ponytail: good enough at entry range; store the head period too if
         // anything ever needs the head grid further in than that.
-        headDownbeatOffset: headDownbeat === null
-            ? null
-            : modulo(headDownbeat + envelopeStartSec, barSec),
-        beatsPerBar: BEATS_PER_BAR,
+        headDownbeatOffset: measured
+            ? measured.headDownbeatOffset
+            : headDownbeat === null
+                ? null
+                : modulo(headDownbeat + envelopeStartSec, barSec),
+        beatsPerBar: measured?.beatsPerBar ?? BEATS_PER_BAR,
         key: key.key,
         major: key.major,
         keyConfidence: key.confidence,

@@ -7,6 +7,7 @@ import {
     type AutomixSessionPorts,
 } from '@/services/automix/automixSession';
 import { AUTOMIX_MIN_OVERLAP_SEC, type TransitionTrack } from '@/services/automix/transitionPlanner';
+import { DEFAULT_TRANSITION_SETTINGS } from '@/services/automix/transitionStrategy';
 import { type TrackProfile } from '@/services/automix/trackProfile';
 import { makeProfile } from './trackProfileFixture';
 import {
@@ -59,6 +60,9 @@ const createHarness = (readings: Partial<Record<AutomixDeckId, FakeAnalyserReadi
     const autoplayHolds: boolean[] = [];
     const advanceTrack = vi.fn();
 
+    /** Every stem lookup the session makes, so a test can check WHICH pair it asked about. */
+    const stemAsks: { key: string | null; role: 'tail' | 'head' }[] = [];
+
     const ports: AutomixSessionPorts = {
         getContext: () => context,
         getElement: deck => asElement(elements[deck]),
@@ -67,6 +71,9 @@ const createHarness = (readings: Partial<Record<AutomixDeckId, FakeAnalyserReadi
         onTailSrcChange: src => { tailSrcChanges.push(src); },
         onAutoplayHoldChange: held => { autoplayHolds.push(held); },
         advanceTrack,
+        // Always empty, so every other test here keeps taking the master crossfade it was written
+        // against. Only the keys are under test.
+        getStems: (key, role) => { stemAsks.push({ key, role }); return null; },
     };
 
     const session = createAutomixSession(ports);
@@ -83,6 +90,8 @@ const createHarness = (readings: Partial<Record<AutomixDeckId, FakeAnalyserReadi
             audioSrc: 'outgoing.mp3',
             from: BLENDABLE_FROM,
             to: BLENDABLE_TO,
+            // Automix, because that is what every expectation in this file was written against.
+            settings: DEFAULT_TRANSITION_SETTINGS,
             nextKey: 'local:next-song',
             fromKey: 'local:this-song',
             ...overrides,
@@ -90,7 +99,7 @@ const createHarness = (readings: Partial<Record<AutomixDeckId, FakeAnalyserReadi
     );
 
     return {
-        session, elements, chains, context,
+        session, elements, chains, context, stemAsks,
         activeDeckChanges, tailSrcChanges, autoplayHolds, advanceTrack, arm,
     };
 };
@@ -289,6 +298,24 @@ describe('automix session', () => {
         expect(plan?.kind).toBe('fade');
         expect(harness.session.getPhase()).toBe('armed');
         expect(harness.advanceTrack).toHaveBeenCalledTimes(1);
+    });
+
+    // The bug this replaces was invisible for the stems' entire life: the gesture asked the React
+    // shell for "the current song's tail", but a gesture is scheduled AFTER the app advances, so
+    // `currentSong` was already the incoming track by then. Every transition asked for the tail of
+    // a track that had not ended and the head of one that was not playing, got null for both, and
+    // fell back to the master crossfade without a word. Naming the armed pair is the fix, so the
+    // names are what this pins.
+    it('asks for stems by the pair it armed with, not by whatever is current when it fires', () => {
+        const harness = createHarness();
+        harness.arm();
+
+        harness.session.handleActiveDeckPlaying('local:next-song');
+
+        expect(harness.stemAsks).toEqual([
+            { key: 'local:this-song', role: 'tail' },
+            { key: 'local:next-song', role: 'head' },
+        ]);
     });
 
     it('schedules complementary curves over the planned overlap once the incoming deck plays', () => {

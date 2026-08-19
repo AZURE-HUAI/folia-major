@@ -4,6 +4,7 @@ import { saveAudioBlob } from '../audioCache';
 import { getFromCache, saveToCache } from '../db';
 import { getCachedSongAudioBlob } from '../onlineMusic/resourceCache';
 import { getSongResourceCacheKey } from '../onlineMusic/resourceKeys';
+import { analyseBeatGrid } from './beatThis';
 import {
     analyseTrack,
     measureEdges,
@@ -40,6 +41,22 @@ const MAX_PROFILES = 200;
 
 /** One at a time: decoding a track allocates tens of megabytes, and two at once is the spike. */
 let queue: Promise<unknown> = Promise.resolve();
+
+/**
+ * Resolves once everything queued for analysis so far has finished. Awaited by separation.
+ *
+ * The two subsystems share one inference worker, and left to race they arrived in the wrong order:
+ * separation is asked for the instant a track starts, profiling trickles in behind the prefetcher,
+ * so two ten-second separations regularly landed ahead of the profile the transition could not
+ * choose a style without. Measured on a real session: a profile finished three seconds after the
+ * transition that needed it, and the next one finished in the same second as its own.
+ *
+ * Profiles win because of what each one gates, not because of what it costs. Without a profile the
+ * planner has no tempo, no key and no outro, so every transition collapses to the plain crossfade -
+ * whereas without stems a fully-planned transition still renders, just through the master fade
+ * instead of stem by stem. The cheaper input is also the one that decides more.
+ */
+export const profilesSettled = (): Promise<unknown> => queue;
 
 const storageKey = (songKey: string) => `automix_profile_${songKey}`;
 
@@ -223,10 +240,16 @@ export const ensureTrackProfile = async (request: ProfileRequest): Promise<void>
 
             const buffer = await decodeAtProfileRate(result.bytes);
             const channels = buffer ? toMidSide(buffer) : null;
+            // The beat grid, from a model rather than from autocorrelation, when this build has
+            // one. Asked for here rather than inside `analyseTrack` because it is the impure step:
+            // it crosses into the main process. Null keeps `analyseTrack` on the estimator it has
+            // always used, which is the browser build's permanent state and no worse than before.
+            const grid = channels ? await analyseBeatGrid(channels.mid) : null;
             const profile = buffer && channels
                 ? await analyseTrack(channels.mid, buffer.sampleRate, {
                     partial: result.partial,
                     side: channels.side,
+                    grid,
                 })
                 : null;
             remember(songKey, profile);
@@ -239,7 +262,14 @@ export const ensureTrackProfile = async (request: ProfileRequest): Promise<void>
                 console.log(
                     `[Automix] analysed "${request.song.name}"`
                     + `${profile.partial ? ` (head only, ${profile.duration.toFixed(1)}s of it)` : ''}:`
-                    + ` ${profile.bpm ? `${Math.round(profile.bpm)} BPM` : ''}`
+                    // Which of the two tempo readers this line came from, said out loud.
+                    //
+                    // The fallback is silent by design - a null grid just leaves `analyseTrack` on
+                    // the autocorrelation estimator it always had - so the two cases printed
+                    // identically and a build where the model never loaded was indistinguishable
+                    // from one where it ran on every track. That is not a distinction to leave to
+                    // inference: it is the difference between the feature being on and being off.
+                    + ` ${profile.bpm ? `${Math.round(profile.bpm)} BPM (${grid ? 'Beat This!' : 'estimated'})` : ''}`
                     + `${profile.outroBpm && profile.bpm && Math.abs(profile.outroBpm - profile.bpm) > 1
                         ? ` (${Math.round(profile.outroBpm)} at the end)` : ''}`
                     + `${profile.bpm ? `, ${profile.downbeatOffset === null

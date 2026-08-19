@@ -470,6 +470,22 @@ declare global {
 
   interface Window {
     electron?: {
+      /** Beat This! inference in the main process. Null when the weights or runtime are absent. */
+      runBeatThis?: (
+        chunks: Array<{ data: Float32Array; frames: number }>,
+      ) => Promise<{ beat: Float32Array[]; downbeat: Float32Array[] } | null>;
+      /**
+       * htdemucs separation in the main process, for one window of one track at 44.1kHz.
+       * `other` is not returned - it is derived by subtraction so the stems sum to the mix exactly.
+       */
+      separateStems?: (
+        request: { left: Float32Array<ArrayBuffer>; right: Float32Array<ArrayBuffer> },
+      ) => Promise<Record<
+        'drums' | 'bass' | 'vocals',
+        // Never shared memory: this crosses the IPC boundary by structured clone, which always
+        // reconstitutes a plain ArrayBuffer on this side.
+        { left: Float32Array<ArrayBuffer>; right: Float32Array<ArrayBuffer> }
+      > | null>;
       getSettings: () => Promise<any>;
       saveSettings: (key: string, value: any) => Promise<any>;
       setPlaybackDisplaySleepBlockingActive: (active: boolean) => Promise<boolean>;

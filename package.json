@@ -34,10 +34,11 @@
     "dev:electron:dist": "cross-env ELECTRON_DEV=false ELECTRON=true ELECTRON_LINUX_PACKAGED_GRAPHICS=true vite build && electron .",
     "dev:electron:dist:swiftshader": "cross-env ELECTRON_DEV=false ELECTRON=true ELECTRON_LINUX_PACKAGED_GRAPHICS=true FOLIA_LINUX_GRAPHICS_MODE=swiftshader vite build && electron .",
     "dev:electron:dist:software": "cross-env ELECTRON_DEV=false ELECTRON=true ELECTRON_LINUX_PACKAGED_GRAPHICS=true FOLIA_LINUX_GRAPHICS_MODE=software vite build && electron .",
-    "build:electron:dir": "cross-env ELECTRON_DEV=false ELECTRON=true vite build && electron-builder --linux dir",
-    "build:electron": "cross-env ELECTRON_DEV=false ELECTRON=true vite build && electron-builder",
+    "build:electron:dir": "npm run models:fetch && cross-env ELECTRON_DEV=false ELECTRON=true vite build && electron-builder --linux dir",
+    "build:electron": "npm run models:fetch && cross-env ELECTRON_DEV=false ELECTRON=true vite build && electron-builder",
     "contributors:add": "npx all-contributors-cli add",
-    "contributors:generate": "npx all-contributors-cli generate"
+    "contributors:generate": "npx all-contributors-cli generate",
+    "models:fetch": "node build/fetchModels.mjs"
   },
   "build": {
     "appId": "top.izuna.foliamajor",
@@ -62,6 +63,14 @@
       "build/thumbar/*.png"
     ],
     "extraResources": [
+      {
+        "from": "models/beat_this.onnx",
+        "to": "models/beat_this.onnx"
+      },
+      {
+        "from": "models/htdemucs.onnx",
+        "to": "models/htdemucs.onnx"
+      },
       {
         "from": "build/icon.png",
         "to": "icon.png"
@@ -160,6 +169,7 @@
     "kugoumusicapi": "https://github.com/MakcRe/KuGouMusicApi/archive/refs/tags/v1.6.0.tar.gz",
     "lucide-react": "^1.31.0",
     "music-metadata": "^11.14.0",
+    "onnxruntime-node": "^1.27.0",
     "opencc-js": "^1.4.1",
     "pixi.js": "^8.19.0",
     "react": "^19.2.8",

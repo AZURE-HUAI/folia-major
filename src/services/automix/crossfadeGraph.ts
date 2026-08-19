@@ -7,6 +7,8 @@ import {
     TONE_EDGE_HZ,
     TONE_MID_HZ,
 } from './signalAnalysis';
+import { STEM_NAMES, type StemName, type TrackStems } from './stems';
+import { OTHER_SWEEP_END, OTHER_SWEEP_HZ } from './stemGesture';
 
 // src/services/automix/crossfadeGraph.ts
 // The Web Audio half of automix: two identical deck chains feeding one mix point, and the ramp
@@ -43,6 +45,8 @@ export interface AutomixDeckChain {
     throw: AutomixThrow;
     /** Measures this deck ahead of the fade, so it reads the track and not the blend. */
     analyser: DeckAnalyser;
+    /** The shared mix point. Kept so a stem window can be wired in past this deck's own fade. */
+    output: AudioNode;
 }
 
 /**
@@ -142,6 +146,7 @@ export const connectAutomixDeck = (
         fade,
         throw: { send, delay, feedback },
         analyser: createDeckAnalyser(context, replayGain, output),
+        output,
     };
 };
 
@@ -297,6 +302,187 @@ export const scheduleEchoThrow = (
     } catch (error) {
         console.warn('[Automix] the echo throw was refused, cutting dry instead', error);
         node.send.gain.value = 0;
+    }
+};
+
+/**
+ * How long the deck takes to change over between its media element and its stems.
+ *
+ * Eight milliseconds, and the number comes from a measurement rather than a feel. Chromium aligns
+ * an AudioBufferSourceNode to a MediaElementAudioSourceNode EXACTLY when the file is uncompressed:
+ * a phase-inverted buffer scheduled from `element.currentTime` nulled the element to the meter
+ * floor, -222 dB, with no drift over nine seconds. On a lossy file the same test came back at
+ * +3.8 dB - no cancellation at all - because `currentTime` on a compressed stream is quantised to
+ * the codec's own frames and lands the buffer up to a frame out.
+ *
+ * So the changeover cannot assume alignment. Eight milliseconds is short enough that a misaligned
+ * splice is a few milliseconds of comb filtering rather than an audible phase artefact, and long
+ * enough that a perfectly aligned one - which is what a FLAC or WAV library gets - has no step in
+ * it at all. A hard cut would be exact in the first case and a click in the second.
+ */
+const SPLICE_SEC = 0.008;
+
+/** One deck's stems, wired and ready to be scheduled. Built per transition and thrown away. */
+export interface AutomixStemChain {
+    sources: Record<StemName, AudioBufferSourceNode>;
+    gains: Record<StemName, GainNode>;
+    /** The high-pass that thins the outgoing pad bed. Flat (25Hz) unless a sweep is scheduled. */
+    sweep: BiquadFilterNode;
+    /** The changeover gain: 0 while the element owns this deck, 1 while the stems do. */
+    output: GainNode;
+    stop: () => void;
+}
+
+/**
+ * Wires one deck's four stems into the same mix point its element feeds.
+ *
+ * Every source is started at ONE absolute time, which is what makes the four exactly aligned with
+ * each other - `start(when, offset)` is sample-accurate by specification, and they came from one
+ * decode. The alignment that is not guaranteed is against the element, which is what SPLICE_SEC is
+ * for.
+ *
+ * Wired into the shared mix point, PAST this deck's own fade, trim and tone stack. It has to be:
+ * the changeover ramps that fade to zero, so anything hanging off it would go with the element.
+ * The equaliser and the analyser sit downstream of the mix point and still apply, which is what
+ * keeps a stem transition sounding like the same player rather than like a different one.
+ */
+export const connectStemDeck = (
+    context: AudioContext,
+    stems: TrackStems,
+    output: AudioNode,
+    /** Media time the window should start playing from. */
+    fromMediaTime: number,
+    /** Absolute context time to start at. */
+    startAt: number,
+    /**
+     * Whether this deck's pad bed is routed through the sweep filter.
+     *
+     * Only the OUTGOING deck's is. The filter is a high-pass, and one sitting at 25Hz is not
+     * transparent - it would quietly thin the sub-bass out of the arriving track for the whole
+     * window, which is a change nobody asked for on the side that is not being swept.
+     */
+    sweepPad: boolean,
+): AutomixStemChain => {
+    const gains = {} as Record<StemName, GainNode>;
+    const sources = {} as Record<StemName, AudioBufferSourceNode>;
+    const changeover = context.createGain();
+    changeover.gain.value = 0;
+    changeover.connect(output);
+
+    const sweep = context.createBiquadFilter();
+    sweep.type = 'highpass';
+    sweep.frequency.value = OTHER_SWEEP_HZ[0];
+    sweep.Q.value = 0.7;
+    sweep.connect(changeover);
+
+    const offset = Math.max(0, fromMediaTime - stems.from);
+    const begins = Math.max(context.currentTime, startAt);
+    for (const name of STEM_NAMES) {
+        const gain = context.createGain();
+        const source = context.createBufferSource();
+        source.buffer = stems.buffers[name];
+        source.connect(gain);
+        // Only the pad bed goes through the sweep, and only on the deck being swept; sending the
+        // others through a filter that is flat at rest would still cost four biquads on every
+        // sample of the window.
+        gain.connect(sweepPad && name === 'other' ? sweep : changeover);
+        source.start(begins, offset);
+        gains[name] = gain;
+        sources[name] = source;
+    }
+
+    return {
+        sources,
+        gains,
+        sweep,
+        output: changeover,
+        stop: () => {
+            for (const name of STEM_NAMES) {
+                try { sources[name].stop(); } catch { /* already stopped */ }
+                sources[name].disconnect();
+                gains[name].disconnect();
+            }
+            sweep.disconnect();
+            changeover.disconnect();
+        },
+    };
+};
+
+/**
+ * Runs one window of the stem gesture on the audio clock.
+ *
+ * All four curves plus the changeover go in as scheduled automation, for the same reason the plain
+ * crossfade does: a busy main thread must not be able to dent a gesture whose whole effect is in
+ * its timing.
+ *
+ * Returns false having put the deck back into a defined state if the engine refused anything - a
+ * stem gesture is an improvement on a crossfade, not a precondition for one.
+ */
+export const scheduleStemWindow = (
+    context: AudioContext,
+    chain: AutomixStemChain,
+    curves: Record<StemName, Float32Array>,
+    /** The deck's element gain, which hands over to the stems and may take them back. */
+    element: GainNode,
+    startAt: number,
+    seconds: number,
+    /** 'out' hands the element to the stems and stops there; 'in' hands them back at the end. */
+    direction: 'out' | 'in',
+): boolean => {
+    const begins = Math.max(startAt, context.currentTime);
+    const ends = begins + seconds;
+    try {
+        for (const name of STEM_NAMES) {
+            const param = chain.gains[name].gain;
+            param.cancelScheduledValues(begins);
+            param.setValueCurveAtTime(curves[name], begins, seconds);
+        }
+
+        // The pad bed is thinned from below as it goes. Exponential because a linear sweep through
+        // a decade of frequency spends almost all of its time at the top - the reference harness
+        // sweeps f0 * (f1/f0)^t, which is exactly what exponentialRampToValueAtTime traces.
+        if (direction === 'out') {
+            chain.sweep.frequency.cancelScheduledValues(begins);
+            chain.sweep.frequency.setValueAtTime(OTHER_SWEEP_HZ[0], begins);
+            chain.sweep.frequency.exponentialRampToValueAtTime(
+                OTHER_SWEEP_HZ[1],
+                begins + seconds * OTHER_SWEEP_END,
+            );
+        }
+
+        const changeover = chain.output.gain;
+        changeover.cancelScheduledValues(begins);
+        element.gain.cancelScheduledValues(begins);
+        if (direction === 'out') {
+            // The element owns the deck up to here and the stems own it afterwards. Equal power on
+            // both sides so a perfectly aligned pair - which is what an uncompressed library gets -
+            // passes through unity rather than dipping.
+            changeover.setValueAtTime(0, begins);
+            changeover.linearRampToValueAtTime(1, begins + SPLICE_SEC);
+            element.gain.setValueAtTime(element.gain.value, begins);
+            element.gain.linearRampToValueAtTime(0, begins + SPLICE_SEC);
+        } else {
+            // The incoming deck runs on stems for the window and on its own element afterwards,
+            // because the stems only cover the window and the track carries on.
+            changeover.setValueAtTime(0, context.currentTime);
+            changeover.setValueAtTime(1, begins);
+            changeover.setValueAtTime(1, ends - SPLICE_SEC);
+            changeover.linearRampToValueAtTime(0, ends);
+            // Silenced NOW rather than at `begins`, which is the same thing scheduleCrossfade does
+            // with its `hold` and for the same reason: this deck is already playing by the time
+            // anything is scheduled - that is what triggered the scheduling - and the window can be
+            // up to a second away. Muting it only at the window start plays the next track at full
+            // level over the end of the current one for that whole second.
+            element.gain.setValueAtTime(0, context.currentTime);
+            element.gain.setValueAtTime(0, ends - SPLICE_SEC);
+            element.gain.linearRampToValueAtTime(1, ends);
+        }
+        return true;
+    } catch (error) {
+        console.warn('[Automix] the stem gesture was refused, using the plain crossfade', error);
+        chain.stop();
+        rampGain(context, element, direction === 'out' ? 0 : 1, 0.05);
+        return false;
     }
 };
 

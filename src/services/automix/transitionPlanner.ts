@@ -173,7 +173,7 @@ const beatSec = (bpm: number | null | undefined) =>
  * Null on a head-only profile, which is the honest answer - the tail of an uncached track is not
  * downloadable - and then the file's own end is all there is to aim at, exactly as before.
  */
-const endsOf = (track: TransitionTrack) => {
+export const endsOf = (track: TransitionTrack) => {
     const profile = track.profile && !track.profile.partial ? track.profile : null;
     const back = (seconds: number | null | undefined) => (
         seconds !== null && seconds !== undefined && seconds > 0
@@ -190,7 +190,7 @@ const endsOf = (track: TransitionTrack) => {
  * playhead exactly there risks starting inside the first transient instead of in front of it, and a
  * clipped attack is far more audible than a tenth of a second of silence.
  */
-const ENTRY_MARGIN_SEC = 0.1;
+export const ENTRY_MARGIN_SEC = 0.1;
 
 /** Seconds from a moment to the next line of a grid. */
 const barPhase = (grid: Grid, seconds: number) =>
@@ -257,7 +257,7 @@ const lastSungMoment = (lines: Line[] | null | undefined): number | null => {
     return sung?.length ? sung[sung.length - 1].endTime : null;
 };
 
-const hardCut = (reason: string): TransitionPlan => ({
+export const hardCut = (reason: string): TransitionPlan => ({
     kind: 'hardCut',
     style: 'plainBlend',
     relation: 'unknown',

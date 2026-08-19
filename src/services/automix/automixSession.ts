@@ -1,4 +1,5 @@
 import {
+    connectStemDeck,
     rampGain,
     rampGainDb,
     resetThrow,
@@ -6,8 +7,17 @@ import {
     scheduleBandBlend,
     scheduleCrossfade,
     scheduleEchoThrow,
+    scheduleStemWindow,
     type AutomixDeckChain,
+    type AutomixStemChain,
 } from './crossfadeGraph';
+import {
+    envelopeOf,
+    incomingCurves,
+    outgoingCurves,
+    planStemHandover,
+} from './stemGesture';
+import type { TrackStems } from './stems';
 import { createDeckClock, type DeckClock } from './deckClock';
 import { barGrid, settledBpm, type Grid } from './musicalTime';
 import { planBlendShape, trimForBalance, BEATS_PER_BAR } from './signalAnalysis';
@@ -15,11 +25,11 @@ import { applyTempoBend, resetTempoBend } from './tempoBend';
 import { shapeBlend } from './transitionChooser';
 import {
     AUTOMIX_MIN_OVERLAP_SEC,
-    planTransition,
     resolveOverlap,
     type TransitionPlan,
     type TransitionTrack,
 } from './transitionPlanner';
+import { planForMode, type TransitionSettings } from './transitionStrategy';
 import type { TrackProfile } from './trackProfile';
 
 // src/services/automix/automixSession.ts
@@ -111,6 +121,19 @@ export interface AutomixSessionPorts {
     onAutoplayHoldChange: (held: boolean) => void;
     /** Runs the queue's ordinary advance, early. */
     advanceTrack: () => void;
+    /**
+     * Separated stems for one named track, or null when there are none.
+     *
+     * A function rather than a field on the request because separation finishes on its own clock:
+     * a plan is made up to half a minute before it runs, and stems that arrive inside that gap
+     * should still be used. Read once, at the moment the gesture is scheduled.
+     *
+     * Takes the playback key rather than a role, because the caller cannot answer "which track is
+     * the outgoing one" at that moment - by the time a gesture is scheduled the app has already
+     * advanced, so its idea of the current song is the INCOMING one. The session is the only place
+     * that still holds both identities from arm time, so it names them. See `getStemsByKey`.
+     */
+    getStems?: (key: string | null, role: 'tail' | 'head') => TrackStems | null;
 }
 
 export interface AutomixTransitionRequest {
@@ -120,6 +143,8 @@ export interface AutomixTransitionRequest {
     audioSrc: string;
     from: TransitionTrack;
     to: TransitionTrack;
+    /** Which strategy plans this song change, and the crossfade mode's length setting. */
+    settings: TransitionSettings;
     /** Playback key of the track the queue will advance to, checked again before the ramp. */
     nextKey: string;
     /** Playback key of the track the outgoing deck is playing. */
@@ -286,6 +311,142 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             : profile.loudness + 20 * Math.log10(Math.max(chain.replayGain.gain.value, 1e-6))
     );
 
+    /** Live for exactly one transition. Emptied by settle, which every ending goes through. */
+    let stemChains: AutomixStemChain[] = [];
+
+    /** One bar of a track, in seconds. Null unless both halves of the answer were measured. */
+    const barSecOf = (profile: TrackProfile | null | undefined): number | null =>
+        (profile?.bpm ? (60 / profile.bpm) * (profile.beatsPerBar || 4) : null);
+
+    /**
+     * Puts the round-eleven gesture on the clock, or reports that it could not.
+     *
+     * Everything here is a port of `render11.mts`, which is the harness eight blind listening
+     * rounds were scored from. The one thing this adds is the changeover: the harness had the whole
+     * track as an array, and a player has a stream it has to take over from.
+     */
+    const scheduleStemGesture = (args: {
+        context: AudioContext;
+        tailChain: AutomixDeckChain;
+        activeChain: AutomixDeckChain;
+        fromStems: TrackStems;
+        toStems: TrackStems;
+        /** Media time of the outgoing track where the window opens. */
+        startMedia: number;
+        /**
+         * Media time the INCOMING element will actually be at when the window opens.
+         *
+         * Deliberately not `plan.inStart`. The element is seeked there and then plays, and the
+         * window can be up to a second later - so by the time it opens the element has already
+         * moved on by the length of the hold. Lining the stems up with the plan instead of with the
+         * element leaves them that far apart, which is inaudible while the stems are playing and
+         * a jump at the end of the window when the element takes the track back.
+         */
+        inAt: number;
+        startAt: number;
+        wall: number;
+        outgoingBarSec: number | null;
+        incomingBarSec: number | null;
+        /** The three halves of a bar line, straight off the outgoing track's profile. */
+        outgoingBpm: number | null;
+        outgoingDownbeat: number | null;
+        outgoingBeatsPerBar: number | null;
+    }): boolean => {
+        const { context, fromStems, toStems, startMedia, wall } = args;
+        const rate = fromStems.buffers.vocals.sampleRate;
+        const offset = Math.round((startMedia - fromStems.from) * rate);
+        const length = Math.round(wall * rate);
+        // The window has to fit inside what was separated at BOTH ends. A plan made before the
+        // separation finished can ask for a longer overlap than the stems cover, and half a window
+        // of stems followed by silence is far worse than the crossfade this replaces.
+        const inOffset = Math.round((args.inAt - toStems.from) * rate);
+        if (offset < 0 || inOffset < 0
+            || offset + length > fromStems.buffers.vocals.length
+            || inOffset + length > toStems.buffers.vocals.length) {
+            console.log('[Automix] stems do not cover this window, using the master crossfade');
+            return false;
+        }
+
+        const slice = (buffer: AudioBuffer, at: number) => Array.from(
+            { length: buffer.numberOfChannels },
+            (_, channel) => buffer.getChannelData(channel).subarray(at, at + length),
+        );
+        const vocals = envelopeOf(slice(fromStems.buffers.vocals, offset), rate);
+        // Measured off the SUM of the four stems rather than off any one of them: "quiet" for a
+        // vocal exit means quiet against everything else that is playing, which is what makes the
+        // same threshold work on a ballad and on a wall of guitars.
+        const mixChannels = slice(fromStems.buffers.vocals, offset).map((_, channel) => {
+            const out = new Float32Array(length);
+            for (const name of ['vocals', 'drums', 'bass', 'other'] as const) {
+                const data = fromStems.buffers[name].getChannelData(channel);
+                for (let i = 0; i < length; i += 1) out[i] += data[offset + i];
+            }
+            return out;
+        });
+        const mix = envelopeOf(mixChannels, rate);
+
+        // The outgoing track's bar lines inside the window, so the drums change hands on the count.
+        //
+        // Built from `downbeatOffset` and the track's own `beatsPerBar`, NOT from the beat grid the
+        // rest of this function uses. They are different questions: `beatGrid.offset` is a phase in
+        // the BEAT grid, so feeding it to `barGrid` would space the lines a bar apart and put them
+        // at the wrong place inside the bar - which looks like a bar line and is one three times
+        // in four. Null downbeats means no bar lines, and `planStemHandover` then places the swap
+        // on the plain fraction, which is the honest answer rather than a guessed line.
+        const bars: number[] = [];
+        const barLines = barGrid(
+            args.outgoingBpm, args.outgoingDownbeat, args.outgoingBeatsPerBar ?? BEATS_PER_BAR,
+        );
+        if (barLines) {
+            const first = Math.ceil((startMedia - barLines.offset) / barLines.period);
+            for (let k = first; ; k += 1) {
+                const at = barLines.offset + k * barLines.period - startMedia;
+                if (at > wall) break;
+                if (at >= 0) bars.push(at);
+            }
+        }
+        const barSec = args.outgoingBarSec;
+
+        const handover = planStemHandover(
+            wall, barSec, args.incomingBarSec, bars, vocals, mix,
+        );
+
+        const outgoing = connectStemDeck(
+            context, fromStems, args.tailChain.output, startMedia, args.startAt, true,
+        );
+        const incoming = connectStemDeck(
+            context, toStems, args.activeChain.output, args.inAt, args.startAt, false,
+        );
+        stemChains = [outgoing, incoming];
+
+        const ok = scheduleStemWindow(
+            context, outgoing, outgoingCurves(wall, handover),
+            args.tailChain.fade, args.startAt, wall, 'out',
+        ) && scheduleStemWindow(
+            context, incoming, incomingCurves(wall, handover),
+            args.activeChain.fade, args.startAt, wall, 'in',
+        );
+        if (!ok) {
+            // The last silent way to decline. Everything else here says why it gave up; this one
+            // tore the chains down and returned to the crossfade without a word, which from the
+            // outside is identical to the gesture having worked.
+            console.log('[Automix] stems could not be scheduled, using the master crossfade');
+            stemChains.forEach(chain => chain.stop());
+            stemChains = [];
+            return false;
+        }
+
+        console.log(
+            `[Automix] stems: voice ${handover.exit.kind === 'rest' ? 'cut in a rest' : 'receding'}`
+            + ` ${handover.exit.from.toFixed(2)}-${handover.exit.to.toFixed(2)}s`
+            + ` (quietest half-second ${handover.exit.loudDb.toFixed(0)}dB under the mix),`
+            + ` drums at ${handover.swap.toFixed(2)}s${bars.length ? ' on a bar line' : ''},`
+            + ` bass at ${handover.bassAt.toFixed(2)}s,`
+            + ` next voice at ${handover.vocalIn.toFixed(2)}s`,
+        );
+        return true;
+    };
+
     /**
      * Returns both decks to a defined idle state. The one path every ending shares.
      *
@@ -298,6 +459,10 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
      */
     const settle = (options: { pauseTail: boolean }) => {
         clearTimers();
+        // Before the gains are put back, because the changeover node is one of them: a stem chain
+        // left connected would keep its window playing under the next track.
+        stemChains.forEach(chain => chain.stop());
+        stemChains = [];
         // Before anything else: a transition that ends while still holding the autoplay would
         // leave the app with a loaded deck nothing is ever going to press play on.
         setAutoplayHold(false);
@@ -353,7 +518,8 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         // The deck still playing is the one whose tempo sets the length: at this point it is the
         // active one, and the only track with any audio behind it to measure.
         const outgoingTempo = ports.getChain(activeDeck)?.analyser.tempo() ?? null;
-        const nextPlan = planTransition(
+        const nextPlan = planForMode(
+            request.settings,
             request.from,
             request.to,
             // The offline profile measured the whole file; the live tap only heard the last few
@@ -538,8 +704,26 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         const outgoingBpm = settledBpm(plannedFrom?.bpm, plannedFrom?.outroBpm);
         const periodSec = outgoingBpm ? 60 / outgoingBpm : tempo?.periodSec ?? null;
 
+        // Whether this song change is handed over stem by stem rather than as two masters.
+        //
+        // Both ends have to be separated: the gesture is a conversation between them - A's drums
+        // leave as B's arrive - and half of it is not a quieter version of it, it is a different
+        // and untested thing. `beatCut` is excluded because a cut has no overlap for stems to be
+        // handed over across, and a too-short window is excluded for the same reason.
+        // Named by the keys pinned at arm, not by whatever the app now calls the current song.
+        const fromStems = ports.getStems?.(plannedFromKey, 'tail') ?? null;
+        const toStems = ports.getStems?.(plannedNextKey, 'head') ?? null;
+        const useStems = Boolean(fromStems && toStems)
+            && plan.style !== 'beatCut'
+            && overlap >= AUTOMIX_MIN_OVERLAP_SEC;
+
         // The rate is set before the wait is measured, because the wait is spent AT that rate.
-        const stretch = plan.style === 'beatCut' || overlap < AUTOMIX_MIN_OVERLAP_SEC
+        //
+        // Never bent under a stem gesture. The stems are buffers and the element is a stream, and
+        // bending one without the other would slide them apart across the window; bending both
+        // means two clocks that have to stay locked for twenty-five seconds. The listening test
+        // that killed the tempo bend makes that a cost with nothing on the other side of it.
+        const stretch = plan.style === 'beatCut' || overlap < AUTOMIX_MIN_OVERLAP_SEC || useStems
             ? 1
             : plan.stretch;
         const applied = applyTempoBend(tailElement, stretch);
@@ -590,20 +774,68 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         const startAt = now + hold;
         const wall = shape.overlap / applied;
 
+        // Where each element will be when the window opens. Both sides ask the same question of
+        // the same clock, and that symmetry is the point: a stem buffer lined up against anything
+        // other than where its element ACTUALLY is drifts by exactly that error, silently while the
+        // stems play and audibly as a jump when the element takes the track back.
+        //
+        // The outgoing side is `startMedia` today, because `shape.hold` is only ever nonzero for a
+        // beatCut and stems refuse those. Written as a projection anyway rather than relying on
+        // that: the invariant lives in another file, and if it ever changes this is not a line
+        // anyone would think to come back to.
+        const outgoingAt = clocks[tailDeck].positionAt(startAt) ?? (startMedia + shape.hold * tailRate * applied);
+        const incomingAt = clocks[activeDeck].positionAt(startAt)
+            ?? ((ports.getElement(activeDeck)?.currentTime ?? plan.inStart) + hold);
+
+        // The stem gesture replaces the crossfade rather than layering on top of it: the four
+        // envelopes already say what every stem does across the window, and a master fade running
+        // underneath would take the outgoing track away a second time.
+        const stemmed = useStems && fromStems && toStems
+            && scheduleStemGesture({
+                context, tailChain, activeChain, fromStems, toStems,
+                startMedia: outgoingAt, inAt: incomingAt, startAt, wall,
+                outgoingBarSec: barSecOf(plannedFrom), incomingBarSec: barSecOf(plannedTo),
+                outgoingBpm: plannedFrom?.bpm ?? null,
+                outgoingDownbeat: plannedFrom?.downbeatOffset ?? null,
+                outgoingBeatsPerBar: plannedFrom?.beatsPerBar ?? null,
+            });
+
+        /**
+         * What actually happened, not what was planned.
+         *
+         * This line used to print above, before the stem branch had run, so `three bands` named a
+         * FIELD OF THE PLAN while the stem gesture that replaces those bands left no trace at all -
+         * and its own log only speaks up when it declines. Success was therefore indistinguishable
+         * from never having been attempted, in the one subsystem hardest to hear. A log that only
+         * reports failures cannot be used to confirm anything, which is the whole reason this
+         * question had to be answered by reading the source instead of the output.
+         */
+        const rendering = stemmed ? ', four stems'
+            : fromStems && toStems ? `${shape.shapeBands ? ', three bands' : ''}`
+                : `, no stems (${!fromStems && !toStems ? 'neither end' : fromStems ? 'incoming' : 'outgoing'}`
+                    + ` separated yet)${shape.shapeBands ? ', three bands' : ''}`;
         console.log(
             `[Automix] ${shape.style}${shape.style === plan.style ? '' : ` (planned ${plan.style})`}:`
             + `${hold > 0.01 ? ` waits ${hold.toFixed(2)}s, then` : ''}`
             + ` ${wall < 0.1 ? `${Math.round(wall * 1000)}ms` : `${wall.toFixed(2)}s`}`
             + ` at ${Math.round(shape.crossover * 100)}%`
             + `${shape.together > 0 ? `, both held for ${Math.round(shape.together * 100)}%` : ''}`
-            + `${shape.shapeBands ? ', three bands' : ''}`
-            + `${shape.sweepOut ? ', swept out' : ''}`
+            + rendering
+            + `${shape.sweepOut && !stemmed ? ', swept out' : ''}`
             + `${plan.echoThrow ? ', thrown' : ''}`
             + `${applied === 1 ? '' : `, outgoing at ${applied.toFixed(3)}x`}`
             + `${fade.snappedToBeat && shape.style === plan.style ? ` on a beat (${periodSec ? Math.round(60 / periodSec) : '?'} BPM)` : ''}`
             + `${outgoingDb === null ? '' : `, outgoing ${outgoingDb.toFixed(1)} LUFS`}`
             + `${tailClock.fit() === null ? ', position estimated' : ''}`,
         );
+
+        if (stemmed) {
+            cleanupTimer = setTimeout(
+                () => settle({ pauseTail: true }),
+                (hold + wall) * 1000 + FADE_CLEANUP_MARGIN_MS,
+            );
+            return;
+        }
 
         if (shape.shapeBands) {
             scheduleBandBlend(context, tailChain.tone, activeChain.tone, startAt, wall, {
