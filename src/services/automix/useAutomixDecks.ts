@@ -6,7 +6,7 @@ import type { AudioQualityPreference } from '../../types/onlineMusic';
 import { getPlaybackSongKey } from '../../utils/appPlaybackGuards';
 import { getPrefetchedData } from '../prefetchService';
 import { getTrackProfile, recordPlayedTail } from './profileService';
-import { canSeparateStems, ensureStems, getStemsByKey, setWantedStems, stemWindowKey } from './stems';
+import { canSeparateStems, dropUnwantedStems, ensureStems, getStemsByKey, setWantedStems, stemWindowKey } from './stems';
 import { connectAutomixDeck, type AutomixDeckChain } from './crossfadeGraph';
 import {
     createAutomixSession,
@@ -334,6 +334,10 @@ export function useAutomixDecks({
                 if (src === null) {
                     const active = sessionRef.current!.getActiveDeck();
                     harvestRef.current(active === 'A' ? 'B' : 'A');
+                    // The transition is over, so the two windows it used are spent - see
+                    // `dropUnwantedStems`. Here rather than in the effect that names the pair,
+                    // because this fires AFTER the gesture has read them.
+                    dropUnwantedStems();
                 }
                 setTailSrc(src);
                 // Read synchronously, and that is the whole trick: the session calls this from the
@@ -589,8 +593,6 @@ export function useAutomixDecks({
     useEffect(() => {
         if (!isEnabled || !currentSong || transition.mode !== 'automix') return;
         if (!canSeparateStems()) return;
-        const context = audioContextRef.current;
-        if (!context) return;
 
         const next = resolveNextQueueSong(playQueue, currentSong, loopMode);
         stemSongsRef.current = { from: currentSong, to: next };
@@ -615,7 +617,6 @@ export function useAutomixDecks({
             song: currentSong,
             role: 'tail',
             audioUrl: audioSrc,
-            context,
             stillWanted: stillPaired(currentSong, 'from'),
         });
         if (next) {
@@ -626,11 +627,10 @@ export function useAutomixDecks({
                 audioUrl: prefetched?.audioUrl && prefetched.audioUrl !== 'CACHED_IN_DB'
                     ? prefetched.audioUrl
                     : null,
-                context,
                 stillWanted: stillPaired(next, 'to'),
             });
         }
-    }, [audioContextRef, audioQuality, audioSrc, currentSong, isEnabled, loopMode, playQueue, playerState, transition.mode]);
+    }, [audioQuality, audioSrc, currentSong, isEnabled, loopMode, playQueue, playerState, transition.mode]);
 
     // Any pause, from the UI, a media key or the OS, ends a transition. Watching player state
     // rather than the element's pause event matters: while armed the active deck is the silent

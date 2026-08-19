@@ -19,9 +19,9 @@ import { profilesSettled } from './profileService';
 // worth less than a download nobody agreed to. A track that is not local simply has no stems and
 // the transition falls back to the master crossfade, which is what every build before this did.
 //
-// Only a WINDOW is separated, never a whole track. A four-minute track is a minute of CPU and a
-// third of a gigabyte of stems; the last thirty seconds is eight seconds and forty megabytes, and
-// no transition has ever needed more than the last thirty seconds.
+// Only a WINDOW is separated, never a whole track, and it is kept at sixteen bits. A four-minute
+// track is a minute of CPU and a third of a gigabyte of stems; the last twenty seconds is under
+// seven seconds and 14MB, which is what a transition can actually reach - see STEM_WINDOW_SEC.
 
 export type StemName = 'drums' | 'bass' | 'other' | 'vocals';
 export const STEM_NAMES: readonly StemName[] = ['drums', 'bass', 'other', 'vocals'];
@@ -32,11 +32,20 @@ export const STEM_SAMPLE_RATE = 44100;
 /**
  * How much of a track's end (or start) is separated.
  *
- * Comfortably past the longest overlap the planner can ask for (25s), with room in front for the
- * placement search to look at. Also the memory bound: four stereo stems at 44.1kHz is 1.4MB per
- * second, so this window is 42MB and a transition holds two of them.
+ * This is the memory bound and the CPU bound at once: four stereo stems is 0.7MB per second stored
+ * (see `pcm` below), and the model spends roughly a third of a second per second of window. A
+ * transition holds two windows, so every second here is paid twice in bytes and twice in wait.
+ *
+ * NOT free to shorten, and the earlier claim that it was is retracted. The gesture needs the window
+ * to cover the whole overlap, and the planner may ask for up to AUTOMIX_MAX_OVERLAP_SEC (25s), so
+ * a blend longer than this one loses its stems and falls back to the master crossfade. What makes
+ * 20 the number rather than 25: the ceiling is reached only when a slow track has a long
+ * instrumental outro AND the incoming track has a long intro, and no blend measured so far has
+ * come near it - the longest ASKED for in a session's logs was 16.6s, and it was cut to 3.8s by
+ * the room the pair actually had. `stems do not cover this window` is the line that says this
+ * number was set too low; it prints both figures for exactly that reason.
  */
-export const STEM_WINDOW_SEC = 30;
+export const STEM_WINDOW_SEC = 20;
 
 /** Which end of a track a window came from. A track needs both over its life, never at once. */
 export type StemRole = 'head' | 'tail';
@@ -46,9 +55,84 @@ export interface TrackStems {
     from: number;
     duration: number;
     role: StemRole;
-    /** One stereo buffer per stem. They sum back to the mix exactly - see `other` below. */
+    /**
+     * One stereo buffer per stem. They sum back to the mix - see `other` below.
+     *
+     * Built on first read, not on arrival. A window can sit in the cache for the length of a track
+     * and be used for a few seconds at the end of it, or never be used at all when the plan comes
+     * out as a cut, so the float copy that playback needs is the wrong thing to hold for minutes.
+     */
     buffers: Record<StemName, AudioBuffer>;
 }
+
+/**
+ * A window as it is KEPT, which is not how it is played.
+ *
+ * Sixteen-bit rather than float: the model's output is a recording, and a recording has never
+ * needed more headroom than a CD. Quantisation puts a floor at about -96 dBFS, which is 65 dB
+ * below the error htdemucs itself introduces when its rows are summed, and halves the largest
+ * thing automix holds. The float copy exists only while a transition is actually using it.
+ */
+interface StemWindow {
+    from: number;
+    duration: number;
+    role: StemRole;
+    /** Samples per channel. */
+    length: number;
+    /** One array per stem, the two channels laid end to end: [L..., R...]. */
+    pcm: Record<StemName, Int16Array>;
+}
+
+const PCM_FULL_SCALE = 32767;
+
+/**
+ * Float to int, clamped rather than wrapped.
+ *
+ * `other` is a difference of four signals and the master itself can sit at full scale, so samples
+ * past ±1 do occur. Wrapping one turns a loud sample into its own negation, which is not a quiet
+ * error - it is a click at the loudest point of the blend.
+ */
+export const toPcm = (left: Float32Array, right: Float32Array): Int16Array => {
+    const length = left.length;
+    const out = new Int16Array(length * 2);
+    for (let i = 0; i < length; i += 1) {
+        out[i] = Math.max(-32768, Math.min(32767, Math.round(left[i] * PCM_FULL_SCALE)));
+        out[length + i] = Math.max(-32768, Math.min(32767, Math.round(right[i] * PCM_FULL_SCALE)));
+    }
+    return out;
+};
+
+const toBuffer = (pcm: Int16Array, length: number): AudioBuffer => {
+    // Constructed rather than taken from the live AudioContext: the rate is htdemucs's, not the
+    // context's, so the context was never deciding anything here and threading one through every
+    // caller of `getStems` would have bought nothing.
+    const buffer = new AudioBuffer({ length, numberOfChannels: 2, sampleRate: STEM_SAMPLE_RATE });
+    const channel = new Float32Array(length);
+    for (let c = 0; c < 2; c += 1) {
+        const base = c * length;
+        for (let i = 0; i < length; i += 1) channel[i] = pcm[base + i] / PCM_FULL_SCALE;
+        buffer.copyToChannel(channel, c);
+    }
+    return buffer;
+};
+
+/** A stored window seen as something playable, decoded once and only if someone asks. */
+const view = (window: StemWindow): TrackStems => {
+    let buffers: Record<StemName, AudioBuffer> | null = null;
+    return {
+        from: window.from,
+        duration: window.duration,
+        role: window.role,
+        get buffers(): Record<StemName, AudioBuffer> {
+            if (!buffers) {
+                const built = {} as Record<StemName, AudioBuffer>;
+                for (const name of STEM_NAMES) built[name] = toBuffer(window.pcm[name], window.length);
+                buffers = built;
+            }
+            return buffers;
+        },
+    };
+};
 
 /**
  * Once the separator has declined it is not asked again for the rest of the session.
@@ -63,14 +147,17 @@ export const stemsDeclined = () => declined;
 export const canSeparateStems = (): boolean =>
     !declined && typeof window !== 'undefined' && typeof window.electron?.separateStems === 'function';
 
-const cache = new Map<string, TrackStems>();
+const cache = new Map<string, StemWindow>();
 const inFlight = new Set<string>();
 /**
  * How many windows are kept.
  *
  * Three: the outgoing track's tail, the incoming track's head, and one spare so the track that just
- * arrived does not lose its head window the moment the next one is requested. Each is 42MB, so this
- * is the single largest thing automix holds and the number is a memory budget, not a hit rate.
+ * arrived does not lose its head window the moment the next one is requested.
+ *
+ * A backstop rather than the working limit now that `dropUnwantedStems` runs at the end of every
+ * transition - between song changes the cache normally holds the one pair that is coming, and only
+ * a window landing while another pair is already stored can reach this line at all.
  */
 const MAX_WINDOWS = 3;
 
@@ -128,7 +215,27 @@ export const pickStemVictim = (
     stillWanted: ReadonlySet<string>,
 ): string | undefined => keys.find(key => !stillWanted.has(key)) ?? keys[0];
 
-const remember = (key: string, value: TrackStems) => {
+/**
+ * Forgets every window nothing is waiting on. Called when a transition ends.
+ *
+ * The two windows a blend just used are dead the moment it finishes: the outgoing track will not
+ * be played out of again, and the incoming one is now the OUTGOING track, so what it needs next is
+ * its tail, never the head it just entered on. Keeping them costs the same as keeping something
+ * useful and buys a hit that cannot happen.
+ *
+ * Deliberately not folded into `setWantedStems`, which is called from a render effect: the app
+ * advances to the incoming track BEFORE the gesture is scheduled, so at that moment the pair the
+ * session is about to ask for is already the old one. Evicting there would take the outgoing tail
+ * away a beat before the gesture reads it - the exact bug the wanted set was added to fix, with
+ * the sign flipped. The end of the transition is the one moment both windows are provably spent.
+ */
+export const dropUnwantedStems = () => {
+    for (const key of [...cache.keys()]) {
+        if (!wanted.has(key)) cache.delete(key);
+    }
+};
+
+const remember = (key: string, value: StemWindow) => {
     cache.delete(key);
     cache.set(key, value);
     while (cache.size > MAX_WINDOWS) {
@@ -145,7 +252,7 @@ const remember = (key: string, value: TrackStems) => {
  * separated": a window read by every transition still ages out behind one nobody has touched
  * since it arrived.
  */
-const touch = (key: string): TrackStems | null => {
+const touch = (key: string): StemWindow | null => {
     const found = cache.get(key);
     if (!found) return null;
     cache.delete(key);
@@ -154,8 +261,10 @@ const touch = (key: string): TrackStems | null => {
 };
 
 /** What the planner and the scheduler read. Synchronous: a transition cannot wait on a decode. */
-export const getStems = (song: SongResult | null | undefined, role: StemRole): TrackStems | null =>
-    (song ? touch(keyOf(song, role)) : null);
+export const getStems = (song: SongResult | null | undefined, role: StemRole): TrackStems | null => {
+    const found = song ? touch(keyOf(song, role)) : null;
+    return found ? view(found) : null;
+};
 
 /**
  * The same lookup, by playback key rather than by song.
@@ -171,8 +280,10 @@ export const getStems = (song: SongResult | null | undefined, role: StemRole): T
  * own clock and a window that lands between the plan and the gesture is still worth using. Late is
  * the property worth keeping; re-deriving WHICH pair was never part of it.
  */
-export const getStemsByKey = (key: string | null, role: StemRole): TrackStems | null =>
-    (key ? touch(`${key}:${role}`) : null);
+export const getStemsByKey = (key: string | null, role: StemRole): TrackStems | null => {
+    const found = key ? touch(`${key}:${role}`) : null;
+    return found ? view(found) : null;
+};
 
 /**
  * The bytes, but only if having them costs nothing.
@@ -203,8 +314,6 @@ export interface StemRequest {
     role: StemRole;
     /** Used only when it is a local URL; an online one is left alone. */
     audioUrl?: string | null;
-    /** The live context, so the buffers are built at its rate and can be played without a copy. */
-    context: AudioContext;
     /**
      * Whether this window is still the one a transition is coming for, asked just before the model.
      *
@@ -303,35 +412,33 @@ export const ensureStems = async (request: StemRequest): Promise<void> => {
             return;
         }
 
-        const buffers = {} as Record<StemName, AudioBuffer>;
-        const make = (l: Float32Array<ArrayBuffer>, r: Float32Array<ArrayBuffer>) => {
-            const buffer = request.context.createBuffer(2, windowLength, STEM_SAMPLE_RATE);
-            buffer.copyToChannel(l, 0);
-            buffer.copyToChannel(r, 1);
-            return buffer;
-        };
+        const pcm = {} as Record<StemName, Int16Array>;
         for (const name of ['drums', 'bass', 'vocals'] as const) {
-            buffers[name] = make(parts[name].left, parts[name].right);
+            pcm[name] = toPcm(parts[name].left, parts[name].right);
         }
         // `other` by SUBTRACTION rather than as a fourth model output, which is what the listening
         // harness did for eleven rounds and is not a shortcut. htdemucs is trained to reconstruct
         // but does not guarantee it: measured on a real track its four rows sum back to the mix
-        // only within -31 dB. Deriving the fourth makes the sum exact by construction, so a window
-        // with every stem at unity is bit-identical to the master - which matters because that is
-        // precisely the state the deck is in at the moment it splices over from the element.
+        // only within -31 dB. Deriving the fourth makes the sum exact, so a window with every stem
+        // at unity matches the master - which matters because that is precisely the state the deck
+        // is in at the moment it splices over from the element.
+        //
+        // Subtracted in float, before anything is quantised, so the only error left at that splice
+        // is the -96 dBFS floor of the storage rather than four stems' worth of rounding.
         const otherL = new Float32Array(windowLength);
         const otherR = new Float32Array(windowLength);
         for (let i = 0; i < windowLength; i += 1) {
             otherL[i] = left[i] - parts.drums.left[i] - parts.bass.left[i] - parts.vocals.left[i];
             otherR[i] = right[i] - parts.drums.right[i] - parts.bass.right[i] - parts.vocals.right[i];
         }
-        buffers.other = make(otherL, otherR);
+        pcm.other = toPcm(otherL, otherR);
 
         remember(key, {
             from: start / STEM_SAMPLE_RATE,
             duration: windowLength / STEM_SAMPLE_RATE,
             role: request.role,
-            buffers,
+            length: windowLength,
+            pcm,
         });
         // The two costs, printed separately and on purpose.
         //

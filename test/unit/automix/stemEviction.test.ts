@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { pickStemVictim } from '../../../src/services/automix/stems';
+import { pickStemVictim, toPcm } from '../../../src/services/automix/stems';
 
 // Keys are `${playbackSongKey}:${role}`, oldest first - the order a Map hands them back.
 const wantedSet = (...keys: string[]) => new Set(keys);
@@ -42,5 +42,33 @@ describe('pickStemVictim', () => {
 
     it('has nothing to drop from an empty cache', () => {
         expect(pickStemVictim([], wantedSet('a:tail'))).toBeUndefined();
+    });
+});
+
+describe('stem storage', () => {
+    const roundTrip = (samples: number[]) => {
+        const pcm = toPcm(Float32Array.from(samples), Float32Array.from(samples));
+        return [...pcm].map(value => value / 32767);
+    };
+
+    it('keeps the two channels apart, left then right', () => {
+        const pcm = toPcm(Float32Array.from([1, 1]), Float32Array.from([-1, -1]));
+
+        expect([...pcm]).toEqual([32767, 32767, -32767, -32767]);
+    });
+
+    it('holds a sample to within the -96 dBFS floor it claims', () => {
+        const samples = [0, 0.5, -0.5, 0.123456, -0.987654];
+        roundTrip(samples).slice(0, samples.length).forEach((value, index) => {
+            expect(Math.abs(value - samples[index])).toBeLessThan(1 / 32767);
+        });
+    });
+
+    it('clamps past full scale rather than wrapping it', () => {
+        // `other` is a difference of four signals, so this happens. Wrapping turns the loudest
+        // sample of a blend into its own negation, which is a click.
+        const pcm = toPcm(Float32Array.from([1.4, -1.4]), Float32Array.from([0, 0]));
+
+        expect([...pcm].slice(0, 2)).toEqual([32767, -32768]);
     });
 });

@@ -365,7 +365,11 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         if (offset < 0 || inOffset < 0
             || offset + length > fromStems.buffers.vocals.length
             || inOffset + length > toStems.buffers.vocals.length) {
-            console.log('[Automix] stems do not cover this window, using the master crossfade');
+            // With the numbers, because this line is the only evidence that STEM_WINDOW_SEC is set
+            // too short: the blend it names would have had a stem gesture under a longer window.
+            console.log(`[Automix] stems do not cover this ${wall.toFixed(2)}s window`
+                + ` (${fromStems.duration.toFixed(0)}s separated, needing from ${(startMedia - fromStems.from).toFixed(2)}s`
+                + ` out and ${(args.inAt - toStems.from).toFixed(2)}s in), using the master crossfade`);
             return false;
         }
 
