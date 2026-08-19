@@ -179,6 +179,13 @@ export const ensureStems = async (request: StemRequest): Promise<void> => {
     const key = keyOf(request.song, request.role);
     if (cache.has(key) || inFlight.has(key)) return;
     inFlight.add(key);
+    // After the cache and in-flight guards, so this is once per window rather than once per render.
+    //
+    // "Asked for" and "asked for and gave up" look identical without it, and only one of them is a
+    // bug in this file - which is the exact confusion that let the gesture never run for its whole
+    // life. Every way out below this line says why; this line is what makes their absence mean
+    // something. The first track of a session having no line here at all is the case to watch.
+    console.log(`[Automix] separating the ${request.role} of "${request.song.name}"`);
 
     // One window at a time, for profileService's reason and for one of its own.
     //

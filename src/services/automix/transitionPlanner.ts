@@ -315,6 +315,19 @@ export const planTransition = (
     const left = Math.max(0, end - at);
     const trimmed = from.duration - end;
     const silence = trimmed > 0.05 ? `, skipped ${round(trimmed)}s of silence at the end` : '';
+    // Said out loud when the cap decides the anchor instead of the measurement.
+    //
+    // `body` is what keeps a handover out of a track's decay, and `back()` clamps it to
+    // MAX_TRIMMED_TAIL_SEC - so on a track whose music stops fifteen seconds early the blend still
+    // begins five seconds inside the fade. That is the difference between "handed over while the
+    // song was still playing" and "handed over into an empty room", and the two are impossible to
+    // tell apart afterwards from a line that only ever reports the SILENCE it trimmed. The cap
+    // itself is deliberate - past ten seconds a tail stops being an ending - so this reports rather
+    // than argues, and the tracks it names are the evidence for whether ten is the right number.
+    const decay = from.profile?.bodyOut ?? 0;
+    const clipped = decay > MAX_TRIMMED_TAIL_SEC
+        ? `, its last ${round(decay)}s is decay but only ${MAX_TRIMMED_TAIL_SEC}s of that may be trimmed`
+        : '';
 
     // A cut does not want a length, it wants somewhere to stand: enough of the tail that the
     // incoming deck has finished loading inside it, and no more, because whatever is left over
@@ -593,7 +606,7 @@ export const planTransition = (
         // only - so the log said how long a blend was and never why that length. The scales live in
         // the choice, so without it a 1.95s blend and a 5.85s one read as the same decision.
         reason: `${choice.style} ${round(overlap)}s ${length} - ${choice.reason}`
-            + ` (${window}${sungOver}${key}${outgoingTail}${silence}${fadeOut}${placed}${bend}${entry})`,
+            + ` (${window}${sungOver}${key}${outgoingTail}${silence}${clipped}${fadeOut}${placed}${bend}${entry})`,
     };
 };
 
