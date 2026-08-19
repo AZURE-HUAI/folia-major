@@ -143,6 +143,19 @@ describe('planStemHandover', () => {
         expect(plan.exit.to - plan.exit.from).toBeGreaterThanOrEqual(1);
     });
 
+    // Rare by nature - most rests the search finds are at the separation's noise floor - and the
+    // whole "it left too fast on a few songs" complaint lives in the marginal ones.
+    it('cuts faster the quieter the rest is, so a marginal one is not taken mid-breath', () => {
+        const deep = planVocalExit(withRest(8, 1, 3, 4, 1e-6), flat(8, 1), 6);
+        // ~-32 dB against the mix: past the threshold, but only just.
+        const marginal = planVocalExit(withRest(8, 1, 3, 4, 0.025), flat(8, 1), 6);
+
+        expect(deep.kind).toBe('rest');
+        expect(marginal.kind).toBe('rest');
+        expect(deep.to - deep.from).toBeCloseTo(0.5, 6);
+        expect(marginal.to - marginal.from).toBeGreaterThan(deep.to - deep.from);
+    });
+
     it('keeps every move inside the window', () => {
         // A long bar against a short window used to push the bass swap past the end, where its
         // curve would never run and the bass would simply never change hands.

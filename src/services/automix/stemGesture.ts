@@ -35,6 +35,16 @@ const EXIT_FLOOR_SEC = 0.05;
  * a moment the rest search has already ruled out as too loud to cut in.
  */
 const MIN_RECEDE_SEC = 1;
+/**
+ * Quiet enough that a cut takes nothing with it, so it may be as fast as the harness's.
+ *
+ * Fifteen dB below the threshold that admits a cut at all. Under this the vocal stem is at the
+ * noise floor of the separation rather than at a quiet syllable, which is the case the half-second
+ * cut was scored on - both rests measured in a real session sat at -56 and -58 dB.
+ */
+const DEEP_REST_DB = -45;
+/** Longest a cut may stretch to when the rest it lands in is only just quiet enough. */
+const SOFT_EXIT_SEC = 1.2;
 
 /**
  * Where the drums change hands, as a fraction of the window.
@@ -152,8 +162,26 @@ export const planVocalExit = (
     if (!Number.isFinite(best.value)) best = { cell: firstCell, value: loudAt(firstCell) };
     const at = best.cell * cellSec;
 
+    /**
+     * How long the cut takes, graded by how quiet the moment it lands in actually is.
+     *
+     * REST_DB is a threshold, and everything on the quiet side of it used to be treated as the same
+     * thing - a half-second cut at -56 dB, where there is genuinely nothing to cut off, and the
+     * same half-second at -31 dB, where there is. The second one is a voice being taken away
+     * mid-breath, and it is exactly the "sometimes it leaves too fast, on a few songs" case: rare,
+     * because most rests the search finds are deep, and unmissable when it happens.
+     *
+     * The rule is the same one that justifies cutting at all - a cut is painless only if nothing is
+     * being cut off - so its SPEED has to answer the same measurement rather than a constant. Deep
+     * silence keeps the half second the listening rounds were scored on; a marginal rest gets up to
+     * a second and a bit, which is still a decision and not a drift.
+     */
+    const softness = Math.min(1, Math.max(0,
+        (best.value - DEEP_REST_DB) / (REST_DB - DEEP_REST_DB)));
+    const exitSec = CUT_SEC + softness * (SOFT_EXIT_SEC - CUT_SEC);
+
     return best.value <= REST_DB
-        ? { from: at, to: at + CUT_SEC, kind: 'rest', loudDb: best.value }
+        ? { from: at, to: Math.min(at + exitSec, hardEnd), kind: 'rest', loudDb: best.value }
         // Nowhere quiet to hide, so the voice recedes instead. A fade needs somewhere to hide;
         // where there is none, the ear forgives a decision but not a drift.
         : { from: recedeFrom, to: hardEnd, kind: 'recede', loudDb: best.value };
