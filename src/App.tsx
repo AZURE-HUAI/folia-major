@@ -1766,11 +1766,17 @@ export default function App() {
         subtitleFontWeight,
         subtitleFontFamily,
         subtitleFontFallbackFamilies,
-        currentSongId: currentSong?.id,
+        // The displayed song, not the playing one. This id is the visualizer's geometry seed, and a
+        // visualizer with no "song changed" event of its own infers one from the seed changing - the
+        // diorama flies its camera to a whole new corridor on it. Fed the live id, that flight starts
+        // the moment a blend arms, builds the new scene out of the lyrics still on screen, and lands
+        // back on the same song: a full song-change animation that changes nothing, followed by the
+        // real one when the hold releases.
+        currentSongId: displaySong?.id,
         visualizerMode,
     }), [
         appStyle,
-        currentSong?.id,
+        displaySong?.id,
         lyricsCustomFontFamily,
         lyricsFontFallbackFamilies,
         lyricsFontStyle,
