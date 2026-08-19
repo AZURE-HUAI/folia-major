@@ -28,6 +28,13 @@ export const REST_DB = -30;
 const CUT_SEC = 0.5;
 /** The exit never starts at zero - the first moment of a window is where a splice lands. */
 const EXIT_FLOOR_SEC = 0.05;
+/**
+ * Shortest a recede may be squeezed to before it stops being one.
+ *
+ * A second. Under it the outgoing voice does not recede, it disappears - which is a cut, placed at
+ * a moment the rest search has already ruled out as too loud to cut in.
+ */
+const MIN_RECEDE_SEC = 1;
 
 /**
  * Where the drums change hands, as a fraction of the window.
@@ -113,6 +120,12 @@ export const planVocalExit = (
     mix: Float32Array,
     /** Last moment the exit may still be running. Past it the incoming voice is established. */
     hardEnd: number,
+    /**
+     * Where a recede begins. Only used when there is no rest to cut in.
+     *
+     * Defaulted for the tests that predate it; the gesture derives it - see `planStemHandover`.
+     */
+    recedeFrom = EXIT_FLOOR_SEC,
     cellSec = CELL_SEC,
 ): VocalExit => {
     const reference = median(mix);
@@ -141,9 +154,9 @@ export const planVocalExit = (
 
     return best.value <= REST_DB
         ? { from: at, to: at + CUT_SEC, kind: 'rest', loudDb: best.value }
-        // Nowhere quiet to hide, so the voice recedes across the whole window instead. A fade needs
-        // somewhere to hide; where there is none, the ear forgives a decision but not a drift.
-        : { from: EXIT_FLOOR_SEC, to: hardEnd, kind: 'recede', loudDb: best.value };
+        // Nowhere quiet to hide, so the voice recedes instead. A fade needs somewhere to hide;
+        // where there is none, the ear forgives a decision but not a drift.
+        : { from: recedeFrom, to: hardEnd, kind: 'recede', loudDb: best.value };
 };
 
 /**
@@ -179,7 +192,31 @@ export const planStemHandover = (
     const vocalIn = Math.min(windowSec - 0.6, swap + inBar);
     const hardEnd = Math.min(vocalIn + CUT_SEC, windowSec - 0.4);
 
-    return { swap, bassAt, vocalIn, exit: planVocalExit(vocals, mix, hardEnd, cellSec) };
+    /**
+     * Where a recede starts, derived rather than pinned to the floor.
+     *
+     * It used to begin at EXIT_FLOOR_SEC - a constant whose actual meaning is "earliest a CUT may
+     * be placed", borrowed for a question it does not answer. Every other moment here is derived
+     * from the music; this one was the only bare number, and it cost the thing it was protecting.
+     *
+     * Measured on a real window: 7.68s long, incoming voice at 5.83s, the old recede running
+     * 0.05-6.33s. By the time the incoming voice arrived the outgoing one was already at **-38 dB**
+     * - so the two never overlapped at all, and the "two songs at once" the overlap exists to
+     * produce was spent instead on removing a voice nothing was competing with.
+     *
+     * Which is the first-principles error: the recede serves ONE constraint - do not stack two lead
+     * vocals - and that constraint does not exist until `vocalIn`. Before it the outgoing voice is
+     * the only voice in the room. `swap` is where it starts instead, because that is the moment the
+     * beat changes hands and the listener's attention with it: the outgoing track sings over its
+     * own groove until then, and leaves as the incoming one takes the floor. Same window, same
+     * deadline, the fade moved to the half of it where it means something.
+     *
+     * Floored so it stays a fade. Squeezed under a second this reads as a cut, in a place the
+     * search has already rejected as too loud to cut in.
+     */
+    const recedeFrom = Math.max(EXIT_FLOOR_SEC, Math.min(swap, hardEnd - MIN_RECEDE_SEC));
+
+    return { swap, bassAt, vocalIn, exit: planVocalExit(vocals, mix, hardEnd, recedeFrom, cellSec) };
 };
 
 /** Equal-power rise from 0 to 1 across [from, to], evaluated at `at`. */

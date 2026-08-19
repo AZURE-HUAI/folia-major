@@ -122,6 +122,27 @@ describe('planStemHandover', () => {
         expect(plan.bassAt).toBeGreaterThan(plan.swap);
     });
 
+    // `flat` has no rest anywhere, so the exit is always a recede - which is the arm under test.
+    it('starts a recede where the beat changes hands, not at the top of the window', () => {
+        const plan = planStemHandover(8, 2, 2, bars, flat(8, 1), flat(8, 1));
+
+        expect(plan.exit.kind).toBe('recede');
+        // The whole point: the outgoing voice keeps its full level over the incoming track's rise
+        // until the drums move. Beginning at the floor faded it out against nothing - measured on a
+        // real window, it reached -38 dB before the incoming voice had even entered, so the two
+        // songs never overlapped at all.
+        expect(plan.exit.from).toBe(plan.swap);
+        expect(plan.exit.to).toBeGreaterThan(plan.vocalIn);
+    });
+
+    it('never squeezes a recede down into a cut', () => {
+        // A long bar in a short window drags `swap` up against the deadline; past that point the
+        // fade would be shorter than the half second a cut takes, in a place already judged too
+        // loud to cut in.
+        const plan = planStemHandover(3, 8, 8, [], flat(3, 1), flat(3, 1));
+        expect(plan.exit.to - plan.exit.from).toBeGreaterThanOrEqual(1);
+    });
+
     it('keeps every move inside the window', () => {
         // A long bar against a short window used to push the bass swap past the end, where its
         // curve would never run and the bass would simply never change hands.
