@@ -253,6 +253,8 @@ export function useAutomixDecks({
     harvestRef.current = harvestDeck;
     const advanceRef = useRef(onAdvanceTrack);
     advanceRef.current = onAdvanceTrack;
+    /** Whether the picture is currently held. See `getDisplayElement`. */
+    const displayHeldRef = useRef(false);
     /** The pair the picture is made of, kept current so the capture above can be synchronous. */
     const displayRef = useRef<TransitionDisplay>({ song: currentSong, lyrics, coverUrl, duration });
     displayRef.current = { song: currentSong, lyrics, coverUrl, duration };
@@ -339,6 +341,9 @@ export function useAutomixDecks({
                 // here is still the outgoing track. A snapshot taken from an effect would race the
                 // advance and capture whichever of the two React had committed by then.
                 setTransitionDisplay(src === null ? null : displayRef.current);
+                // Mirrored into a ref so `getDisplayElement` can stay a stable callback: it is
+                // read from an animation frame, and a changing identity there restarts the loop.
+                displayHeldRef.current = src !== null;
                 // Null is the last thing every settle does, whichever way the transition ended.
                 if (src === null) {
                     // The deck that was fading out is idle again, and the source it is about to be
@@ -385,6 +390,22 @@ export function useAutomixDecks({
         (element: HTMLAudioElement | null) => Boolean(element) && element === audioRef.current,
         [audioRef],
     );
+
+    /**
+     * The deck the picture's clock belongs to, or null when the picture is live.
+     *
+     * `transitionDisplay` holds the title, cover and lyrics on the outgoing track for the length
+     * of a blend, but a picture is only half of what the listener reads: the progress bar and the
+     * lyric read-head are clocks, and left on the active deck they run on a track whose title
+     * nobody can see yet. That is the lyric view jumping to the top of a song it is not showing.
+     *
+     * Stable on purpose - the caller reads it from an animation frame.
+     */
+    const getDisplayElement = useCallback(() => {
+        if (!displayHeldRef.current) return null;
+        const active = session.getActiveDeck();
+        return elementsRef.current[active === 'A' ? 'B' : 'A'];
+    }, [session]);
 
     const getActiveChain = useCallback(
         () => chainsRef.current[session.getActiveDeck()] ?? null,
@@ -637,6 +658,7 @@ export function useAutomixDecks({
         registerDeckB,
         deckSrc,
         isActiveDeck,
+        getDisplayElement,
         connectDecks,
         getActiveChain,
         checkTransitionPoint,

@@ -40,6 +40,15 @@ type UsePlaybackVisualizerBridgeParams = {
     lyricCurrentTime: MotionValue<number>;
     /** True while an automix handover is in progress and a deck other than the active one sounds. */
     isTransitionAudible: () => boolean;
+    /**
+     * The deck the on-screen track is playing on while a transition holds the picture, else null.
+     *
+     * The clock below has to follow whatever is on screen. From the moment a blend arms, the
+     * active deck is seconds into the NEXT track while the title, cover and lyrics still belong to
+     * the one finishing - so reading the active deck here puts the progress bar and the lyric
+     * read-head near zero under a song that is three minutes in.
+     */
+    getDisplayElement?: () => HTMLAudioElement | null;
 };
 
 // Runs the requestAnimationFrame loop for audio-reactive visuals and lyric timing.
@@ -70,16 +79,18 @@ export function usePlaybackVisualizerBridge({
     lyricTimelineOffsetMs,
     lyricCurrentTime,
     isTransitionAudible,
+    getDisplayElement,
 }: UsePlaybackVisualizerBridgeParams) {
     const currentLineIndexRef = useRef(-1);
 
     const updateLoop = useCallback(() => {
-        const audioElement = audioRef.current;
+        // Normally the active deck; the outgoing one for as long as a blend holds the picture on
+        // the track it is finishing, so that clock and picture never describe different songs.
+        const audioElement = getDisplayElement?.() ?? audioRef.current;
         const isActuallyPlaying = Boolean(audioElement && !audioElement.paused && !audioElement.ended);
-        // Mid-handover the active deck is still loading while the outgoing one is still sounding.
-        // The analyser is downstream of both, so it has real signal: dropping to the idle breath
-        // here would put a visible stutter at exactly the moment meant to be seamless. The clock
-        // below deliberately keeps using isActuallyPlaying - the new deck's time is not ours yet.
+        // Mid-handover a deck can be loading while the other one is still sounding. The analyser
+        // is downstream of both, so it has real signal: dropping to the idle breath here would put
+        // a visible stutter at exactly the moment meant to be seamless.
         const hasAudibleSignal = isActuallyPlaying || isTransitionAudible();
 
         if (hasAudibleSignal && analyserRef.current) {
@@ -253,6 +264,7 @@ export function usePlaybackVisualizerBridge({
         lyricTimelineOffsetMs,
         lyricCurrentTime,
         isTransitionAudible,
+        getDisplayElement,
     ]);
 
     useEffect(() => {

@@ -494,15 +494,6 @@ export default function App() {
     );
     const lyricCurrentTime = useMotionValue(0);
 
-    // On song change, restore that song's remembered manual offset (0 when never adjusted, so a
-    // fresh song behaves exactly like the old reset). currentSongFullRef.current holds the live song
-    // for the change handler below, so a user's correction is saved against the right track.
-    useEffect(() => {
-        const nextOffsetMs = readLyricOffset(currentSong?.id);
-        setLyricTimelineOffsetMs(nextOffsetMs);
-        lyricCurrentTime.set(-nextOffsetMs / 1000);
-    }, [currentSong?.id, lyricCurrentTime]);
-
     const handleLyricTimelineOffsetChange = useCallback((offsetMs: number) => {
         setLyricTimelineOffsetMs(offsetMs);
         writeLyricOffset(currentSongFullRef.current?.id, offsetMs);
@@ -1467,6 +1458,19 @@ export default function App() {
         if (element) currentTime.set(element.currentTime);
     }, [audioRef, currentTime, isShowingTail]);
 
+    // Restore the displayed song's remembered manual offset (0 when never adjusted, so a fresh
+    // song behaves exactly like the old reset). Keyed on the DISPLAYED song, not the playing one:
+    // this is what the lyrics on screen are read against, and firing it when a blend arms would
+    // both mis-offset the outgoing lyrics and snap their read-head to zero - a lyric view that
+    // scrolls back to the top of a song it is still showing, which reads as an early song change.
+    // currentSongFullRef.current holds the live song for the change handler above, so a user's
+    // correction is still saved against the track the app has actually committed to.
+    useEffect(() => {
+        const nextOffsetMs = readLyricOffset(displaySong?.id);
+        setLyricTimelineOffsetMs(nextOffsetMs);
+        lyricCurrentTime.set(-nextOffsetMs / 1000);
+    }, [displaySong?.id, lyricCurrentTime]);
+
     const displaySongArtist = useMemo(
         () => (displaySong ? getSongArtistLabel(displaySong) || null : null),
         [displaySong],
@@ -1676,12 +1680,16 @@ export default function App() {
         audioRef,
         analyserRef,
         isTransitionAudible: automix.isTransitionAudible,
+        // The loop below is what actually drives the progress bar and the lyric read-head, sixty
+        // times a second off whichever deck it is pointed at. Both have to be the held picture's,
+        // or the bar and the lyrics run on the incoming track under the outgoing one's title.
+        getDisplayElement: automix.getDisplayElement,
         animationFrameRef,
         activePlaybackContext,
         audioPower,
         audioBands,
         currentTime,
-        lyrics,
+        lyrics: displayLyrics,
         playerState,
         duration,
         effectiveLoopMode,
@@ -3371,7 +3379,7 @@ export default function App() {
                         songTitle={displaySong?.name}
                         songArtist={displaySongArtist}
                         songAlbum={displaySongAlbum}
-                        coverUrl={getCoverUrl()}
+                        coverUrl={displayCoverUrl}
                         showText={currentView === 'player' && !isSettingsModalOpen}
                         seed={visualizerGeometrySeed}
                         staticMode={staticMode}
