@@ -12,12 +12,14 @@ import {
     type AutomixStemChain,
 } from './crossfadeGraph';
 import {
+    CELL_SEC,
+    ceilingCurve,
     envelopeOf,
     incomingCurves,
     outgoingCurves,
     planStemHandover,
 } from './stemGesture';
-import type { TrackStems } from './stems';
+import { STEM_NAMES, type TrackStems } from './stems';
 import { createDeckClock, type DeckClock } from './deckClock';
 import { barGrid, settledBpm, type Grid } from './musicalTime';
 import { planBlendShape, trimForBalance, BEATS_PER_BAR } from './signalAnalysis';
@@ -411,6 +413,47 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             wall, barSec, args.incomingBarSec, bars, vocals, mix,
         );
 
+        const outCurves = outgoingCurves(wall, handover);
+        const inCurves = incomingCurves(wall, handover);
+
+        /**
+         * The loudest sample the two decks reach TOGETHER, cell by cell.
+         *
+         * Walked at sample resolution because clipping is a peak question and an envelope cannot
+         * answer it - the pair this was found from summed to +3.4 dBFS while its 50ms RMS trace
+         * stayed within a decibel of the music's own dynamics, which is why three passes at this
+         * looking for a level dip found nothing.
+         *
+         * The cost is the same order as the two `envelopeOf` calls above, which walk the same
+         * window: eight stems here against five there.
+         */
+        const cells = Math.floor(wall / CELL_SEC);
+        const cellLength = Math.max(1, Math.round(CELL_SEC * rate));
+        const peak = new Float32Array(cells);
+        const curveAt = (curve: Float32Array, sample: number) =>
+            curve[Math.min(curve.length - 1, Math.round((sample / Math.max(1, length - 1)) * (curve.length - 1)))];
+        for (let channel = 0; channel < fromStems.buffers.vocals.numberOfChannels; channel += 1) {
+            for (let c = 0; c < cells; c += 1) {
+                let loudest = peak[c];
+                for (let i = c * cellLength; i < Math.min(length, (c + 1) * cellLength); i += 1) {
+                    let sum = 0;
+                    for (const name of STEM_NAMES) {
+                        sum += fromStems.buffers[name].getChannelData(channel)[offset + i] * curveAt(outCurves[name], i)
+                            + toStems.buffers[name].getChannelData(channel)[inOffset + i] * curveAt(inCurves[name], i);
+                    }
+                    loudest = Math.max(loudest, Math.abs(sum));
+                }
+                peak[c] = loudest;
+            }
+        }
+        const ceiling = ceilingCurve(peak, outCurves.vocals.length);
+        const held = Math.min(...ceiling);
+        for (const curves of [outCurves, inCurves]) {
+            for (const name of STEM_NAMES) {
+                for (let i = 0; i < curves[name].length; i += 1) curves[name][i] *= ceiling[i];
+            }
+        }
+
         const outgoing = connectStemDeck(
             context, fromStems, args.tailChain.output, startMedia, args.startAt, true,
         );
@@ -420,10 +463,10 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         stemChains = [outgoing, incoming];
 
         const ok = scheduleStemWindow(
-            context, outgoing, outgoingCurves(wall, handover),
+            context, outgoing, outCurves,
             args.tailChain.fade, args.startAt, wall, 'out',
         ) && scheduleStemWindow(
-            context, incoming, incomingCurves(wall, handover),
+            context, incoming, inCurves,
             args.activeChain.fade, args.startAt, wall, 'in',
         );
         if (!ok) {
@@ -442,7 +485,10 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             + ` (quietest half-second ${handover.exit.loudDb.toFixed(0)}dB under the mix),`
             + ` drums at ${handover.swap.toFixed(2)}s${bars.length ? ' on a bar line' : ''},`
             + ` bass at ${handover.bassAt.toFixed(2)}s,`
-            + ` next voice at ${handover.vocalIn.toFixed(2)}s`,
+            + ` next voice at ${handover.vocalIn.toFixed(2)}s`
+            + (held < 0.999
+                ? `, held ${(-20 * Math.log10(held)).toFixed(1)}dB down so the pair stays under full scale`
+                : ''),
         );
         return true;
     };

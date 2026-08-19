@@ -317,3 +317,90 @@ export const incomingCurves = (
 export const OTHER_SWEEP_HZ: readonly [number, number] = [25, 2200];
 /** The fraction of the window the sweep runs over. Ends before the stem's own fade does. */
 export const OTHER_SWEEP_END = 0.92;
+
+// ---------------------------------------------------------------------------------------------
+// Not summing past full scale
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Ceiling the two decks are held under together, as an amplitude.
+ *
+ * -1 dBFS. The measurement this is applied to is a SAMPLE peak, and reconstruction between samples
+ * overshoots a brick-walled master by a few tenths of a decibel, so the distance from zero is the
+ * inter-sample allowance rather than caution.
+ */
+const CEILING = 10 ** (-1 / 20);
+
+/** How far either side of a peak the reduction is spread. 200ms reads as a swell, not a step. */
+const CEILING_SPREAD_SEC = 0.2;
+
+/**
+ * The gain the whole gesture runs at so the two decks cannot sum past full scale.
+ *
+ * This exists because the stem gesture REPLACES the master crossfade rather than layering on it,
+ * and the allowance that keeps a blend under full scale lives inside the crossfade it replaced.
+ * `buildCrossfadeCurves` folds 1.5 dB into every point of its pair, for the documented reason that
+ * two tracks a decibel under full scale sum past it; the eight envelopes here carry nothing, and
+ * their whole design is that both decks are at strength across the middle. Measured on the pair
+ * this was found from - two 0 dBFS masters, which is most of what anyone owns - the sum peaked at
+ * **+3.4 dBFS with 1445 samples hard-clipped at the destination**, against +2.25 dBFS for the
+ * crossfade it replaced. Where either master had headroom the same gesture peaked at -0.75, which
+ * is why this was only ever audible on some pairs.
+ *
+ * A constant would be the wrong instrument twice over. Sized to cover +3.4 dB it would take 3.7 dB
+ * out of the middle of EVERY stemmed blend, including the ones already sitting a decibel under -
+ * a deliberate version of the complaint that started this. And the requirement is not shaped like
+ * the crossfade's bell: two loud masters are over the ceiling for as long as both are playing, so
+ * on the measured pair the reduction is still 4 dB at 94% of the way through, where a bell has
+ * fallen to 0.19 and would need 23 dB at its centre to cover it.
+ *
+ * So it is measured instead. Both windows are decoded and in memory by the time the curves are
+ * built, and the summed peak is one pass over samples we already hold. Pairs that do not need it
+ * get exactly 1 and are bit-for-bit unchanged.
+ */
+export const ceilingCurve = (
+    /** Loudest sample the two decks reach TOGETHER, one entry per cell of the window. */
+    peak: Float32Array,
+    /** Length of the curves this is multiplied into. */
+    points: number,
+    cellSec = CELL_SEC,
+): Float32Array => {
+    const cells = peak.length;
+    const out = new Float32Array(points).fill(1);
+    if (!cells || points < 2) return out;
+
+    const span = Math.max(1, Math.round(CEILING_SPREAD_SEC / cellSec));
+    // Running MINIMUM before any smoothing. A moving average over the raw requirement would let
+    // the peak it was computed from straight back through: what has to be true is that the
+    // reduction is already fully in place when the loud sample arrives, and taking the minimum
+    // over the neighbourhood first is what buys that. It also makes the average that follows safe
+    // by construction - every cell inside the average's span has already been pulled down to at
+    // least what the centre cell needs, so their mean cannot sit above it.
+    const held = new Float32Array(cells);
+    for (let c = 0; c < cells; c += 1) {
+        let lowest = 1;
+        for (let k = Math.max(0, c - span); k <= Math.min(cells - 1, c + span); k += 1) {
+            lowest = Math.min(lowest, Math.min(1, CEILING / Math.max(peak[k], 1e-6)));
+        }
+        held[c] = lowest;
+    }
+
+    for (let i = 0; i < points; i += 1) {
+        const centre = Math.round((i / (points - 1)) * (cells - 1));
+        let sum = 0;
+        let n = 0;
+        for (let k = Math.max(0, centre - span); k <= Math.min(cells - 1, centre + span); k += 1) {
+            sum += held[k];
+            n += 1;
+        }
+        // Tapered back to unity across the first and last `span` cells, because THE changeover
+        // invariant outranks this one: the deck splices from its media element to these buffers
+        // over eight milliseconds at the top of the window and hands the track back at the bottom,
+        // and a curve that did not start and end at exactly 1 would put a level step on both.
+        // It costs nothing real - at either end only one deck is at strength, so what is summing
+        // there is a single master and is already under full scale by construction.
+        const taper = Math.min(1, Math.min(centre, cells - 1 - centre) / span);
+        out[i] = 1 - (1 - sum / n) * taper;
+    }
+    return out;
+};
