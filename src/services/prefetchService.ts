@@ -34,10 +34,20 @@ const MAX_PREFETCH_CACHE_SIZE = 200; // Evict least recently used entries beyond
  * try to fetch. Never awaited: a slow decode must not hold up the song after this one.
  */
 const analyseForAutomix = (song: SongResult, audioUrl: string | null | undefined) => {
+    const settings = useSettingsUiStore.getState();
+    // Nothing reads a profile while blending is switched off, and this is not a cheap thing to
+    // produce for nobody: the whole file is read, decoded, and put through the beat model in the
+    // inference process - per prefetched track, and a prefetch pass covers three of them. Blending
+    // is off by default, so without this gate every listener paid for a feature they never enabled.
+    //
+    // Gated on the feature rather than on the mode: the crossfade mode reads the same profile for
+    // its loudness match and its beat alignment, so gating on `transitionMode` would quietly make
+    // that mode worse. Off is the only state where the answer is genuinely never wanted.
+    if (!settings.automixEnabled) return;
     void ensureTrackProfile({
         song,
         audioUrl: audioUrl === 'CACHED_IN_DB' ? null : audioUrl ?? null,
-        enableMediaCache: useSettingsUiStore.getState().enableMediaCache,
+        enableMediaCache: settings.enableMediaCache,
     });
 };
 

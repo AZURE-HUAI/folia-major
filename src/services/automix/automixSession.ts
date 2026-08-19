@@ -858,8 +858,8 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
          */
         const rendering = stemmed ? ', four stems'
             : fromStems && toStems ? `${shape.shapeBands ? ', three bands' : ''}`
-                : `, no stems (${!fromStems && !toStems ? 'neither end' : fromStems ? 'incoming' : 'outgoing'}`
-                    + ` separated yet)${shape.shapeBands ? ', three bands' : ''}`;
+                : `, no stems (${!fromStems && !toStems ? 'neither end' : fromStems ? 'the incoming end' : 'the outgoing end'}`
+                    + ` is not separated yet)${shape.shapeBands ? ', three bands' : ''}`;
         console.log(
             `[Automix] ${shape.style}${shape.style === plan.style ? '' : ` (planned ${plan.style})`}:`
             + `${hold > 0.01 ? ` waits ${hold.toFixed(2)}s, then` : ''}`

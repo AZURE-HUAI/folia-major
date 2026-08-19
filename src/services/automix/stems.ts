@@ -93,19 +93,69 @@ const explainOnce = (key: string, message: string) => {
 /** Tail of the separation queue; see the gate in `ensureStems` for why one window at a time. */
 let queue: Promise<void> = Promise.resolve();
 
+/**
+ * The two windows a transition would use right now. See `remember` for why eviction needs them.
+ *
+ * A set of keys rather than a pair of songs, because that is all the eviction question needs and
+ * it keeps this file from having an opinion about what a queue is.
+ */
+let wanted = new Set<string>();
+
+/** The key a window is cached under, so a caller can name the pair it still needs. */
+export const stemWindowKey = (song: SongResult, role: StemRole) => keyOf(song, role);
+
+/** Names the pair the next transition would use. Anything else becomes evictable. */
+export const setWantedStems = (keys: readonly string[]) => { wanted = new Set(keys); };
+
+/**
+ * Which window to drop when the budget is full: the oldest one NOBODY IS WAITING ON.
+ *
+ * Age alone gets this exactly backwards, and it was measured doing so. Separation for a transition
+ * the listener had already skipped away from finished twenty seconds later, and storing that dead
+ * result evicted the tail of the track playing at that moment - the one window the next transition
+ * was certain to ask for. That transition then fell back to the crossfade without even
+ * re-separating, because the other half of the pair was still cached.
+ *
+ * The budget was never the problem. Three slots hold a pair plus a spare, which is what the comment
+ * on MAX_WINDOWS has always claimed. What it could not survive was throwing the pair away to make
+ * room for the spare.
+ *
+ * Falls back to the oldest when everything is wanted, so a stale or empty `wanted` degrades to the
+ * plain LRU this replaced rather than to nothing being evictable.
+ */
+export const pickStemVictim = (
+    keys: readonly string[],
+    stillWanted: ReadonlySet<string>,
+): string | undefined => keys.find(key => !stillWanted.has(key)) ?? keys[0];
+
 const remember = (key: string, value: TrackStems) => {
     cache.delete(key);
     cache.set(key, value);
     while (cache.size > MAX_WINDOWS) {
-        const oldest = cache.keys().next().value;
-        if (oldest === undefined) break;
-        cache.delete(oldest);
+        const victim = pickStemVictim([...cache.keys()], wanted);
+        if (victim === undefined) break;
+        cache.delete(victim);
     }
+};
+
+/**
+ * Read a window and mark it as used.
+ *
+ * Re-keyed on READ and not only on write, or "least recently used" means "least recently
+ * separated": a window read by every transition still ages out behind one nobody has touched
+ * since it arrived.
+ */
+const touch = (key: string): TrackStems | null => {
+    const found = cache.get(key);
+    if (!found) return null;
+    cache.delete(key);
+    cache.set(key, found);
+    return found;
 };
 
 /** What the planner and the scheduler read. Synchronous: a transition cannot wait on a decode. */
 export const getStems = (song: SongResult | null | undefined, role: StemRole): TrackStems | null =>
-    (song ? cache.get(keyOf(song, role)) ?? null : null);
+    (song ? touch(keyOf(song, role)) : null);
 
 /**
  * The same lookup, by playback key rather than by song.
@@ -122,7 +172,7 @@ export const getStems = (song: SongResult | null | undefined, role: StemRole): T
  * the property worth keeping; re-deriving WHICH pair was never part of it.
  */
 export const getStemsByKey = (key: string | null, role: StemRole): TrackStems | null =>
-    (key ? cache.get(`${key}:${role}`) ?? null : null);
+    (key ? touch(`${key}:${role}`) : null);
 
 /**
  * The bytes, but only if having them costs nothing.

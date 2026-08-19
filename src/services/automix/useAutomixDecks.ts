@@ -6,7 +6,7 @@ import type { AudioQualityPreference } from '../../types/onlineMusic';
 import { getPlaybackSongKey } from '../../utils/appPlaybackGuards';
 import { getPrefetchedData } from '../prefetchService';
 import { getTrackProfile, recordPlayedTail } from './profileService';
-import { canSeparateStems, ensureStems, getStemsByKey } from './stems';
+import { canSeparateStems, ensureStems, getStemsByKey, setWantedStems, stemWindowKey } from './stems';
 import { connectAutomixDeck, type AutomixDeckChain } from './crossfadeGraph';
 import {
     createAutomixSession,
@@ -594,6 +594,13 @@ export function useAutomixDecks({
 
         const next = resolveNextQueueSong(playQueue, currentSong, loopMode);
         stemSongsRef.current = { from: currentSong, to: next };
+        // The same pair, told to the cache: it decides what to throw away when it runs out of room,
+        // and without this it can only go by age - which is how it came to evict the window a
+        // transition was about to ask for in order to store one for a transition already abandoned.
+        setWantedStems([
+            stemWindowKey(currentSong, 'tail'),
+            ...(next ? [stemWindowKey(next, 'head')] : []),
+        ]);
         // Read through the same ref the session reads, so "still wanted" means exactly "still the
         // pair a transition would use" - a skip rewrites this on the next render and every window
         // queued for the abandoned pair stops before it reaches the model.
