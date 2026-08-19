@@ -132,6 +132,16 @@ export const resolveDeckSrc = ({
     return warm ?? audioSrc ?? undefined;
 };
 
+/** The now-playing picture, frozen for as long as a transition is running. */
+export interface TransitionDisplay {
+    song: SongResult | null;
+    lyrics: LyricData | null;
+    /** Held with the song: the cover cache is repointed at the arriving track during the blend. */
+    coverUrl: string | null;
+    /** Held for the same reason, or the progress bar reads the old position against a new length. */
+    duration: number;
+}
+
 type UseAutomixDecksParams = {
     audioRef: MutableRefObject<HTMLAudioElement | null>;
     audioContextRef: MutableRefObject<AudioContext | null>;
@@ -146,6 +156,8 @@ type UseAutomixDecksParams = {
      */
     currentSongKeyRef: MutableRefObject<string | number | null>;
     lyrics: LyricData | null;
+    /** Only ever read to freeze the picture across a transition - see `transitionDisplay`. */
+    coverUrl: string | null;
     duration: number;
     playQueue: SongResult[];
     loopMode: StageLoopMode;
@@ -166,6 +178,7 @@ export function useAutomixDecks({
     currentSong,
     currentSongKeyRef,
     lyrics,
+    coverUrl,
     duration,
     playQueue,
     loopMode,
@@ -177,6 +190,21 @@ export function useAutomixDecks({
 }: UseAutomixDecksParams) {
     const [activeDeck, setActiveDeck] = useState<AutomixDeckId>('A');
     const [tailSrc, setTailSrc] = useState<string | null>(null);
+    /**
+     * What the app should still be SHOWING, while internally it has already moved on.
+     *
+     * A transition starts by advancing the queue, because that is what loads and starts the next
+     * track - so from the arm onwards `currentSong`, the lyrics and the progress bar all belong to
+     * the track that is arriving, seconds before anybody hears it arrive. The listener is still
+     * hearing the old song and reading the new one's title.
+     *
+     * Held rather than deferred. Moving the advance itself is the obvious fix and it does not
+     * work: for anything already in the media cache `playSong` mints a fresh blob URL, so
+     * `warmSrc` is null for those tracks and the advance is the ONLY thing that ever gives the
+     * incoming deck a source. Deferring it would leave that deck silent for the whole blend. What
+     * is safe to defer is the picture, which is what this is.
+     */
+    const [transitionDisplay, setTransitionDisplay] = useState<TransitionDisplay | null>(null);
     /**
      * The next track's source, handed to the idle deck so it can buffer before it is needed.
      *
@@ -225,6 +253,9 @@ export function useAutomixDecks({
     harvestRef.current = harvestDeck;
     const advanceRef = useRef(onAdvanceTrack);
     advanceRef.current = onAdvanceTrack;
+    /** The pair the picture is made of, kept current so the capture above can be synchronous. */
+    const displayRef = useRef<TransitionDisplay>({ song: currentSong, lyrics, coverUrl, duration });
+    displayRef.current = { song: currentSong, lyrics, coverUrl, duration };
     // Set when a pause interrupts an armed transition, consumed by the audio bridge's autoplay.
     const suppressAutoplayRef = useRef(false);
     const playerStateRef = useRef(playerState);
@@ -303,6 +334,11 @@ export function useAutomixDecks({
                     harvestRef.current(active === 'A' ? 'B' : 'A');
                 }
                 setTailSrc(src);
+                // Read synchronously, and that is the whole trick: the session calls this from the
+                // same block that calls `advanceTrack` a few lines later, so what the ref holds
+                // here is still the outgoing track. A snapshot taken from an effect would race the
+                // advance and capture whichever of the two React had committed by then.
+                setTransitionDisplay(src === null ? null : displayRef.current);
                 // Null is the last thing every settle does, whichever way the transition ended.
                 if (src === null) {
                     // The deck that was fading out is idle again, and the source it is about to be
@@ -595,6 +631,7 @@ export function useAutomixDecks({
     return {
         activeDeck,
         autoplayHeld,
+        transitionDisplay,
         suppressAutoplayRef,
         registerDeckA,
         registerDeckB,
