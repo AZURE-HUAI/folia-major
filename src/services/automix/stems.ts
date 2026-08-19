@@ -90,6 +90,9 @@ const explainOnce = (key: string, message: string) => {
     console.log(message);
 };
 
+/** Tail of the separation queue; see the gate in `ensureStems` for why one window at a time. */
+let queue: Promise<void> = Promise.resolve();
+
 const remember = (key: string, value: TrackStems) => {
     cache.delete(key);
     cache.set(key, value);
@@ -177,7 +180,20 @@ export const ensureStems = async (request: StemRequest): Promise<void> => {
     if (cache.has(key) || inFlight.has(key)) return;
     inFlight.add(key);
 
+    // One window at a time, for profileService's reason and for one of its own.
+    //
+    // Its own: the inference worker serialises anyway, so two windows in flight only means the
+    // second one WAITS INSIDE its own measurement. That is not a harmless cosmetic error - it is
+    // the number the whole "can a weaker machine run this" question rests on, and unserialised it
+    // read 23.4s for a window whose model time was 9.5s, which is the difference between three
+    // times realtime and not keeping up at all. A measurement taken around a queue measures the
+    // queue. Holding the slot here means the timer below starts when the work does.
+    const ahead = queue;
+    let release = () => { };
+    queue = new Promise<void>(resolve => { release = resolve; });
+
     try {
+        await ahead;
         // Behind every profile queued so far - see `profilesSettled` for why that order and not the
         // other one. Held before the decode as well as the model, because the decode is tens of
         // megabytes on the same main thread the profile's own decode wants.
@@ -276,6 +292,9 @@ export const ensureStems = async (request: StemRequest): Promise<void> => {
         console.warn('[Automix] separation failed', error);
     } finally {
         inFlight.delete(key);
+        // Unconditionally, including after a throw: a slot never handed back stalls every window
+        // for the rest of the session, and the failure mode is the subsystem going quiet forever.
+        release();
     }
 };
 
