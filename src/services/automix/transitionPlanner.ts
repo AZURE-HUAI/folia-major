@@ -40,7 +40,7 @@ export type TransitionKind = 'hardCut' | 'fade';
 
 export interface TransitionPlan {
     kind: TransitionKind;
-    /** Which of the five joins this is. Decided here, realised by shapeBlend. */
+    /** Which of the four joins this is. Decided here, realised by shapeBlend. */
     style: TransitionStyle;
     /** How the two keys sit together. Reported so a length can be argued with. */
     relation: KeyRelation;
