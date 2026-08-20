@@ -52,6 +52,22 @@ const SOFT_EXIT_SEC = 1.2;
  * Snapped to a real bar line when one is in reach; this is only the target it reaches towards.
  */
 const SWAP_TARGET = 0.42;
+/**
+ * How much blend may be left AFTER the low end has changed hands, in bars.
+ *
+ * SWAP_TARGET is a fraction and the gesture that follows it is a fixed size - one bar to the bass,
+ * one to the incoming voice - so the part of the blend that comes after the handover grows with the
+ * window while the handover itself does not. Past that point the outgoing track has given up its
+ * drums, its bass and its voice; what is left of it is residue, and residue does not get better
+ * with time. Measured across one session: every blend that sounded right left between 0.1 and 1.1
+ * bars behind the handover, and the one that did not left 3.6.
+ *
+ * Two bars, so no blend that already worked moves by a sample. When the bound does bite it moves
+ * the whole gesture later rather than shortening the blend - a long overlap then spends its extra
+ * time BEFORE the handover, with the outgoing track still leading and the incoming one rising under
+ * it, which is what a long mix is supposed to be.
+ */
+const MAX_TAIL_BARS = 2;
 /** Room left after the last stem move so nothing is still changing as the window ends. */
 const TAIL_GUARD_SEC = 0.3;
 
@@ -208,7 +224,13 @@ export const planStemHandover = (
     cellSec = CELL_SEC,
 ): StemHandover => {
     const bar = outgoingBarSec && outgoingBarSec > 0 ? outgoingBarSec : windowSec / 4;
-    const target = SWAP_TARGET * windowSec;
+    // The fraction, unless it would leave more than MAX_TAIL_BARS behind the handover - in which
+    // case the handover moves back towards the end until it does not. `max`, so this is inert on
+    // every window short enough for the fraction to already land late enough.
+    const target = Math.max(
+        SWAP_TARGET * windowSec,
+        windowSec - (1 + MAX_TAIL_BARS) * bar,
+    );
     // A bar line if one is in reach, because a handover on the count reads as an edit; the plain
     // fraction otherwise, because a handover somewhere beats no handover.
     const reachable = downbeats.filter(at => at >= 1 && at <= windowSec - 1.5);

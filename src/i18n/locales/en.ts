@@ -637,7 +637,7 @@ export default {
     "transitionEngineFullDesc": "Desktop build: lands on bar lines, splits voice from backing, hands over instrument by instrument.",
     "transitionEngineLite": "Compatible",
     "transitionEngineLiteDesc": "Browser build: the same decisions, but separation and the beat model need the desktop app.",
-    "transitionAutomixNeedsCache": "Song caching is off, so online tracks are never analysed and Automix has nothing to work from - those song changes fall back to the stable crossfade. Local files are analysed either way.",
+    "transitionAutomixNeedsCache": "Song caching is off, so online tracks are never analysed.",
     "integrationSettings": "Integration settings",
     "integrationSettingsDesc": "Connections for external apps and services.",
     "lyricApi": "Lyrics API",

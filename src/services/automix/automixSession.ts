@@ -490,6 +490,10 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             + ` drums at ${handover.swap.toFixed(2)}s${bars.length ? ' on a bar line' : ''},`
             + ` bass at ${handover.bassAt.toFixed(2)}s,`
             + ` next voice at ${handover.vocalIn.toFixed(2)}s`
+            // What is left of the blend once the outgoing track has handed over everything it had.
+            // Printed because it is the quantity that went wrong and nothing named it: a blend
+            // reading 16.64s looks like a length decision, and it was a placement one.
+            + `, ${(wall - Math.max(handover.bassAt, handover.vocalIn)).toFixed(2)}s of blend after that`
             + (held < 0.999
                 ? `, held ${(-20 * Math.log10(held)).toFixed(1)}dB down so the pair stays under full scale`
                 : ''),

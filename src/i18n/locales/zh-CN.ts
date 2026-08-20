@@ -638,7 +638,7 @@ export default {
     "transitionEngineFullDesc": "客户端：能对上小节线，能拆出人声和伴奏，逐件乐器交接。",
     "transitionEngineLite": "兼容模式",
     "transitionEngineLiteDesc": "浏览器端：判断一样，但拆轨和节拍模型只有客户端有。",
-    "transitionAutomixNeedsCache": "歌曲缓存已关闭，在线歌曲不会被分析，Automix 拿不到任何依据——这些换歌会退回稳定的交叉淡化。本地文件不受影响，照常分析。",
+    "transitionAutomixNeedsCache": "歌曲缓存已关闭，在线歌曲不会被分析。",
     "integrationSettings": "连接与集成",
     "integrationSettingsDesc": "外部程序接入设置。",
     "lyricApi": "歌词接口",

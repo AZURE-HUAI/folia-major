@@ -116,6 +116,29 @@ describe('planStemHandover', () => {
         expect(plan.bassAt - plan.swap).toBeCloseTo(2, 6);
     });
 
+    it('does not leave a long blend trailing behind its own handover', () => {
+        // The 16.64s blend from a real session, at 115 BPM - a 2.08s bar. On the plain 42% target
+        // the drums swapped at 6.99s and the bass at 9.07s, leaving 7.57s in which the outgoing
+        // track had already given up its drums, its bass and its voice and was only residue. Every
+        // blend in that session that sounded right left at most 1.1 bars behind the handover.
+        const bar = 2.08;
+        const windowSec = 16.64;
+        const downbeats = Array.from({ length: 8 }, (_, index) => 0.4 + index * bar);
+        const plan = planStemHandover(windowSec, bar, bar, downbeats, flat(windowSec, 1), flat(windowSec, 1));
+
+        expect(windowSec - plan.bassAt).toBeLessThanOrEqual(2 * bar + 1e-9);
+        // Moved LATER, not shortened: the extra length is spent before the handover, not after it.
+        expect(plan.swap).toBeGreaterThan(0.42 * windowSec);
+        expect(plan.bassAt - plan.swap).toBeCloseTo(bar, 6);
+    });
+
+    it('leaves a blend short enough to already land late exactly where it was', () => {
+        // The bound is a `max` against the fraction, so it has to be inert here - 8s at a 2s bar
+        // leaves 8 - 3 x 2 = 2s, well before the 42% target of 3.36s.
+        const plan = planStemHandover(8, 2, 2, bars, flat(8, 1), flat(8, 1));
+        expect(plan.swap).toBe(2.5);
+    });
+
     it('still places a handover when the track has no bar lines at all', () => {
         // An unanalysed track must not lose the gesture; it loses only the placement.
         const plan = planStemHandover(8, null, null, [], flat(8, 1), flat(8, 1));
