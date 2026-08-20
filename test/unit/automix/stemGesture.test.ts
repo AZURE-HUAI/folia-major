@@ -3,13 +3,13 @@ import {
     envelopeOf,
     fall,
     findSustain,
-    firstVocalMoment,
     incomingCurves,
     outgoingCurves,
     planStemHandover,
     lastVocalMoment,
     planVocalExit,
     rise,
+    singsInWindow,
     CELL_SEC,
     REST_DB,
 } from '@/services/automix/stemGesture';
@@ -405,30 +405,29 @@ describe('lastVocalMoment', () => {
     });
 });
 
-describe('firstVocalMoment', () => {
+describe('singsInWindow', () => {
     // The reference is the whole separated head, not the window being searched - a quiet intro
     // drags a window-local median down until the separation's own leakage clears the floor.
     const mix = flat(10, 0.5);
 
-    it('reports the first cell of the entry, not the cell that proved it', () => {
-        // Silence, then singing from 4s. The DIRECTION is the assertion and it is the opposite of
-        // `lastVocalMoment`'s: an entry reported early only raises a fader on a stem that is still
-        // silent, which costs nothing, while one reported late mutes a singer who has started.
-        expect(firstVocalMoment(withRest(10, 0.0001, 4, 10, 0.3), mix)).toBeCloseTo(4, 6);
+    it('finds a voice when the incoming track sings inside the window', () => {
+        expect(singsInWindow(withRest(10, 0.0001, 4, 10, 0.3), mix)).toBe(true);
     });
 
-    it('returns null when the incoming track does not sing inside the window', () => {
-        // An ordinary answer for a long intro, not a failure - the caller keeps its own guess.
-        expect(firstVocalMoment(flat(10, 0.0001), mix)).toBeNull();
+    it('reports no voice when the incoming track does not sing inside the window', () => {
+        // The half of this that is load-bearing, and the only half. An ordinary answer for a long
+        // intro rather than a failure: it is what lets a window nobody is waiting for stay the
+        // outgoing track's own ending.
+        expect(singsInWindow(flat(10, 0.0001), mix)).toBe(false);
     });
 
-    it('ignores a leaked transient before the singing starts', () => {
-        // Two cells of a hi-hat htdemucs put in the vocal row. Taking it would open the incoming
-        // fader two seconds early and pull the outgoing voice's deadline with it.
-        const vocals = withRest(10, 0.0001, 4, 10, 0.3);
+    it('does not call two cells of leakage a voice', () => {
+        // A hi-hat htdemucs filed under vocals, in a window with no singing in it at all. Taking
+        // it would put a deadline on the outgoing voice on behalf of a singer who is not there.
+        const vocals = flat(10, 0.0001);
         vocals[Math.round(2 / CELL_SEC)] = 0.9;
         vocals[Math.round(2 / CELL_SEC) + 1] = 0.9;
-        expect(firstVocalMoment(vocals, mix)).toBeCloseTo(4, 6);
+        expect(singsInWindow(vocals, mix)).toBe(false);
     });
 });
 

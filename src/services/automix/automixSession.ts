@@ -15,7 +15,7 @@ import {
 } from './crossfadeGraph';
 import {
     envelopeOf,
-    firstVocalMoment,
+    singsInWindow,
     incomingCurves,
     outgoingCurves,
     planStemHandover,
@@ -404,8 +404,9 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         const vocals = envelopeOf(slice(fromStems.buffers.vocals, offset), rate);
         const mix = mixEnvelope(fromStems, offset, length);
         /**
-         * Where the incoming track starts singing inside this window. MEASURED ONLY - see
-         * `planStemHandover`, which is still placing the entry on the choreography.
+         * Whether the incoming track's vocal stem finds any singing in this window. Only the
+         * NEGATIVE is usable - see `singsInWindow` and the conjunction below. The entry itself is
+         * still placed on the choreography; see `planStemHandover`.
          *
          * The reference is the whole separated head rather than the blend window, and that is what
          * the first attempt got wrong: the relative floor both ends share lands where a voice lives
@@ -414,7 +415,7 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
          * Thirty separated seconds contain the first verse of essentially any song, which puts this
          * end back on the same measurement as the other one.
          */
-        const incomingVocalAt = firstVocalMoment(
+        const stemFindsVoice = singsInWindow(
             envelopeOf(slice(toStems.buffers.vocals, inOffset), rate),
             mixEnvelope(toStems, 0, toStems.buffers.vocals.length),
         );
@@ -445,7 +446,7 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
          * Whether the incoming track sings anywhere inside this window - and it takes TWO
          * measurements agreeing, because neither one is trustworthy alone.
          *
-         * `firstVocalMoment` is over-eager: it reads separation bleed as singing on most heads, so
+         * `singsInWindow` is over-eager: it reads separation bleed as singing on most heads, so
          * a positive from it means nothing. Its NEGATIVE is the useful half - nothing anywhere in
          * the window cleared a floor that bleed usually clears. The structural boundary is the
          * opposite shape: `sectionStart` is measured over the whole track and is believable about
@@ -462,7 +463,7 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         const introAt = args.incomingSectionStart === null
             ? null
             : args.incomingSectionStart - args.inAt;
-        const incomingSings = !(incomingVocalAt === null && introAt !== null && introAt > wall);
+        const incomingSings = !(!stemFindsVoice && introAt !== null && introAt > wall);
 
         const handover = planStemHandover(
             wall, barSec, args.incomingBarSec, bars, vocals, mix,
@@ -559,10 +560,6 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             + (handover.vocalIn > handover.dueAt + 0.005
                 ? ` (held back from ${handover.dueAt.toFixed(2)}s to meet the note)`
                 : '')
-            // And what the incoming vocal stem thinks, which nothing acts on yet. Printed on every
-            // transition so one listening pass can say whether it agrees with the ear - the same
-            // way `findSustain` was carried for a round before the ride branch was built on it.
-            + `, its vocal stem says ${incomingVocalAt === null ? 'no voice here' : `${incomingVocalAt.toFixed(2)}s`}`
             + (vocalGap > 0
                 ? `, ${vocalGap.toFixed(2)}s with neither voice`
                 : `, voices overlap by ${(-vocalGap).toFixed(2)}s`)

@@ -476,48 +476,47 @@ export const lastVocalMoment = (
 };
 
 /**
- * The first moment the INCOMING track sings, in seconds from the window's start.
+ * Whether the INCOMING track sings anywhere inside the window.
  *
- * The twin of `lastVocalMoment`, and deliberately not its exact mirror, because the error each one
- * has to keep on the safe side points the opposite way. A vocal END reported late puts a handover
- * in a dull instrumental outro and reported early puts it on top of a singer, so that one rounds
- * up and adds a tail. An ENTRY reported early only raises a fader on a stem that is still silent,
- * which costs nothing; reported late it mutes real singing. So this returns the first cell of the
- * run rather than the cell the evidence became sufficient on, and adds nothing to it.
+ * This used to report WHERE it starts singing, and that number was never once honoured by anything.
+ * Across two real sessions it read the separation's own leakage as a singer - a voice at 0.70s,
+ * 1.05s and 1.85s against intros running 34, 24 and 23 seconds - so the time is gone and only the
+ * verdict is left, which is the half that survives its own error. A positive means nothing, because
+ * bleed clears the floor on most heads. A NEGATIVE means nothing anywhere in the window cleared a
+ * floor that bleed usually clears, and that is worth having: it is half of the conjunction that
+ * lets the outgoing voice keep a window nobody is waiting for. See `incomingSings` in
+ * `automixSession` for the other half.
  *
- * Null when the incoming track never sings inside the window, which for a long intro is the
- * ordinary answer rather than a failure - the caller keeps its own guess for that case.
+ * A run of SUSTAIN_CELLS is required rather than one loud cell, so two cells of a hi-hat htdemucs
+ * filed under vocals cannot turn a silent intro into a singer.
  *
  * **`reference` is the whole separated head, not this window, and that is the entire difference
- * between this working and not.** Shipped against the window's own mix it read the separation's
- * bleed as singing on 15 of 24 real transitions - tracks whose intros are 46s, 21s and 15s long
- * all reported a voice at 0.00s. The mechanism is that both ends use the same relative floor,
- * `REST_DB` under the median of what else is playing, and the two ends are not in the same regime:
- * an outgoing tail is full-band music, so the floor lands where a voice lives, while an incoming
- * HEAD window can be nothing but a quiet intro, which drags the median down until htdemucs's
- * leakage clears it. Measuring the reference over the track's own thirty separated seconds - which
- * contain its first verse on essentially any song - puts both ends back on the same measurement.
+ * between this working and not.** Shipped against the window's own mix it read the bleed as singing
+ * on 15 of 24 real transitions - tracks whose intros are 46s, 21s and 15s long all reported a voice
+ * at 0.00s. The mechanism is that the floor is relative - `REST_DB` under the median of what else
+ * is playing - and the two ends are not in the same regime: an outgoing tail is full-band music, so
+ * the floor lands where a voice lives, while an incoming HEAD window can be nothing but a quiet
+ * intro, which drags the median down until the leakage clears it. Measuring the reference over the
+ * track's own thirty separated seconds - which contain its first verse on essentially any song -
+ * puts both ends back on the same measurement.
  */
-export const firstVocalMoment = (
+export const singsInWindow = (
     /** The incoming vocal stem's envelope over the window being searched. */
     vocals: Float32Array,
     /** The incoming mix's envelope over the WHOLE separated head. See above. */
     reference: Float32Array,
-    cellSec = CELL_SEC,
-): number | null => {
+): boolean => {
     const floor = median(reference) * 10 ** (REST_DB / 20);
     let run = 0;
-    let edge = -1;
     for (let cell = 0; cell < vocals.length; cell += 1) {
         if (vocals[cell] <= floor) {
             run = 0;
             continue;
         }
-        if (run === 0) edge = cell;
         run += 1;
-        if (run >= SUSTAIN_CELLS) return edge * cellSec;
+        if (run >= SUSTAIN_CELLS) return true;
     }
-    return null;
+    return false;
 };
 
 /**
@@ -577,12 +576,14 @@ export const planStemHandover = (
      * heard it as arriving at the next track several lines in, which is what it sounds like from
      * outside: the lyrics scroll on the incoming track's own clock while its voice is muted.
      *
-     * `firstVocalMoment` was wired in here for one round to close that, and is now measured and
-     * logged only. It read the separation's bleed as singing on 15 of 24 real transitions - tracks
-     * with 46s, 21s and 15s intros all reporting a voice at 0.00s - so it was never once honoured,
-     * and a number that cannot be trusted must not quietly be a fader time. It ships as an
-     * instrument until a listening pass says it sees what the ear hears, which is the route
-     * `findSustain` took before the ride branch was built on it.
+     * A vocal-stem measurement of the real entry was wired in here for one round to close that,
+     * then carried as an instrument for one more, and it is now gone. It read the separation's
+     * bleed as singing on 15 of 24 real transitions - tracks with 46s, 21s and 15s intros all
+     * reporting a voice at 0.00s - so it was never once honoured, and a number that cannot be
+     * trusted must not quietly be a fader time. What is left of it is `singsInWindow`: a yes/no
+     * whose negative is usable and whose positive is not. Closing the gap properly needs a third
+     * measurement the audio cannot give - the lyric file's line starts - and that was raised and
+     * deliberately not built, so this entry stays choreography on purpose.
      */
     //
     // And when the incoming track does not sing inside this window at all, there is no entry to be
