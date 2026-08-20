@@ -1449,6 +1449,19 @@ export default function App() {
     const displayDuration = automix.transitionDisplay ? automix.transitionDisplay.duration : duration;
     /** While true the progress bar is driven by the deck that is finishing, not the active one. */
     const isShowingTail = automix.transitionDisplay !== null;
+    /**
+     * The transport the picture belongs to, which is not idle just because the next track is.
+     *
+     * `playSong` resets the state to IDLE for the track it is loading, and that is correct for the
+     * track it is loading - but the advance happens at the START of a blend, so nothing puts it
+     * back until the incoming deck actually starts making sound. Measured at about a second, and
+     * the outgoing deck is sounding for all of it: "idle" there describes nothing anybody can hear.
+     *
+     * IDLE only. PAUSED during a blend is a listener pressing pause and has to be shown.
+     */
+    const displayPlayerState = isShowingTail && playerState === PlayerState.IDLE
+        ? PlayerState.PLAYING
+        : playerState;
     // The bar is driven by the tail deck for the length of a blend, so at BOTH edges of the hold
     // it briefly reads one track's position against the other's length. One write at each edge
     // rather than waiting up to a quarter second for the next timeupdate to correct it.
@@ -1598,7 +1611,7 @@ export default function App() {
         audioRef,
         currentSong: displaySong,
         cachedCoverUrl: displayCoverUrl ?? cachedCoverUrl,
-        playerState,
+        playerState: displayPlayerState,
         isNowPlayingStageActive,
         t: (key) => t(key),
         mediaSessionPlayRef,
@@ -2909,7 +2922,7 @@ export default function App() {
         currentTime,
         lyricCurrentTime,
         currentSong: displaySong,
-        playerState,
+        playerState: displayPlayerState,
         duration: displayDuration,
         effectiveLoopMode,
         audioSrc,
@@ -2953,7 +2966,7 @@ export default function App() {
         isPlayerChromeHidden,
         displayLyrics,
         navigateToPlayer,
-        playerState,
+        displayPlayerState,
         publishStagePlayerPlaybackUpdate,
         seekMainAudio,
         setPlayerState,
@@ -3405,7 +3418,7 @@ export default function App() {
                                 && currentView !== 'player'
                             )
                         }
-                        paused={playerState !== PlayerState.PLAYING}
+                        paused={displayPlayerState !== PlayerState.PLAYING}
                         visualizerOpacity={visualizerOpacity}
                         background={{
                             ...visualizerBackgroundConfig,
