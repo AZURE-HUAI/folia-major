@@ -1449,14 +1449,19 @@ export default function App() {
     const displayDuration = automix.transitionDisplay ? automix.transitionDisplay.duration : duration;
     /** While true the progress bar is driven by the deck that is finishing, not the active one. */
     const isShowingTail = automix.transitionDisplay !== null;
-    // The bar is driven by the tail deck for the length of a blend, so at the moment the hold
-    // releases it still reads the old track's position against the new track's length. One write
+    // The bar is driven by the tail deck for the length of a blend, so at BOTH edges of the hold
+    // it briefly reads one track's position against the other's length. One write at each edge
     // rather than waiting up to a quarter second for the next timeupdate to correct it.
+    //
+    // Entering used to be missing, and that edge is the one anybody sees: `playSong` zeroes the
+    // clock for the arriving track from the same block that starts the hold, so the bar dropped to
+    // the beginning and stayed there until the OUTGOING deck's next timeupdate put it back - a song
+    // change that visibly happened and then visibly un-happened, while the title never moved.
+    const getDisplayElement = automix.getDisplayElement;
     useEffect(() => {
-        if (isShowingTail) return;
-        const element = audioRef.current;
+        const element = isShowingTail ? getDisplayElement() : audioRef.current;
         if (element) currentTime.set(element.currentTime);
-    }, [audioRef, currentTime, isShowingTail]);
+    }, [audioRef, currentTime, getDisplayElement, isShowingTail]);
 
     // Restore the displayed song's remembered manual offset (0 when never adjusted, so a fresh
     // song behaves exactly like the old reset). Keyed on the DISPLAYED song, not the playing one:
@@ -3123,13 +3128,16 @@ export default function App() {
             onPlay={(e) => {
                 if (!automix.isActiveDeck(e.currentTarget)) return;
                 shouldAutoPlay.current = false;
-                currentTime.set(e.currentTarget.currentTime);
+                // The same split onTimeUpdate, onSeeked and onLoadedMetadata all make, and the two
+                // handlers that were missing it: while the picture is held this deck is the track
+                // ARRIVING, so its position belongs to a song whose title nobody can see yet.
+                if (!isShowingTail) currentTime.set(e.currentTarget.currentTime);
                 setPlayerState(PlayerState.PLAYING);
             }}
             onPlaying={(e) => {
                 if (!automix.isActiveDeck(e.currentTarget)) return;
                 shouldAutoPlay.current = false;
-                currentTime.set(e.currentTarget.currentTime);
+                if (!isShowingTail) currentTime.set(e.currentTarget.currentTime);
                 setupAudioAnalyzer();
                 playbackAutoSkipCountRef.current = 0;
                 // The source plays, so a later TTL refresh of the same media is legitimate again.
