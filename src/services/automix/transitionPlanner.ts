@@ -502,30 +502,33 @@ export const planTransition = (
     // this whole change touches exactly one case, the one where both sides are known and the answer
     // used to be the smaller of the two.
     //
-    // And the whole ceiling lifts when the gesture is going to hold both voices itself.
+    // And it does NOT lift because the gesture holds both voices. That was tried, and is retracted.
     //
-    // This is the part that stops being about constants. Every rule above reasons about where the
-    // voices HAPPEN TO BE in the two files, because for a master crossfade that is the only lever
-    // there is: the outgoing voice is baked into the outgoing master and arrives whenever it
-    // arrives. The stem gesture does not have that problem. It holds the incoming vocal at absolute
-    // zero until `vocalIn` - `rise` returns 0, not a small number - and it takes the outgoing one
-    // out at a moment measured off the voice itself. Neither of them can sound when it has not been
-    // turned on, whatever the files contain.
+    // The argument was that the gesture holds the incoming vocal at absolute zero until `vocalIn`,
+    // so where the two voices happen to sit in the files stops being a constraint. Both halves of
+    // that are true and the conclusion still does not follow, because `vocalIn` is CHOREOGRAPHY:
+    // one incoming bar after the drums change hands, which is `SWAP_TARGET * overlap + bar`. It
+    // scales with the window. Where the incoming track actually starts singing does not. So
+    // removing the ceiling does not remove the collision, it inverts it - instead of two voices
+    // sounding at once, the fader is still down when the incoming singer opens her mouth.
     //
-    // So on a separated pair `intro` is not a constraint any more, it is trivia. It says when the
-    // incoming track WOULD sing if nothing were controlling it, and something is.
+    // Measured, on the album the ceiling was removed against. Dawn FM into Gasoline: `intro` is
+    // 3.02s, so this used to cap the blend there; without the cap it ran 15.36s, which put
+    // `vocalIn` at 11.68s against a first section at 3.02s and a first sung cell measured off the
+    // incoming vocal stem at 6.25s. Five to nine seconds of Gasoline's own voice held at zero -
+    // and the lyric pane turns the page when the blend STARTS, so the words were already scrolling.
+    // The listener's verdict on seventeen transitions with this ceiling was 「几乎没有感受到任何
+    // 断点」; on the same album without it, 「连的特别差」.
     //
-    // What that was costing, off one real transition: "I Will Always Love You" into "Past Lives"
-    // wanted a 25.7s blend and got 3.6s, capped at the 4.56s where the incoming track's first
-    // section begins - and the gesture would have held that voice back until 17s of a full-length
-    // window anyway. The whole of the outgoing track's final sustained note was then crushed into a
-    // 2.5s recede, because the window it had to leave in was 3.6s long.
+    // The transition that motivated the lift is real and is not what the lift bought. A 25.7s blend
+    // capped to 3.6s is a short blend - and short blends are what those seventeen were. The cost of
+    // the cap is bounded and dull; the cost of removing it is a muted lead vocal.
     //
-    // The pair still bounds itself: AUTOMIX_MAX_OVERLAP_SEC, the quarter-length cap, and `wanted` -
-    // one phrase of the music, scaled by what was measured - all still apply. The music decides the
-    // length; what is removed is a ceiling standing in for a collision that can no longer happen.
+    // What survives from that round is the half above: EITHER side may vouch, rather than the
+    // outgoing one always. That half is free, because the direction it opens up is a long incoming
+    // intro, and a long intro is silence - there is no voice there for a late `vocalIn` to mute.
     const voicesGated = Boolean(from.separated && to.separated);
-    const singleVoiceRoom = voicesGated || (tailRoom === null && introRoom === null)
+    const singleVoiceRoom = tailRoom === null && introRoom === null
         ? Infinity
         : Math.max(tailRoom ?? 0, introRoom ?? 0);
 
