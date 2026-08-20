@@ -109,7 +109,12 @@ export const buildAppOverlaysModel = ({
             onOpenAlbum: handleSearchResultAlbumOpen,
         }
         : null,
-    debugOverlay: currentView === 'player' && isDevDebugOverlayVisible && devDebugSnapshot
+    // Not gated on the view, and that was a real hole: the app cold-starts on the home page,
+    // so after a restart the chord opened nothing until something had been played - which
+    // reads exactly like the switch in Settings having lost its setting. This overlay is the
+    // only console the packaged build has, and the pages it could not be opened from are the
+    // ones where a problem stops you ever reaching the player.
+    debugOverlay: isDevDebugOverlayVisible && devDebugSnapshot
         ? {
             snapshot: devDebugSnapshot,
             currentTime,
