@@ -391,6 +391,8 @@ describe('lastVocalMoment', () => {
 });
 
 describe('firstVocalMoment', () => {
+    // The reference is the whole separated head, not the window being searched - a quiet intro
+    // drags a window-local median down until the separation's own leakage clears the floor.
     const mix = flat(10, 0.5);
 
     it('reports the first cell of the entry, not the cell that proved it', () => {
@@ -417,32 +419,36 @@ describe('firstVocalMoment', () => {
 
 describe('planStemHandover incoming voice', () => {
     const loud = (seconds: number) => flat(seconds, 0.5);
-    // 12s, 2s bars, no bar lines: the swap lands on the plain fraction at 6s and the old guess -
-    // one incoming bar after it - put the incoming voice at 8s.
-    const at = (incoming: { vocalAt?: number | null; keysClash?: boolean }) =>
-        planStemHandover(12, 2, 2, [], loud(12), loud(12), incoming);
 
-    it('takes the incoming voice where its own stem says it sings', () => {
-        // The guess is a fact about the choreography; this is a fact about the song. Measured on a
-        // real pair the two were three seconds apart, and because `vocalIn` is also where this
-        // deck's vocal fader comes up, those three seconds of singing were held at zero.
-        expect(at({ vocalAt: 7.13 }).vocalIn).toBeCloseTo(7.13, 6);
-        expect(at({ vocalAt: 9.5 }).vocalIn).toBeCloseTo(9.5, 6);
+    it('holds the incoming voice back to meet a note being ridden out', () => {
+        // The transition this was reported from, at its real numbers: a 10.6s note released at
+        // 13.45s in a 14.22s window, with the choreography putting the incoming voice at 7.53s.
+        // The ride reverses the last two steps of the handover - the outgoing voice now leaves
+        // after the incoming one arrives - and six and a half seconds of two lead vocals is what
+        // the listener heard as the next track coming in two to three seconds early.
+        const plan = planStemHandover(
+            14.22, 3.60, 2.16, [5.37], heldTail(14.22, 2.85, 13.45), loud(14.22),
+        );
+        expect(plan.exit.kind).toBe('release');
+        expect(plan.vocalIn).toBeCloseTo(plan.exit.from - 2.16, 6);
+        // One incoming bar of overlap plus the cut, not six and a half seconds of it.
+        expect(plan.exit.to - plan.vocalIn).toBeLessThan(3);
     });
 
-    it('keeps the choreography when the measurement lands before the swap', () => {
-        // A track already singing as the window opens cannot be honoured by either job this number
-        // does: as a deadline it asks the outgoing voice to be gone before the beat has changed
-        // hands, and as a fader time it stacks two lead vocals for the length of the blend. When a
-        // constraint cannot be met the choreography stands, which is also what keeps every window
-        // whose incoming track sings early bit-identical to what it was.
-        expect(at({ vocalAt: 0.4 }).vocalIn).toBeCloseTo(at({}).vocalIn, 6);
+    it('never pulls the entry earlier than the choreography', () => {
+        // `max`, and it is what makes this shippable without a listening round: across one full
+        // session the four other rides sat at 1.3-2.3s of overlap and went unremarked, and every
+        // one of them has its release close enough to the entry that a naive assignment would move
+        // it EARLIER. Written this way the rule is inert on all four.
+        const plan = planStemHandover(
+            12, 2, 2, [], heldTail(12, 2, 8.6), loud(12),
+        );
+        expect(plan.exit.kind).toBe('release');
+        expect(plan.vocalIn).toBeCloseTo(plan.swap + 2, 6);
     });
 
-    it('keeps the old guess when the incoming track does not sing in the window', () => {
-        // Bit-identical to what this always did: a fader rising on a silent stem costs nothing.
-        expect(at({}).vocalIn).toBeCloseTo(at({ vocalAt: null }).vocalIn, 6);
-        expect(at({}).vocalIn).toBeCloseTo(8, 6);
+    it('leaves a blend with no held note on the choreography', () => {
+        expect(planStemHandover(12, 2, 2, [], loud(12), loud(12)).vocalIn).toBeCloseTo(8, 6);
     });
 
     it('passes a clashing key down to the exit rather than dropping it on the floor', () => {

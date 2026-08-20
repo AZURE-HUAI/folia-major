@@ -152,6 +152,12 @@ export interface StemHandover {
     bassAt: number;
     /** Where the incoming voice arrives. */
     vocalIn: number;
+    /**
+     * Where the choreography alone would have put it - reported, like `VocalExit.held`, so the log
+     * can say WHETHER the ride moved the entry rather than leaving a reader to re-derive a bar
+     * length and subtract. Equal to `vocalIn` on every blend that does not ride a note out.
+     */
+    dueAt: number;
     exit: VocalExit;
 }
 
@@ -467,15 +473,25 @@ export const lastVocalMoment = (
  *
  * Null when the incoming track never sings inside the window, which for a long intro is the
  * ordinary answer rather than a failure - the caller keeps its own guess for that case.
+ *
+ * **`reference` is the whole separated head, not this window, and that is the entire difference
+ * between this working and not.** Shipped against the window's own mix it read the separation's
+ * bleed as singing on 15 of 24 real transitions - tracks whose intros are 46s, 21s and 15s long
+ * all reported a voice at 0.00s. The mechanism is that both ends use the same relative floor,
+ * `REST_DB` under the median of what else is playing, and the two ends are not in the same regime:
+ * an outgoing tail is full-band music, so the floor lands where a voice lives, while an incoming
+ * HEAD window can be nothing but a quiet intro, which drags the median down until htdemucs's
+ * leakage clears it. Measuring the reference over the track's own thirty separated seconds - which
+ * contain its first verse on essentially any song - puts both ends back on the same measurement.
  */
 export const firstVocalMoment = (
-    /** The incoming vocal stem's envelope over the window. */
+    /** The incoming vocal stem's envelope over the window being searched. */
     vocals: Float32Array,
-    /** The incoming mix's envelope over the same window - the same relative floor, its own track. */
-    mix: Float32Array,
+    /** The incoming mix's envelope over the WHOLE separated head. See above. */
+    reference: Float32Array,
     cellSec = CELL_SEC,
 ): number | null => {
-    const floor = median(mix) * 10 ** (REST_DB / 20);
+    const floor = median(reference) * 10 ** (REST_DB / 20);
     let run = 0;
     let edge = -1;
     for (let cell = 0; cell < vocals.length; cell += 1) {
@@ -510,11 +526,6 @@ export const planStemHandover = (
     mix: Float32Array,
     /** What the incoming track's own stems say about it. Empty means nothing was measured. */
     incoming: {
-        /**
-         * Where the incoming voice actually starts singing, seconds into the window, off its own
-         * vocal stem. Null or absent when it does not sing inside the window at all.
-         */
-        vocalAt?: number | null;
         /** The two keys are known to clash. See `planVocalExit`'s `mayRide`. */
         keysClash?: boolean;
     } = {},
@@ -537,41 +548,24 @@ export const planStemHandover = (
     const bassAt = Math.min(swap + bar, windowSec - TAIL_GUARD_SEC);
     const inBar = incomingBarSec && incomingBarSec > 0 ? incomingBarSec : bar;
     /**
-     * Where the incoming voice arrives - measured off its own vocal stem when it can be, guessed
-     * only when it cannot.
+     * Where the incoming voice is DUE - one of its own bars after the drums change hands.
      *
-     * It used to be `swap + inBar` always: one bar after the drums change hands. That is the
-     * choreography the listening rounds settled, and it is a statement about the GESTURE, not about
-     * the song - the incoming track sings when it sings. And `vocalIn` is not only the deadline the
-     * outgoing voice has to be gone by; it is also the moment THIS deck's vocal fader comes up.
+     * The choreography, and it is a statement about the gesture rather than about the song: the
+     * incoming track sings when it sings. That gap is a real defect - on one measured pair this
+     * said 10.20s while the singer came in at about 7.13s, and because it is also the moment this
+     * deck's vocal fader comes up, three seconds of real singing were held at zero. The listener
+     * heard it as arriving at the next track several lines in, which is what it sounds like from
+     * outside: the lyrics scroll on the incoming track's own clock while its voice is muted.
      *
-     * Measured on a real pair: the guess said 10.20s and the singer came in at about 7.13s, so
-     * three seconds of real singing were held at zero while the outgoing voice was still receding
-     * over the top of it. The listener's report was that by the time the mix reached the next track
-     * several lines had already gone by, which is exactly what that sounds like from outside - the
-     * lyrics scroll on the incoming track's own clock while its voice is muted.
-     *
-     * Used only when it lands AFTER the swap, and this bound is not a safety margin, it is the
-     * difference between a constraint and an impossibility. A track already singing as the window
-     * opens - measured at 1.84s into a 24s blend on one real pair - cannot be honoured by either
-     * job this number does. As a deadline it would ask the outgoing voice to be gone before the
-     * beat has even changed hands, which is the swallowed-vocal defect reached from the other side;
-     * as a fader time it would put two lead vocals side by side for seventeen seconds, which is the
-     * rule that made the whole gesture split its stems in the first place. When a constraint cannot
-     * be met, the choreography stands: it is what eleven listening rounds settled and it is a
-     * defensible answer, where anything clamped out of an unusable measurement is arbitrary.
-     *
-     * So the measurement moves this only where it can actually be obeyed, and every window whose
-     * incoming track sings after the handover - or does not sing inside the window at all - comes
-     * out bit-identical to what it was. That is deliberate: the listener called three of the four
-     * transitions in the session this was measured on fine, and only one of them was guessed wrong
-     * in a direction anything could be done about.
+     * `firstVocalMoment` was wired in here for one round to close that, and is now measured and
+     * logged only. It read the separation's bleed as singing on 15 of 24 real transitions - tracks
+     * with 46s, 21s and 15s intros all reporting a voice at 0.00s - so it was never once honoured,
+     * and a number that cannot be trusted must not quietly be a fader time. It ships as an
+     * instrument until a listening pass says it sees what the ear hears, which is the route
+     * `findSustain` took before the ride branch was built on it.
      */
-    const vocalIn = Math.min(
-        windowSec - 0.6,
-        incoming.vocalAt != null && incoming.vocalAt >= swap ? incoming.vocalAt : swap + inBar,
-    );
-    const hardEnd = Math.min(vocalIn + CUT_SEC, windowSec - 0.4);
+    const entry = Math.min(windowSec - 0.6, swap + inBar);
+    const hardEnd = Math.min(entry + CUT_SEC, windowSec - 0.4);
 
     /**
      * Where a recede starts, derived rather than pinned to the floor.
@@ -606,13 +600,40 @@ export const planStemHandover = (
      * different constraint and belongs to the branch below.
      */
     const recedeFrom = Math.max(EXIT_FLOOR_SEC, Math.min(swap, hardEnd - MIN_RECEDE_SEC));
+    const exit = planVocalExit(vocals, mix, hardEnd, recedeFrom, cellSec, !incoming.keysClash);
 
-    return {
-        swap,
-        bassAt,
-        vocalIn,
-        exit: planVocalExit(vocals, mix, hardEnd, recedeFrom, cellSec, !incoming.keysClash),
-    };
+    /**
+     * When the outgoing voice rides a note out, the incoming voice waits for the note.
+     *
+     * The choreography is an ORDER before it is a set of times: the drums change hands, the bass
+     * follows, the incoming voice arrives, the outgoing one leaves. The ride was bolted onto the
+     * end of that and reverses the last two steps - the outgoing voice now leaves at the note's
+     * release, which can be many seconds after the incoming voice has already come up. Measured on
+     * the transition this was reported from: a 10.6s held note released at 13.45s in a 14.2s
+     * window, with the incoming voice at 7.53s. Six and a half seconds of two lead vocals, and the
+     * listener heard it as the incoming track arriving two to three seconds early.
+     *
+     * So the entry moves to one of the incoming track's own bars before the release. A bar, because
+     * that is the unit every other step of this gesture is spaced by, and because the incoming
+     * voice still needs a moment of its own before the two cross rather than arriving into a hole.
+     *
+     * `max`, so this only ever DELAYS the entry. Pulling it earlier is a different change with a
+     * different risk, and it would move blends that already work: across one full session the five
+     * transitions that rode a note out sat at overlaps of 1.3 to 2.3s and were not remarked on,
+     * while the one the listener flagged sat at 6.4s. Written this way it is inert on all five and
+     * moves only the outlier - which is the property that makes it shippable without a round of
+     * listening to buy it.
+     *
+     * Safe to compute after the exit rather than before it: `hardEnd` decides whether the note is
+     * ridable at all, and once the ride is taken nothing downstream reads `hardEnd` again. It also
+     * cannot feed back - a later entry would push `hardEnd` to `release - inBar + CUT_SEC`, which
+     * is past the release only if a bar is shorter than half a second.
+     */
+    const vocalIn = exit.kind === 'release'
+        ? Math.max(entry, Math.min(exit.from - inBar, windowSec - 0.6))
+        : entry;
+
+    return { swap, bassAt, vocalIn, dueAt: entry, exit };
 };
 
 /** Equal-power rise from 0 to 1 across [from, to], evaluated at `at`. */

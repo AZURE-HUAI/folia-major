@@ -384,34 +384,37 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         );
         // Measured off the SUM of the four stems rather than off any one of them: "quiet" for a
         // vocal exit means quiet against everything else that is playing, which is what makes the
-        // same threshold work on a ballad and on a wall of guitars. Taken for BOTH decks, because
-        // the incoming voice's ENTRY is now measured the same way the outgoing voice's exit is, and
-        // both sides of that comparison have to be the same measurement against their own track.
-        const mixEnvelope = (stems: TrackStems, at: number) => envelopeOf(
-            slice(stems.buffers.vocals, at).map((_, channel) => {
-                const out = new Float32Array(length);
-                for (const name of ['vocals', 'drums', 'bass', 'other'] as const) {
-                    const data = stems.buffers[name].getChannelData(channel);
-                    for (let i = 0; i < length; i += 1) out[i] += data[at + i];
-                }
-                return out;
-            }),
+        // same threshold work on a ballad and on a wall of guitars.
+        const mixEnvelope = (stems: TrackStems, at: number, span: number) => envelopeOf(
+            Array.from(
+                { length: stems.buffers.vocals.numberOfChannels },
+                (_, channel) => {
+                    const out = new Float32Array(span);
+                    for (const name of ['vocals', 'drums', 'bass', 'other'] as const) {
+                        const data = stems.buffers[name].getChannelData(channel);
+                        for (let i = 0; i < span; i += 1) out[i] += data[at + i];
+                    }
+                    return out;
+                },
+            ),
             rate,
         );
         const vocals = envelopeOf(slice(fromStems.buffers.vocals, offset), rate);
-        const mix = mixEnvelope(fromStems, offset);
+        const mix = mixEnvelope(fromStems, offset, length);
         /**
-         * Where the incoming track actually starts singing inside this window.
+         * Where the incoming track starts singing inside this window. MEASURED ONLY - see
+         * `planStemHandover`, which is still placing the entry on the choreography.
          *
-         * The gesture used to place this one bar after the drum swap and call it done, which is a
-         * fact about the choreography rather than about the song - and it is the moment the
-         * incoming vocal fader comes up, so guessing it late does not merely misplace a deadline,
-         * it mutes a singer who has already started. Both stem sets are already in memory here;
-         * this is the same measurement `lastVocalMoment` makes at the other end of the mix.
+         * The reference is the whole separated head rather than the blend window, and that is what
+         * the first attempt got wrong: the relative floor both ends share lands where a voice lives
+         * in a full-band outro and down among htdemucs's leakage in a quiet intro, so the window's
+         * own median reported a voice at 0.00s on tracks whose intros run 15, 21 and 46 seconds.
+         * Thirty separated seconds contain the first verse of essentially any song, which puts this
+         * end back on the same measurement as the other one.
          */
         const incomingVocalAt = firstVocalMoment(
             envelopeOf(slice(toStems.buffers.vocals, inOffset), rate),
-            mixEnvelope(toStems, inOffset),
+            mixEnvelope(toStems, 0, toStems.buffers.vocals.length),
         );
 
         // The outgoing track's bar lines inside the window, so the drums change hands on the count.
@@ -438,7 +441,7 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
 
         const handover = planStemHandover(
             wall, barSec, args.incomingBarSec, bars, vocals, mix,
-            { vocalAt: incomingVocalAt, keysClash: args.keysClash },
+            { keysClash: args.keysClash },
         );
 
         const outCurves = outgoingCurves(wall, handover);
@@ -524,17 +527,15 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             + ` drums at ${handover.swap.toFixed(2)}s${bars.length ? ' on a bar line' : ''},`
             + ` bass at ${handover.bassAt.toFixed(2)}s,`
             + ` next voice at ${handover.vocalIn.toFixed(2)}s`
-            // Which of the three ways that number was arrived at, because they fail differently.
-            // A guess can be seconds out in either direction and a measurement cannot; and the
-            // third case - measured, then not used - is the one that would otherwise look like the
-            // measurement failing when what happened is that it landed somewhere the handover has
-            // no way to honour.
-            + (incomingVocalAt === null
-                ? ' (guessed - it does not sing inside this window)'
-                : Math.abs(incomingVocalAt - handover.vocalIn) < 0.005
-                    ? ' off its vocal stem'
-                    : ` (guessed - its stem says ${incomingVocalAt.toFixed(2)}s,`
-                        + ' which the handover cannot honour)')
+            // Whether the ride moved it. This is the one place the gesture changes its own
+            // choreography, so it says so rather than leaving a reader to subtract two numbers.
+            + (handover.vocalIn > handover.dueAt + 0.005
+                ? ` (held back from ${handover.dueAt.toFixed(2)}s to meet the note)`
+                : '')
+            // And what the incoming vocal stem thinks, which nothing acts on yet. Printed on every
+            // transition so one listening pass can say whether it agrees with the ear - the same
+            // way `findSustain` was carried for a round before the ride branch was built on it.
+            + `, its vocal stem says ${incomingVocalAt === null ? 'no voice here' : `${incomingVocalAt.toFixed(2)}s`}`
             + (vocalGap > 0
                 ? `, ${vocalGap.toFixed(2)}s with neither voice`
                 : `, voices overlap by ${(-vocalGap).toFixed(2)}s`)
