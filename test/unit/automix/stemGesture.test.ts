@@ -100,6 +100,25 @@ describe('planVocalExit', () => {
         // The chosen half second must not contain that cell - on either side of it is fine.
         expect(exit.from > 3.3 || exit.to <= 3.3 + 1e-9).toBe(true);
     });
+
+    it('will not cut in an early rest the singer comes back from', () => {
+        // The swallowed-vocal case, at the shape it was reported in: a long window, a real hole
+        // near the front, and the voice still going at the back. Quietest wins the search and
+        // quietest is the wrong question - taking that rest ends the outgoing vocal fourteen
+        // seconds before anything is due to replace it.
+        const vocals = withRest(24, 1, 5.35, 6.35, 1e-6);
+        const exit = planVocalExit(vocals, flat(24, 1), 20.65, 16.65);
+        expect(exit.from).toBeGreaterThanOrEqual(16.65);
+    });
+
+    it('still finds the rest when the singer does not come back', () => {
+        // The other half of the same bound: a voice that genuinely finishes early leaves every
+        // later half-second at least as quiet, so nothing is given up by starting the search late.
+        const vocals = withRest(24, 1, 5.35, 24, 1e-6);
+        const exit = planVocalExit(vocals, flat(24, 1), 20.65, 16.65);
+        expect(exit.kind).toBe('rest');
+        expect(exit.loudDb).toBeLessThanOrEqual(REST_DB);
+    });
 });
 
 describe('planStemHandover', () => {
@@ -131,6 +150,23 @@ describe('planStemHandover', () => {
         // Moved LATER, not shortened: the extra length is spent before the handover, not after it.
         expect(plan.swap).toBeGreaterThan(0.42 * windowSec);
         expect(plan.bassAt - plan.swap).toBeCloseTo(bar, 6);
+    });
+
+    it('does not leave a long blend with neither track singing', () => {
+        // The 23.52s blend the listener reported as swallowing both vocals, rebuilt from its own
+        // log line: a 2s bar, the drum swap on the downbeat at 18.23s, the incoming voice due at
+        // 20.15s - and a real -35dB rest at 5.35s that the outgoing singer came back from.
+        //
+        // The assertion is on the GAP rather than on where the cut went, because the gap is what
+        // was audible. Two songs playing at once with neither one singing for fourteen seconds is
+        // not heard as a misplaced edit; it is heard as both tracks being swallowed.
+        const windowSec = 23.52;
+        const downbeats = Array.from({ length: 12 }, (_, index) => 0.23 + index * 2);
+        const vocals = withRest(windowSec, 1, 5.35, 6.35, 1e-6);
+        const plan = planStemHandover(windowSec, 2, 1.92, downbeats, vocals, flat(windowSec, 1));
+
+        expect(plan.swap).toBeCloseTo(18.23, 6);
+        expect(plan.vocalIn - plan.exit.to).toBeLessThanOrEqual(0);
     });
 
     it('leaves a blend short enough to already land late exactly where it was', () => {

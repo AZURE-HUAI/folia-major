@@ -298,7 +298,25 @@ export const planVocalExit = (
     // version drifted - after sixty steps it was a few femtoseconds under the cell it named, which
     // is invisible until `Math.round(at / cellSec)` lands one cell early and the search reads a
     // different half second than the one it reports.
-    const firstCell = Math.round(EXIT_FLOOR_SEC / cellSec);
+    //
+    // From `recedeFrom`, and this bound is the difference between a cut and a swallowed vocal.
+    // Both branches answer ONE question - when may the outgoing voice leave - and they were
+    // answering it with two different numbers: the recede began at `recedeFrom`, the cut began
+    // wherever the quietest half-second happened to fall, anywhere in the window. Quietest is not a
+    // placement rule, and on a long window it is barely even correlated with one.
+    //
+    // Measured: a 23.5s blend found a genuine -35 dB rest at 5.35s and ended the vocal at 6.33s.
+    // The incoming voice was not due until 20.15s, and the sustain detector on the same line
+    // reported the outgoing singer still holding a note at 21.70s. Nearly fourteen seconds of two
+    // songs playing at once with neither one singing - which is the defect as the listener
+    // describes it, and note that it reads as BOTH tracks losing their vocal, because it is one
+    // hole rather than two edits.
+    //
+    // Nothing is given up by starting late. If the voice has genuinely finished early then every
+    // later half-second is at least as quiet and the same painless cut is still there to find. The
+    // only case the bound removes is the one where an early moment beat a late one BECAUSE the
+    // singing resumed after it - and losing that case is the entire point.
+    const firstCell = Math.round(recedeFrom / cellSec);
     const lastCell = Math.floor((hardEnd - CUT_SEC) / cellSec);
     let best = { cell: firstCell, value: Infinity };
     for (let cell = firstCell; cell <= lastCell; cell += 1) {

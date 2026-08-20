@@ -482,6 +482,19 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             return false;
         }
 
+        /**
+         * How long the blend goes with no lead vocal at all - the outgoing one already gone, the
+         * incoming one not yet due.
+         *
+         * Printed on every transition rather than only when it is bad, because this is the number
+         * that was wrong and nothing named it. A blend where the listener heard both tracks lose
+         * their vocal is not two edits; it is one HOLE, and the log described its two edges on
+         * separate lines in different units so the distance between them was never on screen.
+         * Measured across one session: every blend that sounded right came out at about -0.5s -
+         * the incoming voice arriving while the outgoing one is still leaving, so the handover is
+         * a pass - and the one the listener flagged came out at +13.8s.
+         */
+        const vocalGap = handover.vocalIn - handover.exit.to;
         console.log(
             `[Automix] stems: voice ${handover.exit.kind === 'rest' ? 'cut in a rest' : 'receding'}`
             + ` ${handover.exit.from.toFixed(2)}-${handover.exit.to.toFixed(2)}s`
@@ -489,6 +502,9 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             + ` drums at ${handover.swap.toFixed(2)}s${bars.length ? ' on a bar line' : ''},`
             + ` bass at ${handover.bassAt.toFixed(2)}s,`
             + ` next voice at ${handover.vocalIn.toFixed(2)}s`
+            + (vocalGap > 0
+                ? `, ${vocalGap.toFixed(2)}s with neither voice`
+                : `, voices overlap by ${(-vocalGap).toFixed(2)}s`)
             // What is left of the blend once the outgoing track has handed over everything it had.
             // Printed because it is the quantity that went wrong and nothing named it: a blend
             // reading 16.64s looks like a length decision, and it was a placement one.
