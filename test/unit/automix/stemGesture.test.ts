@@ -28,9 +28,11 @@ import {
 const flat = (seconds: number, value: number): Float32Array =>
     new Float32Array(Math.round(seconds / CELL_SEC)).fill(value);
 
-/** The same, with a quiet stretch cut into it. */
-const withRest = (seconds: number, value: number, from: number, to: number, quiet: number) => {
-    const out = flat(seconds, value);
+/** The same, with a quiet stretch cut into it. Also takes an envelope, so holes can be stacked. */
+const withRest = (
+    seconds: number | Float32Array, value: number, from: number, to: number, quiet: number,
+) => {
+    const out = typeof seconds === 'number' ? flat(seconds, value) : seconds;
     for (let c = Math.round(from / CELL_SEC); c < Math.round(to / CELL_SEC); c += 1) out[c] = quiet;
     return out;
 };
@@ -95,7 +97,10 @@ describe('planVocalExit', () => {
         // arbitrary offset must still be found exactly.
         const exit = planVocalExit(withRest(8, 1, 2.35, 2.9, 1e-6), flat(8, 1), 6);
         expect(exit.kind).toBe('rest');
-        expect(exit.from).toBeCloseTo(2.35, 2);
+        // The LAST half-second that fits inside the 0.55s hole, which is 2.40s - an offset no beat
+        // grid has a line on, which is the property under test.
+        expect(exit.from).toBeCloseTo(2.40, 2);
+        expect(exit.to).toBeLessThanOrEqual(2.9 + 1e-9);
     });
 
     it('takes the loudest moment in the half second, not the average', () => {
@@ -170,6 +175,16 @@ describe('planVocalExit', () => {
             .not.toBe('release');
         expect(planVocalExit(held, flat(14.4, 1), 8.03, 5.37, CELL_SEC, true).kind)
             .toBe('release');
+    });
+
+    it('takes the last painless rest, not the deepest one', () => {
+        // Two real holes in range, the earlier one deeper. Both are under the threshold, so both
+        // are equally invisible AS AN EDIT - what separates them is the line sung in between, and
+        // choosing the deeper one deletes it. That is the 吞了一句歌词 report.
+        const vocals = withRest(withRest(12, 1, 2.0, 3.2, 1e-9), 1, 6.0, 7.2, 1e-4);
+        const exit = planVocalExit(vocals, flat(12, 1), 9);
+        expect(exit.kind).toBe('rest');
+        expect(exit.from).toBeGreaterThanOrEqual(6.0 - 1e-9);
     });
 
     it('still finds the rest when the singer does not come back', () => {
@@ -449,6 +464,27 @@ describe('planStemHandover incoming voice', () => {
 
     it('leaves a blend with no held note on the choreography', () => {
         expect(planStemHandover(12, 2, 2, [], loud(12), loud(12)).vocalIn).toBeCloseTo(8, 6);
+    });
+
+    it('imposes no deadline when the incoming track does not sing in this window', () => {
+        // A blend that fits entirely inside the next track's intro. The deadline exists to stop
+        // two lead vocals stacking, so with only one voice in the room it is not a constraint that
+        // has been relaxed - it is one that never applied. What it used to do was fade the outgoing
+        // singer out from the handover to make room for nobody, which is the 压音 report.
+        const plan = planStemHandover(12, 2, 2, [], loud(12), loud(12), { sings: false });
+        expect(plan.exit.kind).toBe('recede');
+        // A one-second fade landing on the window's own edge, not a four-second one from the swap.
+        expect(plan.exit.to).toBeCloseTo(11.6, 6);
+        expect(plan.exit.from).toBeCloseTo(10.6, 6);
+        expect(plan.exit.from).toBeGreaterThan(plan.swap);
+    });
+
+    it('keeps the deadline whenever the incoming track might sing', () => {
+        // Absent means "assume it does", which is every window that existed before this did.
+        const guard = planStemHandover(12, 2, 2, [], loud(12), loud(12));
+        expect(planStemHandover(12, 2, 2, [], loud(12), loud(12), { sings: true }).exit.from)
+            .toBeCloseTo(guard.exit.from, 6);
+        expect(guard.exit.from).toBeCloseTo(guard.swap, 6);
     });
 
     it('passes a clashing key down to the exit rather than dropping it on the floor', () => {

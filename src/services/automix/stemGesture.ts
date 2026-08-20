@@ -321,14 +321,32 @@ export const planVocalExit = (
     // later half-second is at least as quiet and the same painless cut is still there to find. The
     // only case the bound removes is the one where an early moment beat a late one BECAUSE the
     // singing resumed after it - and losing that case is the entire point.
+    //
+    // And of the moments that pass, the LAST one rather than the quietest. This is the second half
+    // of the same mistake. `REST_DB` is a threshold with a meaning - quiet enough that a cut takes
+    // nothing with it - so every moment under it is equally painless AS AN EDIT, and ranking them
+    // against each other by depth answers a question that has already been answered. What separates
+    // them is what comes AFTER: a rest at 3.95s and a rest at 5.20s are both silent, and choosing
+    // the first deletes every word sung in between. The listener's phrase for that is 吞了一句歌词.
+    //
+    // This does not re-open the free-versus-snapped result. That measured a snapped cut landing on
+    // a -12dB moment where the free search found -28dB, and -12dB is not under the threshold at
+    // all - it never enters this comparison. Depth still decides WHETHER a cut is possible; among
+    // the moments where it is, lateness decides which, because lateness is the only axis they
+    // differ on that a listener can hear.
     const firstCell = Math.round(recedeFrom / cellSec);
     const lastCell = Math.floor((hardEnd - CUT_SEC) / cellSec);
-    let best = { cell: firstCell, value: Infinity };
+    let last = { cell: -1, value: Infinity };
+    let quietest = { cell: firstCell, value: Infinity };
     for (let cell = firstCell; cell <= lastCell; cell += 1) {
         const value = loudAt(cell);
-        if (value < best.value) best = { cell, value };
+        if (value < quietest.value) quietest = { cell, value };
+        if (value <= REST_DB) last = { cell, value };
     }
-    if (!Number.isFinite(best.value)) best = { cell: firstCell, value: loudAt(firstCell) };
+    if (!Number.isFinite(quietest.value)) quietest = { cell: firstCell, value: loudAt(firstCell) };
+    // The last painless moment when there is one; otherwise the quietest, which is then only
+    // reported - the recede branch below is what actually runs.
+    const best = last.cell >= 0 ? last : quietest;
     const at = best.cell * cellSec;
 
     /**
@@ -390,11 +408,7 @@ export const planVocalExit = (
      * 13.62s window: a singer finishing her last held note as the blend runs out. That is not an
      * edge case, it is the commonest shape there is, because the window is PLACED against where she
      * stops singing - so the last note in it will nearly always be the one that ends near its end.
-     * Demanding CUT_SEC + TAIL_GUARD_SEC behind the release refused the ride and sent it back to a
-     * recede starting at 5.37s, which is the report that this fade left one to two seconds early.
-     * The cut is clamped to the window instead: a release with a tenth of a second behind it gets a
-     * tenth of a second of fade, and that is a fade on a note which has already let go and has
-     * nothing left to take away.
+     * The cut is clamped to the window instead.
      */
     const windowSec = vocals.length * cellSec;
     const ridable = mayRide
@@ -412,7 +426,7 @@ export const planVocalExit = (
         };
     }
 
-    return best.value <= REST_DB
+    return last.cell >= 0
         ? { from: at, to: Math.min(at + exitSec, hardEnd), kind: 'rest', loudDb: best.value, held }
         // Nowhere quiet to hide, so the voice recedes instead. A fade needs somewhere to hide;
         // where there is none, the ear forgives a decision but not a drift.
@@ -528,6 +542,12 @@ export const planStemHandover = (
     incoming: {
         /** The two keys are known to clash. See `planVocalExit`'s `mayRide`. */
         keysClash?: boolean;
+        /**
+         * Whether the incoming track sings at all inside this window. `false` removes the
+         * outgoing voice's deadline entirely - see `entry`. Absent means "assume it does",
+         * which is what every window did before this existed.
+         */
+        sings?: boolean;
     } = {},
     cellSec = CELL_SEC,
 ): StemHandover => {
@@ -564,7 +584,18 @@ export const planStemHandover = (
      * instrument until a listening pass says it sees what the ear hears, which is the route
      * `findSustain` took before the ride branch was built on it.
      */
-    const entry = Math.min(windowSec - 0.6, swap + inBar);
+    //
+    // And when the incoming track does not sing inside this window at all, there is no entry to be
+    // due: `entry` goes to the end of the window and every deadline below dissolves with it. That
+    // case is not rare and it is not academic - a blend under a long intro produces it - and what
+    // it used to do was impose a deadline on behalf of a voice that never arrives. Measured: a
+    // 6.57s window against a track whose first section starts at 8.19s, with the outgoing singer
+    // faded from 1.99s to 4.41s and her last held note, which begins at 5.32s, pushed to silence
+    // under a fader with nothing else moving. The listener's word for that is 压音, and the whole
+    // of it was spent making room for nobody.
+    const entry = incoming.sings === false
+        ? windowSec
+        : Math.min(windowSec - 0.6, swap + inBar);
     const hardEnd = Math.min(entry + CUT_SEC, windowSec - 0.4);
 
     /**
@@ -599,7 +630,14 @@ export const planStemHandover = (
      * the deadline is fixed; making this fade genuinely slower means moving `hardEnd`, which is a
      * different constraint and belongs to the branch below.
      */
-    const recedeFrom = Math.max(EXIT_FLOOR_SEC, Math.min(swap, hardEnd - MIN_RECEDE_SEC));
+    //
+    // The swap floor goes with the deadline, and for the reason stated above rather than as a knock
+    // -on: it exists because the do-not-stack constraint begins at the handover, and where nothing
+    // is waiting that constraint never begins at all. Written as a `min` so the ordinary case is
+    // untouched and the empty one degenerates to a one-second fade at the window's own edge - the
+    // same shape as a cut, on a note the window was going to close on anyway.
+    const holdUntil = incoming.sings === false ? hardEnd - MIN_RECEDE_SEC : swap;
+    const recedeFrom = Math.max(EXIT_FLOOR_SEC, Math.min(holdUntil, hardEnd - MIN_RECEDE_SEC));
     const exit = planVocalExit(vocals, mix, hardEnd, recedeFrom, cellSec, !incoming.keysClash);
 
     /**

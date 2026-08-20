@@ -358,6 +358,8 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         outgoingBeatsPerBar: number | null;
         /** The two keys are a semitone or a tritone apart. Stops the voice riding a note out. */
         keysClash: boolean;
+        /** Media time of the incoming track's first structural boundary, or null if unmeasured. */
+        incomingSectionStart: number | null;
     }): boolean => {
         const { context, fromStems, toStems, startMedia, wall } = args;
         const rate = fromStems.buffers.vocals.sampleRate;
@@ -439,9 +441,32 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         }
         const barSec = args.outgoingBarSec;
 
+        /**
+         * Whether the incoming track sings anywhere inside this window - and it takes TWO
+         * measurements agreeing, because neither one is trustworthy alone.
+         *
+         * `firstVocalMoment` is over-eager: it reads separation bleed as singing on most heads, so
+         * a positive from it means nothing. Its NEGATIVE is the useful half - nothing anywhere in
+         * the window cleared a floor that bleed usually clears. The structural boundary is the
+         * opposite shape: `sectionStart` is measured over the whole track and is believable about
+         * WHERE the intro ends, but it answers "where does the arrangement change", which is not
+         * always "where does the singing start".
+         *
+         * So they are ANDed, and only in the direction where both are strong: the voice is called
+         * absent when the stem found none AND the first boundary is beyond the window's far end.
+         * On one real session this fired on exactly one transition out of twenty-seven - a 6.57s
+         * blend under an 8.19s intro - which is the one the listener reported as 压音. The other
+         * stem negative in that session was overruled by a boundary at 6.5s of a 16.6s window,
+         * which is the case this conjunction exists to catch.
+         */
+        const introAt = args.incomingSectionStart === null
+            ? null
+            : args.incomingSectionStart - args.inAt;
+        const incomingSings = !(incomingVocalAt === null && introAt !== null && introAt > wall);
+
         const handover = planStemHandover(
             wall, barSec, args.incomingBarSec, bars, vocals, mix,
-            { keysClash: args.keysClash },
+            { keysClash: args.keysClash, sings: incomingSings },
         );
 
         const outCurves = outgoingCurves(wall, handover);
@@ -526,7 +551,9 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             + ` (quietest half-second ${handover.exit.loudDb.toFixed(0)}dB under the mix),`
             + ` drums at ${handover.swap.toFixed(2)}s${bars.length ? ' on a bar line' : ''},`
             + ` bass at ${handover.bassAt.toFixed(2)}s,`
-            + ` next voice at ${handover.vocalIn.toFixed(2)}s`
+            + (incomingSings
+                ? ` next voice at ${handover.vocalIn.toFixed(2)}s`
+                : ' the next track does not sing in this window, so no deadline')
             // Whether the ride moved it. This is the one place the gesture changes its own
             // choreography, so it says so rather than leaving a reader to subtract two numbers.
             + (handover.vocalIn > handover.dueAt + 0.005
@@ -950,6 +977,7 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
                 outgoingDownbeat: plannedFrom?.downbeatOffset ?? null,
                 outgoingBeatsPerBar: plannedFrom?.beatsPerBar ?? null,
                 keysClash: plan.relation === 'clashing',
+                incomingSectionStart: plannedTo?.sectionStart ?? null,
             });
 
         /**
