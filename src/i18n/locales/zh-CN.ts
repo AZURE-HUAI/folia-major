@@ -637,7 +637,7 @@ export default {
     "transitionEngineFull": "完全体",
     "transitionEngineFullDesc": "客户端：能对上小节线，能拆出人声和伴奏，逐件乐器交接。",
     "transitionEngineLite": "兼容模式",
-    "transitionEngineLiteDesc": "浏览器端：判断一样，但拆轨和节拍模型只有客户端有。",
+    "transitionEngineLiteDesc": "浏览器端：选点和时长的判断一样，但分不出人声、也对不准小节线，效果可能比客户端差十分之二。",
     "transitionAutomixNeedsCache": "歌曲缓存已关闭，在线歌曲不会被分析。",
     "integrationSettings": "连接与集成",
     "integrationSettingsDesc": "外部程序接入设置。",

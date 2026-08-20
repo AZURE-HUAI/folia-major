@@ -636,7 +636,7 @@ export default {
     "transitionEngineFull": "Full",
     "transitionEngineFullDesc": "Desktop build: lands on bar lines, splits voice from backing, hands over instrument by instrument.",
     "transitionEngineLite": "Compatible",
-    "transitionEngineLiteDesc": "Browser build: the same decisions, but separation and the beat model need the desktop app.",
+    "transitionEngineLiteDesc": "Browser build: same decisions, but it cannot lift the voice out or land on the bar line — expect it to fall roughly a fifth short of the desktop app.",
     "transitionAutomixNeedsCache": "Song caching is off, so online tracks are never analysed.",
     "integrationSettings": "Integration settings",
     "integrationSettingsDesc": "Connections for external apps and services.",
