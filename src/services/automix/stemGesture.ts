@@ -551,19 +551,25 @@ export const planStemHandover = (
      * several lines had already gone by, which is exactly what that sounds like from outside - the
      * lyrics scroll on the incoming track's own clock while its voice is muted.
      *
-     * Floored at `swap`, because a track already singing as the window opens would otherwise set
-     * the deadline at its first breath and leave the outgoing voice a second to get out - the
-     * swallowed-vocal defect, reached from the other side. Until the swap the outgoing track still
-     * has the floor, so the earliest its voice can be asked to leave is where the beat changes
-     * hands.
+     * Used only when it lands AFTER the swap, and this bound is not a safety margin, it is the
+     * difference between a constraint and an impossibility. A track already singing as the window
+     * opens - measured at 1.84s into a 24s blend on one real pair - cannot be honoured by either
+     * job this number does. As a deadline it would ask the outgoing voice to be gone before the
+     * beat has even changed hands, which is the swallowed-vocal defect reached from the other side;
+     * as a fader time it would put two lead vocals side by side for seventeen seconds, which is the
+     * rule that made the whole gesture split its stems in the first place. When a constraint cannot
+     * be met, the choreography stands: it is what eleven listening rounds settled and it is a
+     * defensible answer, where anything clamped out of an unusable measurement is arbitrary.
      *
-     * Guessed when the incoming track does not sing inside the window at all, which leaves that
-     * case bit-identical to what it was: a fader rising on a silent stem costs nothing, and the
-     * measurement has nothing to say about a voice that is not there.
+     * So the measurement moves this only where it can actually be obeyed, and every window whose
+     * incoming track sings after the handover - or does not sing inside the window at all - comes
+     * out bit-identical to what it was. That is deliberate: the listener called three of the four
+     * transitions in the session this was measured on fine, and only one of them was guessed wrong
+     * in a direction anything could be done about.
      */
     const vocalIn = Math.min(
         windowSec - 0.6,
-        incoming.vocalAt == null ? swap + inBar : Math.max(swap, incoming.vocalAt),
+        incoming.vocalAt != null && incoming.vocalAt >= swap ? incoming.vocalAt : swap + inBar,
     );
     const hardEnd = Math.min(vocalIn + CUT_SEC, windowSec - 0.4);
 

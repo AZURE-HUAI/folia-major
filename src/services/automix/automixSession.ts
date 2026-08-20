@@ -524,15 +524,17 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             + ` drums at ${handover.swap.toFixed(2)}s${bars.length ? ' on a bar line' : ''},`
             + ` bass at ${handover.bassAt.toFixed(2)}s,`
             + ` next voice at ${handover.vocalIn.toFixed(2)}s`
-            // Which of the three ways that number was arrived at, because they fail differently:
-            // a guess can be seconds out in either direction, a measurement cannot, and a
-            // measurement held back to the swap means the incoming track was already singing as
-            // the window opened and the outgoing voice was given the handover to get out over.
+            // Which of the three ways that number was arrived at, because they fail differently.
+            // A guess can be seconds out in either direction and a measurement cannot; and the
+            // third case - measured, then not used - is the one that would otherwise look like the
+            // measurement failing when what happened is that it landed somewhere the handover has
+            // no way to honour.
             + (incomingVocalAt === null
                 ? ' (guessed - it does not sing inside this window)'
-                : incomingVocalAt < handover.vocalIn - 0.005
-                    ? ` (sings at ${incomingVocalAt.toFixed(2)}s, held back to the swap)`
-                    : ' off its vocal stem')
+                : Math.abs(incomingVocalAt - handover.vocalIn) < 0.005
+                    ? ' off its vocal stem'
+                    : ` (guessed - its stem says ${incomingVocalAt.toFixed(2)}s,`
+                        + ' which the handover cannot honour)')
             + (vocalGap > 0
                 ? `, ${vocalGap.toFixed(2)}s with neither voice`
                 : `, voices overlap by ${(-vocalGap).toFixed(2)}s`)

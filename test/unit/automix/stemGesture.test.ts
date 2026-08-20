@@ -430,12 +430,13 @@ describe('planStemHandover incoming voice', () => {
         expect(at({ vocalAt: 9.5 }).vocalIn).toBeCloseTo(9.5, 6);
     });
 
-    it('will not let a track that is already singing swallow the outgoing voice', () => {
-        // Floored at the swap. Without it a track singing from the window's first second sets the
-        // deadline at its own first breath and leaves the outgoing voice a second to get out -
-        // which is the swallowed-vocal defect arrived at from the other side.
-        const plan = at({ vocalAt: 0.4 });
-        expect(plan.vocalIn).toBeCloseTo(plan.swap, 6);
+    it('keeps the choreography when the measurement lands before the swap', () => {
+        // A track already singing as the window opens cannot be honoured by either job this number
+        // does: as a deadline it asks the outgoing voice to be gone before the beat has changed
+        // hands, and as a fader time it stacks two lead vocals for the length of the blend. When a
+        // constraint cannot be met the choreography stands, which is also what keeps every window
+        // whose incoming track sings early bit-identical to what it was.
+        expect(at({ vocalAt: 0.4 }).vocalIn).toBeCloseTo(at({}).vocalIn, 6);
     });
 
     it('keeps the old guess when the incoming track does not sing in the window', () => {
