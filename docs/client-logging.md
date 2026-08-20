@@ -51,9 +51,9 @@ Two doors, one recorder:
 - **Settings → 开发者 (Developer)** — the log, plus the switch that stops recording entirely.
 - **Alt+Shift+D** on the player page, Console tab — the same panel inside the debug overlay.
 
-The switch governs both. Turning it off does not hide the panel behind the shortcut, it empties it —
-the panel itself refuses to show a log it is not keeping, so neither door can imply the recorder is
-running when it is not.
+The switch governs both. Off means off at both doors: the overlay drops its Console tab entirely
+rather than opening on an empty one, and the settings page keeps the panel — directly under the
+switch — saying nothing is being kept. Neither door can imply the recorder is running when it is not.
 
 In the panel:
 

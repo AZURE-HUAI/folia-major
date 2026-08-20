@@ -96,6 +96,7 @@ const FilterMenu: React.FC<{
 }> = ({ label, summary, isDaylight, children }) => {
     const [at, setAt] = useState<{ top: number; left: number; width: number } | null>(null);
     const buttonRef = useRef<HTMLButtonElement>(null);
+    const sheetRef = useRef<HTMLDivElement>(null);
 
     const place = () => {
         const box = buttonRef.current?.getBoundingClientRect();
@@ -108,12 +109,19 @@ const FilterMenu: React.FC<{
         if (!at) return;
         const close = () => setAt(null);
         const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') close(); };
+        // A module list runs past its own height, so the menu scrolls too - and it is listening in
+        // CAPTURE, which means its own wheel arrives here before the list has moved a pixel. Only a
+        // scroll of something BEHIND the menu can take the button out from under it.
+        const onScroll = (event: Event) => {
+            if (sheetRef.current?.contains(event.target as Node)) return;
+            close();
+        };
         // Capture, so a scroll inside the modal body counts as well as one on the window.
-        window.addEventListener('scroll', close, true);
+        window.addEventListener('scroll', onScroll, true);
         window.addEventListener('resize', close);
         window.addEventListener('keydown', onKey);
         return () => {
-            window.removeEventListener('scroll', close, true);
+            window.removeEventListener('scroll', onScroll, true);
             window.removeEventListener('resize', close);
             window.removeEventListener('keydown', onKey);
         };
@@ -147,6 +155,7 @@ const FilterMenu: React.FC<{
                         other menu does rather than only when the button is hit again. */}
                     <div className="fixed inset-0 z-[999]" onMouseDown={() => setAt(null)} />
                     <div
+                        ref={sheetRef}
                         role="menu"
                         className={`fixed z-[1000] max-h-[16rem] overflow-y-auto overscroll-contain rounded-lg border p-1 ${sheetClass}`}
                         style={{ top: at.top, left: at.left, minWidth: at.width }}
@@ -272,14 +281,14 @@ export const ConsoleLogPanel: React.FC<ConsoleLogPanelProps> = ({
     // Read on every render, and it re-renders because the switch notifies the same listeners the
     // buffer does. The panel owning this rather than each host is the point: the debug chord and
     // the settings page are two doors into ONE recorder, and a door that still opens after the
-    // recorder was switched off says the switch did nothing.
+    // recorder was switched off says the switch did nothing. The overlay hides its Console tab
+    // outright, so what is left here renders directly under the switch - which is why it does not
+    // say where the switch is.
     if (!isConsoleCaptureEnabled()) {
         return (
             <section className={className}>
                 <div className="px-3 py-3 text-[11px] leading-relaxed opacity-60">
                     Not recording. Nothing from this session can be read back or copied.
-                    <br />
-                    Switch the session log back on in Settings &rarr; Developer.
                 </div>
             </section>
         );

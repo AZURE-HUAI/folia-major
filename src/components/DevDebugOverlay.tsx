@@ -1,8 +1,9 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { MotionValue, useMotionValueEvent } from 'framer-motion';
 import type { ThemeMode, DualTheme, LyricData, LyricAlternateText, LyricBackgroundVocal, LyricSyllable } from '../types';
 import { sonnetDebugState, type SonnetDebugShotInfo } from './visualizer/sonnet/sonnetDebug';
 import ConsoleLogPanel from './shared/ConsoleLogPanel';
+import { isConsoleCaptureEnabled, subscribeToConsoleLog } from '../utils/consoleLogBuffer';
 
 export interface DevDebugLineSnapshot {
     text: string | null;
@@ -604,7 +605,12 @@ const DevDebugOverlay: React.FC<DevDebugOverlayProps> = ({
 }) => {
     // Console first: on the desktop build this overlay is the only console there is, so reading it
     // is what the shortcut is pressed for.
-    const [activeTab, setActiveTab] = useState<'console' | 'memory' | 'playback' | 'lyrics' | 'theme' | 'sonnet'>('console');
+    const [chosenTab, setChosenTab] = useState<'console' | 'memory' | 'playback' | 'lyrics' | 'theme' | 'sonnet'>('console');
+    // Whether anything is being kept at all. Switched off in Settings > Developer, and off means
+    // off: the tab goes with it rather than opening on a panel that says there is nothing to show.
+    // A switch that leaves its own door standing is a switch nobody trusts the second time.
+    const capturing = useSyncExternalStore(subscribeToConsoleLog, isConsoleCaptureEnabled);
+    const activeTab = chosenTab === 'console' && !capturing ? 'memory' : chosenTab;
     const [liveCurrentTime, setLiveCurrentTime] = useState(() => currentTime.get());
     const [liveLyricCurrentTime, setLiveLyricCurrentTime] = useState(() => lyricCurrentTime?.get() ?? currentTime.get());
     const [memoryHistory, setMemoryHistory] = useState<MemorySample[]>([]);
@@ -746,12 +752,14 @@ const DevDebugOverlay: React.FC<DevDebugOverlayProps> = ({
                 </div>
 
                 <div className="mt-3 flex flex-wrap gap-2">
-                    <TabButton label="Console" isActive={activeTab === 'console'} onClick={() => setActiveTab('console')} isDaylight={isDaylight} />
-                    <TabButton label="Memory" isActive={activeTab === 'memory'} onClick={() => setActiveTab('memory')} isDaylight={isDaylight} />
-                    <TabButton label="Playback" isActive={activeTab === 'playback'} onClick={() => setActiveTab('playback')} isDaylight={isDaylight} />
-                    <TabButton label="Lyrics" isActive={activeTab === 'lyrics'} onClick={() => setActiveTab('lyrics')} isDaylight={isDaylight} />
-                    <TabButton label="Theme" isActive={activeTab === 'theme'} onClick={() => setActiveTab('theme')} isDaylight={isDaylight} />
-                    <TabButton label="Sonnet" isActive={activeTab === 'sonnet'} onClick={() => setActiveTab('sonnet')} isDaylight={isDaylight} />
+                    {capturing && (
+                        <TabButton label="Console" isActive={activeTab === 'console'} onClick={() => setChosenTab('console')} isDaylight={isDaylight} />
+                    )}
+                    <TabButton label="Memory" isActive={activeTab === 'memory'} onClick={() => setChosenTab('memory')} isDaylight={isDaylight} />
+                    <TabButton label="Playback" isActive={activeTab === 'playback'} onClick={() => setChosenTab('playback')} isDaylight={isDaylight} />
+                    <TabButton label="Lyrics" isActive={activeTab === 'lyrics'} onClick={() => setChosenTab('lyrics')} isDaylight={isDaylight} />
+                    <TabButton label="Theme" isActive={activeTab === 'theme'} onClick={() => setChosenTab('theme')} isDaylight={isDaylight} />
+                    <TabButton label="Sonnet" isActive={activeTab === 'sonnet'} onClick={() => setChosenTab('sonnet')} isDaylight={isDaylight} />
                 </div>
 
                 {activeTab === 'console' && (

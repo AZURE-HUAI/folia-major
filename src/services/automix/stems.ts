@@ -19,9 +19,9 @@ import { profilesSettled } from './profileService';
 // worth less than a download nobody agreed to. A track that is not local simply has no stems and
 // the transition falls back to the master crossfade, which is what every build before this did.
 //
-// Only a WINDOW is separated, never a whole track, and it is kept at sixteen bits. A four-minute
-// track is a minute of CPU and a third of a gigabyte of stems; the last twenty seconds is under
-// seven seconds and 14MB, which is what a transition can actually reach - see STEM_WINDOW_SEC.
+// Only a WINDOW is separated, never a whole track, and it is kept at sixteen bits with the peak
+// scaled out. A four-minute track is a minute of CPU and a third of a gigabyte of stems; the
+// last thirty seconds is about ten seconds and 21MB - see STEM_WINDOW_SEC.
 
 export type StemName = 'drums' | 'bass' | 'other' | 'vocals';
 export const STEM_NAMES: readonly StemName[] = ['drums', 'bass', 'other', 'vocals'];
@@ -36,16 +36,20 @@ export const STEM_SAMPLE_RATE = 44100;
  * (see `pcm` below), and the model spends roughly a third of a second per second of window. A
  * transition holds two windows, so every second here is paid twice in bytes and twice in wait.
  *
- * NOT free to shorten, and the earlier claim that it was is retracted. The gesture needs the window
- * to cover the whole overlap, and the planner may ask for up to AUTOMIX_MAX_OVERLAP_SEC (25s), so
- * a blend longer than this one loses its stems and falls back to the master crossfade. What makes
- * 20 the number rather than 25: the ceiling is reached only when a slow track has a long
- * instrumental outro AND the incoming track has a long intro, and no blend measured so far has
- * come near it - the longest ASKED for in a session's logs was 16.6s, and it was cut to 3.8s by
- * the room the pair actually had. `stems do not cover this window` is the line that says this
- * number was set too low; it prints both figures for exactly that reason.
+ * NOT free to shorten, and the earlier claim that it was is retracted: the gesture needs the
+ * window to cover the WHOLE overlap, and the planner may ask for up to AUTOMIX_MAX_OVERLAP_SEC
+ * (25s), so a blend longer than this loses its stems and falls back to the master crossfade.
+ *
+ * It was briefly 20 to save memory, which was solving the wrong problem. Sixteen-bit storage and
+ * dropping a pair the moment its transition ends already took the resident cost from 127MB to
+ * about 42, and 42MB is not something worth trading a whole gesture against. So it is back at a
+ * number that covers every overlap the planner can ask for, and the ten seconds the model spends
+ * on it are spent minutes before the blend needs them.
+ *
+ * `stems do not cover this window` is the line that would say this number is too low; it prints
+ * both figures for exactly that reason.
  */
-export const STEM_WINDOW_SEC = 20;
+export const STEM_WINDOW_SEC = 30;
 
 /** Which end of a track a window came from. A track needs both over its life, never at once. */
 export type StemRole = 'head' | 'tail';
@@ -68,10 +72,10 @@ export interface TrackStems {
 /**
  * A window as it is KEPT, which is not how it is played.
  *
- * Sixteen-bit rather than float: the model's output is a recording, and a recording has never
- * needed more headroom than a CD. Quantisation puts a floor at about -96 dBFS, which is 65 dB
- * below the error htdemucs itself introduces when its rows are summed, and halves the largest
- * thing automix holds. The float copy exists only while a transition is actually using it.
+ * Sixteen-bit rather than float, with each stem's own peak divided out first. Quantisation puts
+ * a floor at about -96 dBFS relative to that peak, which is 65 dB below the error htdemucs
+ * itself introduces when its rows are summed, and halves the largest thing automix holds. The
+ * float copy exists only while a transition is actually using it.
  */
 interface StemWindow {
     from: number;
@@ -81,28 +85,52 @@ interface StemWindow {
     length: number;
     /** One array per stem, the two channels laid end to end: [L..., R...]. */
     pcm: Record<StemName, Int16Array>;
+    /** What each stem was divided by going in, and is multiplied by coming back out. */
+    gain: Record<StemName, number>;
 }
 
 const PCM_FULL_SCALE = 32767;
 
 /**
- * Float to int, clamped rather than wrapped.
+ * How far a stem overshoots full scale, or 1. The divisor that keeps it inside the format.
  *
- * `other` is a difference of four signals and the master itself can sit at full scale, so samples
- * past ±1 do occur. Wrapping one turns a loud sample into its own negation, which is not a quiet
- * error - it is a click at the loudest point of the blend.
+ * `other` is a difference of four signals and the master itself sits at full scale on a modern
+ * pop record, so samples past ±1 are ordinary here rather than exceptional. Storing them against
+ * a fixed ±1 ceiling clips them, and clipping the loudest samples of the loudest stem is audible
+ * in precisely the seconds a transition is running - the first version of this storage did that,
+ * and it is the only change in it that could alter what a blend sounds like. Dividing by the peak
+ * costs one float per stem and uses the format the way it was meant to be used: full scale means
+ * the loudest sample there is, not an arbitrary 1.0.
  */
-export const toPcm = (left: Float32Array, right: Float32Array): Int16Array => {
+export const peakOf = (left: Float32Array, right: Float32Array): number => {
+    let peak = 1;
+    for (let i = 0; i < left.length; i += 1) {
+        const l = left[i] < 0 ? -left[i] : left[i];
+        if (l > peak) peak = l;
+        const r = right[i] < 0 ? -right[i] : right[i];
+        if (r > peak) peak = r;
+    }
+    return peak;
+};
+
+/**
+ * Float to int, divided by `gain` on the way in and clamped rather than wrapped.
+ *
+ * With `gain` taken from `peakOf` the clamp never fires. It stays because wrapping a sample turns
+ * the loudest moment of a blend into its own negation, which is a click rather than a quiet error.
+ */
+export const toPcm = (left: Float32Array, right: Float32Array, gain = 1): Int16Array => {
     const length = left.length;
+    const scale = PCM_FULL_SCALE / gain;
     const out = new Int16Array(length * 2);
     for (let i = 0; i < length; i += 1) {
-        out[i] = Math.max(-32768, Math.min(32767, Math.round(left[i] * PCM_FULL_SCALE)));
-        out[length + i] = Math.max(-32768, Math.min(32767, Math.round(right[i] * PCM_FULL_SCALE)));
+        out[i] = Math.max(-32768, Math.min(32767, Math.round(left[i] * scale)));
+        out[length + i] = Math.max(-32768, Math.min(32767, Math.round(right[i] * scale)));
     }
     return out;
 };
 
-const toBuffer = (pcm: Int16Array, length: number): AudioBuffer => {
+const toBuffer = (pcm: Int16Array, length: number, gain: number): AudioBuffer => {
     // Constructed rather than taken from the live AudioContext: the rate is htdemucs's, not the
     // context's, so the context was never deciding anything here and threading one through every
     // caller of `getStems` would have bought nothing.
@@ -110,7 +138,7 @@ const toBuffer = (pcm: Int16Array, length: number): AudioBuffer => {
     const channel = new Float32Array(length);
     for (let c = 0; c < 2; c += 1) {
         const base = c * length;
-        for (let i = 0; i < length; i += 1) channel[i] = pcm[base + i] / PCM_FULL_SCALE;
+        for (let i = 0; i < length; i += 1) channel[i] = (pcm[base + i] / PCM_FULL_SCALE) * gain;
         buffer.copyToChannel(channel, c);
     }
     return buffer;
@@ -126,7 +154,9 @@ const view = (window: StemWindow): TrackStems => {
         get buffers(): Record<StemName, AudioBuffer> {
             if (!buffers) {
                 const built = {} as Record<StemName, AudioBuffer>;
-                for (const name of STEM_NAMES) built[name] = toBuffer(window.pcm[name], window.length);
+                for (const name of STEM_NAMES) {
+                    built[name] = toBuffer(window.pcm[name], window.length, window.gain[name]);
+                }
                 buffers = built;
             }
             return buffers;
@@ -413,8 +443,13 @@ export const ensureStems = async (request: StemRequest): Promise<void> => {
         }
 
         const pcm = {} as Record<StemName, Int16Array>;
+        const gain = {} as Record<StemName, number>;
+        const store = (name: StemName, l: Float32Array, r: Float32Array) => {
+            gain[name] = peakOf(l, r);
+            pcm[name] = toPcm(l, r, gain[name]);
+        };
         for (const name of ['drums', 'bass', 'vocals'] as const) {
-            pcm[name] = toPcm(parts[name].left, parts[name].right);
+            store(name, parts[name].left, parts[name].right);
         }
         // `other` by SUBTRACTION rather than as a fourth model output, which is what the listening
         // harness did for eleven rounds and is not a shortcut. htdemucs is trained to reconstruct
@@ -431,7 +466,7 @@ export const ensureStems = async (request: StemRequest): Promise<void> => {
             otherL[i] = left[i] - parts.drums.left[i] - parts.bass.left[i] - parts.vocals.left[i];
             otherR[i] = right[i] - parts.drums.right[i] - parts.bass.right[i] - parts.vocals.right[i];
         }
-        pcm.other = toPcm(otherL, otherR);
+        store('other', otherL, otherR);
 
         remember(key, {
             from: start / STEM_SAMPLE_RATE,
@@ -439,12 +474,13 @@ export const ensureStems = async (request: StemRequest): Promise<void> => {
             role: request.role,
             length: windowLength,
             pcm,
+            gain,
         });
         // The two costs, printed separately and on purpose.
         //
         // This is the only number that says whether the feature is viable on a machine that is not
-        // the one it was written on. The window is thirty seconds of audio, so anything near or
-        // above thirty here means separation is not keeping ahead of playback and a listener will
+        // the one it was written on. The window is STEM_WINDOW_SEC of audio, so anything near or
+        // above that here means separation is not keeping ahead of playback and a listener will
         // mostly hear the crossfade - and nobody can tune the thread count for hardware they cannot
         // measure. A log that carries it turns any user's paste into a measurement.
         const modelSec = (performance.now() - modelStarted) / 1000;

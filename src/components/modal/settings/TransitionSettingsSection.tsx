@@ -1,5 +1,5 @@
 import React from 'react';
-import { Blend, Sparkles, Waves } from 'lucide-react';
+import { Blend, Disc3, Waves } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
 import type { Theme } from '../../../types';
@@ -85,7 +85,7 @@ const TransitionSettingsSection: React.FC<TransitionSettingsSectionProps> = ({
         },
         {
             value: 'automix',
-            icon: <Sparkles size={14} />,
+            icon: <Disc3 size={14} />,
             label: t('options.transitionAutomix'),
             desc: t('options.transitionAutomixDesc'),
             disabled: !analysable,

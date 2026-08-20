@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { pickStemVictim, toPcm } from '../../../src/services/automix/stems';
+import { peakOf, pickStemVictim, toPcm } from '../../../src/services/automix/stems';
 
 // Keys are `${playbackSongKey}:${role}`, oldest first - the order a Map hands them back.
 const wantedSet = (...keys: string[]) => new Set(keys);
@@ -70,5 +70,26 @@ describe('stem storage', () => {
         const pcm = toPcm(Float32Array.from([1.4, -1.4]), Float32Array.from([0, 0]));
 
         expect([...pcm].slice(0, 2)).toEqual([32767, -32768]);
+    });
+
+    it('reads a peak of 1 off anything that fits, and the real one off anything that does not', () => {
+        expect(peakOf(Float32Array.from([0.5, -0.2]), Float32Array.from([0.1, 0.1]))).toBe(1);
+        expect(peakOf(Float32Array.from([0.5, -1.75]), Float32Array.from([0.1, 0.1]))).toBe(1.75);
+        expect(peakOf(Float32Array.from([0.1]), Float32Array.from([2.5]))).toBe(2.5);
+    });
+
+    it('stores a stem that overshoots without flattening its loudest samples', () => {
+        // The whole point of the divisor. Stored against a fixed 1.0 ceiling these three become one
+        // number, and a blend built from them has its peaks shaved off where it is loudest.
+        const left = Float32Array.from([1.4, 1.9, 2.1]);
+        const right = Float32Array.from([0, 0, 0]);
+        const gain = peakOf(left, right);
+        const pcm = toPcm(left, right, gain);
+        const back = [...pcm].slice(0, 3).map(value => (value / 32767) * gain);
+
+        expect(new Set(pcm.slice(0, 3))).toHaveProperty('size', 3);
+        back.forEach((value, index) => {
+            expect(Math.abs(value - left[index])).toBeLessThan(gain / 32767);
+        });
     });
 });
