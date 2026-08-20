@@ -15,6 +15,7 @@ import {
 } from './crossfadeGraph';
 import {
     envelopeOf,
+    firstVocalMoment,
     incomingCurves,
     outgoingCurves,
     planStemHandover,
@@ -355,6 +356,8 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         outgoingBpm: number | null;
         outgoingDownbeat: number | null;
         outgoingBeatsPerBar: number | null;
+        /** The two keys are a semitone or a tritone apart. Stops the voice riding a note out. */
+        keysClash: boolean;
     }): boolean => {
         const { context, fromStems, toStems, startMedia, wall } = args;
         const rate = fromStems.buffers.vocals.sampleRate;
@@ -379,19 +382,37 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             { length: buffer.numberOfChannels },
             (_, channel) => buffer.getChannelData(channel).subarray(at, at + length),
         );
-        const vocals = envelopeOf(slice(fromStems.buffers.vocals, offset), rate);
         // Measured off the SUM of the four stems rather than off any one of them: "quiet" for a
         // vocal exit means quiet against everything else that is playing, which is what makes the
-        // same threshold work on a ballad and on a wall of guitars.
-        const mixChannels = slice(fromStems.buffers.vocals, offset).map((_, channel) => {
-            const out = new Float32Array(length);
-            for (const name of ['vocals', 'drums', 'bass', 'other'] as const) {
-                const data = fromStems.buffers[name].getChannelData(channel);
-                for (let i = 0; i < length; i += 1) out[i] += data[offset + i];
-            }
-            return out;
-        });
-        const mix = envelopeOf(mixChannels, rate);
+        // same threshold work on a ballad and on a wall of guitars. Taken for BOTH decks, because
+        // the incoming voice's ENTRY is now measured the same way the outgoing voice's exit is, and
+        // both sides of that comparison have to be the same measurement against their own track.
+        const mixEnvelope = (stems: TrackStems, at: number) => envelopeOf(
+            slice(stems.buffers.vocals, at).map((_, channel) => {
+                const out = new Float32Array(length);
+                for (const name of ['vocals', 'drums', 'bass', 'other'] as const) {
+                    const data = stems.buffers[name].getChannelData(channel);
+                    for (let i = 0; i < length; i += 1) out[i] += data[at + i];
+                }
+                return out;
+            }),
+            rate,
+        );
+        const vocals = envelopeOf(slice(fromStems.buffers.vocals, offset), rate);
+        const mix = mixEnvelope(fromStems, offset);
+        /**
+         * Where the incoming track actually starts singing inside this window.
+         *
+         * The gesture used to place this one bar after the drum swap and call it done, which is a
+         * fact about the choreography rather than about the song - and it is the moment the
+         * incoming vocal fader comes up, so guessing it late does not merely misplace a deadline,
+         * it mutes a singer who has already started. Both stem sets are already in memory here;
+         * this is the same measurement `lastVocalMoment` makes at the other end of the mix.
+         */
+        const incomingVocalAt = firstVocalMoment(
+            envelopeOf(slice(toStems.buffers.vocals, inOffset), rate),
+            mixEnvelope(toStems, inOffset),
+        );
 
         // The outgoing track's bar lines inside the window, so the drums change hands on the count.
         //
@@ -417,6 +438,7 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
 
         const handover = planStemHandover(
             wall, barSec, args.incomingBarSec, bars, vocals, mix,
+            { vocalAt: incomingVocalAt, keysClash: args.keysClash },
         );
 
         const outCurves = outgoingCurves(wall, handover);
@@ -502,6 +524,15 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             + ` drums at ${handover.swap.toFixed(2)}s${bars.length ? ' on a bar line' : ''},`
             + ` bass at ${handover.bassAt.toFixed(2)}s,`
             + ` next voice at ${handover.vocalIn.toFixed(2)}s`
+            // Which of the three ways that number was arrived at, because they fail differently:
+            // a guess can be seconds out in either direction, a measurement cannot, and a
+            // measurement held back to the swap means the incoming track was already singing as
+            // the window opened and the outgoing voice was given the handover to get out over.
+            + (incomingVocalAt === null
+                ? ' (guessed - it does not sing inside this window)'
+                : incomingVocalAt < handover.vocalIn - 0.005
+                    ? ` (sings at ${incomingVocalAt.toFixed(2)}s, held back to the swap)`
+                    : ' off its vocal stem')
             + (vocalGap > 0
                 ? `, ${vocalGap.toFixed(2)}s with neither voice`
                 : `, voices overlap by ${(-vocalGap).toFixed(2)}s`)
@@ -915,6 +946,7 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
                 outgoingBpm: plannedFrom?.bpm ?? null,
                 outgoingDownbeat: plannedFrom?.downbeatOffset ?? null,
                 outgoingBeatsPerBar: plannedFrom?.beatsPerBar ?? null,
+                keysClash: plan.relation === 'clashing',
             });
 
         /**

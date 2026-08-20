@@ -265,6 +265,23 @@ export const planVocalExit = (
      */
     recedeFrom = EXIT_FLOOR_SEC,
     cellSec = CELL_SEC,
+    /**
+     * Whether a held note may be ridden out over the incoming track at all.
+     *
+     * False only when the two keys are KNOWN to clash - a semitone or a tritone apart, the two
+     * intervals `keyRelation` singles out as the most dissonant thing two mixes can do at once. A
+     * held vowel is a sustained PITCH, and this is the one gesture here that puts a bare interval
+     * in front of the listener for seconds at a time. A semitone against the incoming harmony
+     * beats audibly and there is no fader shape that hides it.
+     *
+     * Only 'clashing', not "anything short of compatible". Two of four transitions in one real
+     * session came back 'unknown' - the key estimate declines below its own confidence floor far
+     * more often than it finds a clash - and what a refusal falls back to is a fade across the
+     * middle of a held note, which is the defect this branch exists to remove. So the test is for
+     * evidence AGAINST, never for evidence in favour, which is the same rule `LENGTH_SCALE`
+     * already applies when it scores an unknown key exactly as high as a compatible one.
+     */
+    mayRide = true,
 ): VocalExit => {
     const reference = median(mix);
     const span = Math.max(1, Math.round(CUT_SEC / cellSec));
@@ -356,19 +373,37 @@ export const planVocalExit = (
      * Three conditions, and the third is the one that keeps this honest. The note has to be
      * sounding at the deadline (`from <= hardEnd < to`), or it is not the note the exit collides
      * with - `findSustain` reports the LAST hold in the window, which on some tracks is one the
-     * voice takes up again well after it was due to leave. And it has to RELEASE inside the window,
-     * with room for the cut: a note still going when the blend ends has no release to ride to, and
-     * riding it anyway would mean never letting go at all, just handing the decision to the moment
-     * the deck stops. That case keeps the ordinary branches, which is what the `still holding when
-     * the window ends` log line has always been reporting.
+     * voice takes up again well after it was due to leave. And it has to RELEASE inside the window:
+     * a note still going when the blend ends has no release to ride to, and riding it anyway would
+     * mean never letting go at all, just handing the decision to the moment the deck stops. One
+     * cell of margin, because `findSustain` closes an unreleased note exactly at the window's end -
+     * the same test the `still holding when the window ends` log line makes.
+     *
+     * What it does NOT ask for is room to do a full half-second cut afterwards, and that bound cost
+     * the very transition this branch was written for. The note there released at 13.45s in a
+     * 13.62s window: a singer finishing her last held note as the blend runs out. That is not an
+     * edge case, it is the commonest shape there is, because the window is PLACED against where she
+     * stops singing - so the last note in it will nearly always be the one that ends near its end.
+     * Demanding CUT_SEC + TAIL_GUARD_SEC behind the release refused the ride and sent it back to a
+     * recede starting at 5.37s, which is the report that this fade left one to two seconds early.
+     * The cut is clamped to the window instead: a release with a tenth of a second behind it gets a
+     * tenth of a second of fade, and that is a fade on a note which has already let go and has
+     * nothing left to take away.
      */
     const windowSec = vocals.length * cellSec;
-    const ridable = held !== null
+    const ridable = mayRide
+        && held !== null
         && held.from <= hardEnd
         && held.to > hardEnd
-        && held.to + CUT_SEC <= windowSec - TAIL_GUARD_SEC;
+        && held.to <= windowSec - cellSec;
     if (ridable && held) {
-        return { from: held.to, to: held.to + CUT_SEC, kind: 'release', loudDb: best.value, held };
+        return {
+            from: held.to,
+            to: Math.min(held.to + CUT_SEC, windowSec),
+            kind: 'release',
+            loudDb: best.value,
+            held,
+        };
     }
 
     return best.value <= REST_DB
@@ -421,6 +456,41 @@ export const lastVocalMoment = (
 };
 
 /**
+ * The first moment the INCOMING track sings, in seconds from the window's start.
+ *
+ * The twin of `lastVocalMoment`, and deliberately not its exact mirror, because the error each one
+ * has to keep on the safe side points the opposite way. A vocal END reported late puts a handover
+ * in a dull instrumental outro and reported early puts it on top of a singer, so that one rounds
+ * up and adds a tail. An ENTRY reported early only raises a fader on a stem that is still silent,
+ * which costs nothing; reported late it mutes real singing. So this returns the first cell of the
+ * run rather than the cell the evidence became sufficient on, and adds nothing to it.
+ *
+ * Null when the incoming track never sings inside the window, which for a long intro is the
+ * ordinary answer rather than a failure - the caller keeps its own guess for that case.
+ */
+export const firstVocalMoment = (
+    /** The incoming vocal stem's envelope over the window. */
+    vocals: Float32Array,
+    /** The incoming mix's envelope over the same window - the same relative floor, its own track. */
+    mix: Float32Array,
+    cellSec = CELL_SEC,
+): number | null => {
+    const floor = median(mix) * 10 ** (REST_DB / 20);
+    let run = 0;
+    let edge = -1;
+    for (let cell = 0; cell < vocals.length; cell += 1) {
+        if (vocals[cell] <= floor) {
+            run = 0;
+            continue;
+        }
+        if (run === 0) edge = cell;
+        run += 1;
+        if (run >= SUSTAIN_CELLS) return edge * cellSec;
+    }
+    return null;
+};
+
+/**
  * When each stem changes hands across one window.
  *
  * Drums swap first and near-instantly, bass follows a bar later, and the incoming voice arrives a
@@ -438,6 +508,16 @@ export const planStemHandover = (
     downbeats: readonly number[],
     vocals: Float32Array,
     mix: Float32Array,
+    /** What the incoming track's own stems say about it. Empty means nothing was measured. */
+    incoming: {
+        /**
+         * Where the incoming voice actually starts singing, seconds into the window, off its own
+         * vocal stem. Null or absent when it does not sing inside the window at all.
+         */
+        vocalAt?: number | null;
+        /** The two keys are known to clash. See `planVocalExit`'s `mayRide`. */
+        keysClash?: boolean;
+    } = {},
     cellSec = CELL_SEC,
 ): StemHandover => {
     const bar = outgoingBarSec && outgoingBarSec > 0 ? outgoingBarSec : windowSec / 4;
@@ -456,7 +536,35 @@ export const planStemHandover = (
         : target;
     const bassAt = Math.min(swap + bar, windowSec - TAIL_GUARD_SEC);
     const inBar = incomingBarSec && incomingBarSec > 0 ? incomingBarSec : bar;
-    const vocalIn = Math.min(windowSec - 0.6, swap + inBar);
+    /**
+     * Where the incoming voice arrives - measured off its own vocal stem when it can be, guessed
+     * only when it cannot.
+     *
+     * It used to be `swap + inBar` always: one bar after the drums change hands. That is the
+     * choreography the listening rounds settled, and it is a statement about the GESTURE, not about
+     * the song - the incoming track sings when it sings. And `vocalIn` is not only the deadline the
+     * outgoing voice has to be gone by; it is also the moment THIS deck's vocal fader comes up.
+     *
+     * Measured on a real pair: the guess said 10.20s and the singer came in at about 7.13s, so
+     * three seconds of real singing were held at zero while the outgoing voice was still receding
+     * over the top of it. The listener's report was that by the time the mix reached the next track
+     * several lines had already gone by, which is exactly what that sounds like from outside - the
+     * lyrics scroll on the incoming track's own clock while its voice is muted.
+     *
+     * Floored at `swap`, because a track already singing as the window opens would otherwise set
+     * the deadline at its first breath and leave the outgoing voice a second to get out - the
+     * swallowed-vocal defect, reached from the other side. Until the swap the outgoing track still
+     * has the floor, so the earliest its voice can be asked to leave is where the beat changes
+     * hands.
+     *
+     * Guessed when the incoming track does not sing inside the window at all, which leaves that
+     * case bit-identical to what it was: a fader rising on a silent stem costs nothing, and the
+     * measurement has nothing to say about a voice that is not there.
+     */
+    const vocalIn = Math.min(
+        windowSec - 0.6,
+        incoming.vocalAt == null ? swap + inBar : Math.max(swap, incoming.vocalAt),
+    );
     const hardEnd = Math.min(vocalIn + CUT_SEC, windowSec - 0.4);
 
     /**
@@ -493,7 +601,12 @@ export const planStemHandover = (
      */
     const recedeFrom = Math.max(EXIT_FLOOR_SEC, Math.min(swap, hardEnd - MIN_RECEDE_SEC));
 
-    return { swap, bassAt, vocalIn, exit: planVocalExit(vocals, mix, hardEnd, recedeFrom, cellSec) };
+    return {
+        swap,
+        bassAt,
+        vocalIn,
+        exit: planVocalExit(vocals, mix, hardEnd, recedeFrom, cellSec, !incoming.keysClash),
+    };
 };
 
 /** Equal-power rise from 0 to 1 across [from, to], evaluated at `at`. */

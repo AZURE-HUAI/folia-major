@@ -3,6 +3,7 @@ import {
     envelopeOf,
     fall,
     findSustain,
+    firstVocalMoment,
     incomingCurves,
     outgoingCurves,
     planStemHandover,
@@ -31,6 +32,13 @@ const flat = (seconds: number, value: number): Float32Array =>
 const withRest = (seconds: number, value: number, from: number, to: number, quiet: number) => {
     const out = flat(seconds, value);
     for (let c = Math.round(from / CELL_SEC); c < Math.round(to / CELL_SEC); c += 1) out[c] = quiet;
+    return out;
+};
+
+/** Silence, one note held at a constant level, silence. */
+const heldTail = (seconds: number, from: number, to: number) => {
+    const out = flat(seconds, 1e-6);
+    for (let c = Math.round(from / CELL_SEC); c < Math.round(to / CELL_SEC); c += 1) out[c] = 1;
     return out;
 };
 
@@ -111,13 +119,6 @@ describe('planVocalExit', () => {
         expect(exit.from).toBeGreaterThanOrEqual(16.65);
     });
 
-    /** Silence, one note held at a constant level, silence. */
-    const heldTail = (seconds: number, from: number, to: number) => {
-        const out = flat(seconds, 1e-6);
-        for (let c = Math.round(from / CELL_SEC); c < Math.round(to / CELL_SEC); c += 1) out[c] = 1;
-        return out;
-    };
-
     it('rides a note that is still sounding at the deadline out to its release', () => {
         // The 14.4s blend the listener reported: a 10.60s note released at 13.45s, and a fade that
         // began at 0.83s - two seconds before the note it was fading had even started. Both other
@@ -142,6 +143,33 @@ describe('planVocalExit', () => {
         // bringing it back to sing over the incoming one is the defect, not the fix.
         const exit = planVocalExit(heldTail(8.64, 5.5, 7.0), flat(8.64, 1), 5.11, 2.61);
         expect(exit.kind).not.toBe('release');
+    });
+
+    it('rides a note that releases just before the window closes', () => {
+        // The same transition as above with the window it actually got - 13.62s, not 14.4s - and
+        // this is the shape the bound was written blind to. The window is PLACED against where the
+        // outgoing track stops singing, so its last held note ends near its end by construction:
+        // here the singer lets go at 13.45s with 0.15s of window behind her. Asking for a full
+        // half-second cut plus a guard after that refused the ride on the commonest case there is
+        // and fell back to a recede beginning at 5.37s, which is the report of a voice leaving one
+        // to two seconds early. The cut is clamped to the window instead.
+        const exit = planVocalExit(heldTail(13.62, 2.85, 13.45), flat(13.62, 1), 8.03, 5.37);
+        expect(exit.kind).toBe('release');
+        expect(exit.from).toBeCloseTo(13.45, 2);
+        expect(exit.to).toBeLessThanOrEqual(13.6 + 1e-9);
+        expect(exit.to).toBeGreaterThan(exit.from);
+    });
+
+    it('does not ride a note out over a track in a clashing key', () => {
+        // A held vowel is a sustained PITCH, and this is the one gesture that leaves a bare
+        // interval hanging in front of the listener for seconds. A semitone or a tritone against
+        // the incoming harmony beats, and no fader shape hides it - so the ride is the one place
+        // the key has to be able to say no. Evidence AGAINST only: an unknown key still rides.
+        const held = heldTail(14.4, 2.85, 13.45);
+        expect(planVocalExit(held, flat(14.4, 1), 8.03, 5.37, CELL_SEC, false).kind)
+            .not.toBe('release');
+        expect(planVocalExit(held, flat(14.4, 1), 8.03, 5.37, CELL_SEC, true).kind)
+            .toBe('release');
     });
 
     it('still finds the rest when the singer does not come back', () => {
@@ -359,6 +387,72 @@ describe('lastVocalMoment', () => {
         // Deliberately past `10`: the caller clamps against the track, and a value that stopped at
         // the window edge would be indistinguishable from one that ended exactly there.
         expect(lastVocalMoment(flat(10, 0.3), mix)).toBeCloseTo(10.3, 6);
+    });
+});
+
+describe('firstVocalMoment', () => {
+    const mix = flat(10, 0.5);
+
+    it('reports the first cell of the entry, not the cell that proved it', () => {
+        // Silence, then singing from 4s. The DIRECTION is the assertion and it is the opposite of
+        // `lastVocalMoment`'s: an entry reported early only raises a fader on a stem that is still
+        // silent, which costs nothing, while one reported late mutes a singer who has started.
+        expect(firstVocalMoment(withRest(10, 0.0001, 4, 10, 0.3), mix)).toBeCloseTo(4, 6);
+    });
+
+    it('returns null when the incoming track does not sing inside the window', () => {
+        // An ordinary answer for a long intro, not a failure - the caller keeps its own guess.
+        expect(firstVocalMoment(flat(10, 0.0001), mix)).toBeNull();
+    });
+
+    it('ignores a leaked transient before the singing starts', () => {
+        // Two cells of a hi-hat htdemucs put in the vocal row. Taking it would open the incoming
+        // fader two seconds early and pull the outgoing voice's deadline with it.
+        const vocals = withRest(10, 0.0001, 4, 10, 0.3);
+        vocals[Math.round(2 / CELL_SEC)] = 0.9;
+        vocals[Math.round(2 / CELL_SEC) + 1] = 0.9;
+        expect(firstVocalMoment(vocals, mix)).toBeCloseTo(4, 6);
+    });
+});
+
+describe('planStemHandover incoming voice', () => {
+    const loud = (seconds: number) => flat(seconds, 0.5);
+    // 12s, 2s bars, no bar lines: the swap lands on the plain fraction at 6s and the old guess -
+    // one incoming bar after it - put the incoming voice at 8s.
+    const at = (incoming: { vocalAt?: number | null; keysClash?: boolean }) =>
+        planStemHandover(12, 2, 2, [], loud(12), loud(12), incoming);
+
+    it('takes the incoming voice where its own stem says it sings', () => {
+        // The guess is a fact about the choreography; this is a fact about the song. Measured on a
+        // real pair the two were three seconds apart, and because `vocalIn` is also where this
+        // deck's vocal fader comes up, those three seconds of singing were held at zero.
+        expect(at({ vocalAt: 7.13 }).vocalIn).toBeCloseTo(7.13, 6);
+        expect(at({ vocalAt: 9.5 }).vocalIn).toBeCloseTo(9.5, 6);
+    });
+
+    it('will not let a track that is already singing swallow the outgoing voice', () => {
+        // Floored at the swap. Without it a track singing from the window's first second sets the
+        // deadline at its own first breath and leaves the outgoing voice a second to get out -
+        // which is the swallowed-vocal defect arrived at from the other side.
+        const plan = at({ vocalAt: 0.4 });
+        expect(plan.vocalIn).toBeCloseTo(plan.swap, 6);
+    });
+
+    it('keeps the old guess when the incoming track does not sing in the window', () => {
+        // Bit-identical to what this always did: a fader rising on a silent stem costs nothing.
+        expect(at({}).vocalIn).toBeCloseTo(at({ vocalAt: null }).vocalIn, 6);
+        expect(at({}).vocalIn).toBeCloseTo(8, 6);
+    });
+
+    it('passes a clashing key down to the exit rather than dropping it on the floor', () => {
+        // The wiring, not the rule: `keysClash` is inverted on its way into `planVocalExit`, and an
+        // inversion that went the wrong way would be silent and total - every clash would ride and
+        // nothing else ever would.
+        const held = heldTail(12, 2, 11.5);
+        const ride = (keysClash: boolean) =>
+            planStemHandover(12, 2, 2, [], held, loud(12), { keysClash }).exit.kind;
+        expect(ride(false)).toBe('release');
+        expect(ride(true)).not.toBe('release');
     });
 });
 
