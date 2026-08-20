@@ -47,6 +47,23 @@ const DEEP_REST_DB = -45;
 const SOFT_EXIT_SEC = 1.2;
 
 /**
+ * Shortest a note has to be held before it counts as held rather than merely sung.
+ *
+ * 1.2 seconds. Under it this is a long syllable, and a long syllable is part of a phrase - the
+ * phrase is what the rest search is already good at finding the end of. Over it the voice has
+ * stopped delivering words and is doing the one thing a fade cannot hide behind.
+ */
+const SUSTAIN_MIN_SEC = 1.2;
+/**
+ * How far a held note may wander from its own peak and still be the same note.
+ *
+ * Seven dB. Vibrato and a natural swell live well inside this; a syllable boundary does not, which
+ * is what keeps an ordinary sung phrase from reading as a sustain. The note ENDS where it leaves
+ * the band, and that moment is the singer letting go - the one place an exit costs nothing.
+ */
+const SUSTAIN_FLAT_DB = 7;
+
+/**
  * Shortest a recede may be, in bars of the outgoing track.
  *
  * Two, and this is a SECOND constraint rather than a tuning of the first. `recedeFrom` derives the
@@ -118,6 +135,32 @@ export interface VocalExit {
     kind: 'rest' | 'recede';
     /** How loud the quietest reachable half-second was, in dB below the window's median. */
     loudDb: number;
+    /**
+     * The held note the voice is on as it leaves, if it is on one. Null when it is not.
+     *
+     * Reported whether or not it changed the exit, because it is the measurement this branch was
+     * chosen against and the only way to find out whether the detector sees what a listener hears.
+     */
+    held: VocalSustain | null;
+}
+
+/**
+ * A note the outgoing voice is holding: where it starts, where it lets go, how loud it sits.
+ *
+ * The object this exists to name is the one the exit search cannot see. `planVocalExit` looks for
+ * the QUIETEST half-second - a rest to cut in - and when it finds none it falls back to fading
+ * across whatever is there. A sustained note is the worst possible thing to fade across: nothing
+ * about it changes, so the only thing moving is the fader, and a fader on a held note is the one
+ * gesture an ear reads as an edit rather than as music. It is also, held against a compatible
+ * sustain on the other side, the most beautiful handover there is - which is the same fact.
+ */
+export interface VocalSustain {
+    /** Seconds into the window where the note is first held. */
+    from: number;
+    /** Where it lets go - the first moment it has fallen out of its own band. */
+    to: number;
+    /** How far the note sits above the mix's median level, in dB. */
+    holdDb: number;
 }
 
 export interface StemHandover {
@@ -164,6 +207,55 @@ const median = (values: Float32Array | readonly number[]): number => {
 };
 
 const db = (ratio: number) => 20 * Math.log10(Math.max(ratio, 1e-12));
+
+/**
+ * The last note the outgoing voice HOLDS inside the window, or null if it never holds one.
+ *
+ * Walked forward and kept rather than returned early, because the last one is the one an exit has
+ * to deal with. A run opens when the voice comes above the singing floor, tracks its own peak, and
+ * closes the moment the level falls more than SUSTAIN_FLAT_DB under that peak - which for a held
+ * note is the singer letting go, and for a sung phrase is the gap after a syllable. Only runs that
+ * lasted SUSTAIN_MIN_SEC survive, so the second case falls out on its own.
+ *
+ * The peak is tracked rather than fixed at the run's first cell so a note that swells stays one
+ * note. It only ever rises, which is what makes the band asymmetric on purpose: a note may grow
+ * without limit and is finished the moment it decays past the band. That IS the release.
+ */
+export const findSustain = (
+    /** The outgoing vocal stem's envelope over the window. */
+    vocals: Float32Array,
+    /** The outgoing mix's envelope over the same window. */
+    mix: Float32Array,
+    cellSec = CELL_SEC,
+): VocalSustain | null => {
+    const reference = Math.max(median(mix), 1e-12);
+    const floor = reference * 10 ** (REST_DB / 20);
+    const band = 10 ** (-SUSTAIN_FLAT_DB / 20);
+    const need = Math.max(1, Math.round(SUSTAIN_MIN_SEC / cellSec));
+
+    let held: VocalSustain | null = null;
+    let start = -1;
+    let peak = 0;
+    // One past the end, so a note still ringing as the window closes is closed by the loop rather
+    // than dropped - that case is the whole point and it is the one an early exit would lose.
+    for (let cell = 0; cell <= vocals.length; cell += 1) {
+        const level = cell < vocals.length ? vocals[cell] : 0;
+        if (start >= 0 && level > floor && level >= peak * band) {
+            if (level > peak) peak = level;
+            continue;
+        }
+        if (start >= 0 && cell - start >= need) {
+            held = {
+                from: start * cellSec,
+                to: cell * cellSec,
+                holdDb: db(peak / reference),
+            };
+        }
+        start = level > floor ? cell : -1;
+        peak = level;
+    }
+    return held;
+};
 
 /**
  * How the outgoing voice leaves: cut it in a rest, otherwise let it recede.
@@ -234,11 +326,18 @@ export const planVocalExit = (
         (best.value - DEEP_REST_DB) / (REST_DB - DEEP_REST_DB)));
     const exitSec = CUT_SEC + softness * (SOFT_EXIT_SEC - CUT_SEC);
 
+    // Measured on every exit, used on none of them yet, and reported on all of them. The branch it
+    // would justify - ride the note's own release instead of imposing a fade across it - changes
+    // what a transition sounds like, and three changes have already gone in today without an ear on
+    // any of them. So this ships as an instrument first: one listening pass says whether it sees
+    // what the listener hears, and the behaviour follows from that rather than from this comment.
+    const held = findSustain(vocals, mix, cellSec);
+
     return best.value <= REST_DB
-        ? { from: at, to: Math.min(at + exitSec, hardEnd), kind: 'rest', loudDb: best.value }
+        ? { from: at, to: Math.min(at + exitSec, hardEnd), kind: 'rest', loudDb: best.value, held }
         // Nowhere quiet to hide, so the voice recedes instead. A fade needs somewhere to hide;
         // where there is none, the ear forgives a decision but not a drift.
-        : { from: recedeFrom, to: hardEnd, kind: 'recede', loudDb: best.value };
+        : { from: recedeFrom, to: hardEnd, kind: 'recede', loudDb: best.value, held };
 };
 
 /**

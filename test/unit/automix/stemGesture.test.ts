@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
     envelopeOf,
     fall,
+    findSustain,
     incomingCurves,
     outgoingCurves,
     planStemHandover,
@@ -311,5 +312,58 @@ describe('planStemHandover recede length', () => {
         // the floor must not fire: this is the `min` that keeps every blend that already worked.
         const plan = planStemHandover(20, 1, 3, [], loud(20), loud(20));
         expect(plan.exit.from).toBeCloseTo(plan.swap, 6);
+    });
+});
+
+describe('findSustain', () => {
+    const mix = flat(10, 0.5);
+    // A held note: level, then a release. `withRest` builds the silence after it.
+    const heldNote = (from: number, to: number, level = 0.4) => {
+        const out = flat(10, 0.0001);
+        for (let c = Math.round(from / CELL_SEC); c < Math.round(to / CELL_SEC); c += 1) out[c] = level;
+        return out;
+    };
+
+    it('finds a held note and reports where it lets go', () => {
+        const held = findSustain(heldNote(2, 6), mix);
+        expect(held?.from).toBeCloseTo(2, 6);
+        expect(held?.to).toBeCloseTo(6, 6);
+    });
+
+    it('ignores a sung phrase, which is what the rest search is already for', () => {
+        // Four syllables with gaps. Nothing here is held, and calling it held would put the
+        // sustain branch on top of every ordinary vocal line in the library.
+        const phrase = flat(10, 0.0001);
+        for (const at of [1, 2, 3, 4]) {
+            for (let c = Math.round(at / CELL_SEC); c < Math.round((at + 0.4) / CELL_SEC); c += 1) {
+                phrase[c] = 0.4;
+            }
+        }
+        expect(findSustain(phrase, mix)).toBeNull();
+    });
+
+    it('keeps a note that swells as one note', () => {
+        // Rising through the hold. Tracking the run's own peak rather than its first cell is what
+        // stops a crescendo from reading as a new note every cell.
+        const swell = flat(10, 0.0001);
+        const first = Math.round(2 / CELL_SEC);
+        const last = Math.round(6 / CELL_SEC);
+        for (let c = first; c < last; c += 1) swell[c] = 0.2 + 0.2 * ((c - first) / (last - first));
+        const held = findSustain(swell, mix);
+        expect(held?.to).toBeCloseTo(6, 6);
+    });
+
+    it('closes a note that is still ringing when the window ends', () => {
+        // The case the whole thing exists for, and the one an early return would drop: there is no
+        // release inside the window, so there is no free moment to leave on.
+        const held = findSustain(heldNote(4, 10), mix);
+        expect(held?.to).toBeCloseTo(10, 6);
+    });
+
+    it('reports the last note, not the first', () => {
+        const two = flat(10, 0.0001);
+        for (let c = Math.round(1 / CELL_SEC); c < Math.round(3 / CELL_SEC); c += 1) two[c] = 0.4;
+        for (let c = Math.round(5 / CELL_SEC); c < Math.round(8 / CELL_SEC); c += 1) two[c] = 0.4;
+        expect(findSustain(two, mix)?.from).toBeCloseTo(5, 6);
     });
 });

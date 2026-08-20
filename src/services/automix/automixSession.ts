@@ -493,6 +493,20 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             // Printed because it is the quantity that went wrong and nothing named it: a blend
             // reading 16.64s looks like a length decision, and it was a placement one.
             + `, ${(wall - Math.max(handover.bassAt, handover.vocalIn)).toFixed(2)}s of blend after that`
+            // What the voice is actually DOING as it leaves, which is the question neither the
+            // branch name nor the quietest-half-second answers. `receding 0.83-8.03s` reads the
+            // same whether it faded across a phrase that was ending anyway or across a note the
+            // singer was still holding, and those are opposite events - the first is invisible and
+            // the second is the one that gets reported as leaving too fast. `let go at` is the
+            // moment a fade would have cost nothing; `still holding` means there was no such
+            // moment inside the window and the fade had to cross a note that never released.
+            + (handover.exit.held === null
+                ? ', not on a held note'
+                : `, holding a ${(handover.exit.held.to - handover.exit.held.from).toFixed(2)}s note`
+                    + ` at ${handover.exit.held.holdDb.toFixed(0)}dB`
+                    + (handover.exit.held.to >= wall - 0.05
+                        ? ', still holding when the window ends'
+                        : `, let go at ${handover.exit.held.to.toFixed(2)}s`))
             + (late > 0.01 ? `, wired ${late.toFixed(2)}s late and lined up on that` : ''),
         );
         return true;
