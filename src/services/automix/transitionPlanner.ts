@@ -42,6 +42,15 @@ export interface TransitionTrack {
      * and the two are not equivalent - see there.
      */
     vocalEnd?: number | null;
+    /**
+     * The separated window the stem gesture holds for this end, in media time. Null if it has none.
+     *
+     * Two things at once, and deliberately the same field for both, because they are the same fact:
+     * a window that exists is a voice the gesture can hold, and its extent is how long a blend it
+     * can hold one across. Kept as an extent rather than as a boolean plus a length because the
+     * planner has to answer both questions and a pair of fields would let them disagree.
+     */
+    separated?: { from: number; to: number } | null;
 }
 
 export type TransitionKind = 'hardCut' | 'fade';
@@ -492,9 +501,64 @@ export const planTransition = (
     // the track that sings to its own last second. Both were the old Infinity; keeping them means
     // this whole change touches exactly one case, the one where both sides are known and the answer
     // used to be the smaller of the two.
-    const singleVoiceRoom = tailRoom === null && introRoom === null
+    //
+    // And the whole ceiling lifts when the gesture is going to hold both voices itself.
+    //
+    // This is the part that stops being about constants. Every rule above reasons about where the
+    // voices HAPPEN TO BE in the two files, because for a master crossfade that is the only lever
+    // there is: the outgoing voice is baked into the outgoing master and arrives whenever it
+    // arrives. The stem gesture does not have that problem. It holds the incoming vocal at absolute
+    // zero until `vocalIn` - `rise` returns 0, not a small number - and it takes the outgoing one
+    // out at a moment measured off the voice itself. Neither of them can sound when it has not been
+    // turned on, whatever the files contain.
+    //
+    // So on a separated pair `intro` is not a constraint any more, it is trivia. It says when the
+    // incoming track WOULD sing if nothing were controlling it, and something is.
+    //
+    // What that was costing, off one real transition: "I Will Always Love You" into "Past Lives"
+    // wanted a 25.7s blend and got 3.6s, capped at the 4.56s where the incoming track's first
+    // section begins - and the gesture would have held that voice back until 17s of a full-length
+    // window anyway. The whole of the outgoing track's final sustained note was then crushed into a
+    // 2.5s recede, because the window it had to leave in was 3.6s long.
+    //
+    // The pair still bounds itself: AUTOMIX_MAX_OVERLAP_SEC, the quarter-length cap, and `wanted` -
+    // one phrase of the music, scaled by what was measured - all still apply. The music decides the
+    // length; what is removed is a ceiling standing in for a collision that can no longer happen.
+    const voicesGated = Boolean(from.separated && to.separated);
+    const singleVoiceRoom = voicesGated || (tailRoom === null && introRoom === null)
         ? Infinity
         : Math.max(tailRoom ?? 0, introRoom ?? 0);
+
+    // Where the incoming track is allowed to start from, hoisted above the ceiling because the
+    // ceiling now depends on it. Its own explanation is at `inStart`, which still does the walk.
+    const entryFloor = Math.min(
+        MAX_TRIMMED_TAIL_SEC,
+        Math.max(0, (to.profile?.leadIn ?? 0) - ENTRY_MARGIN_SEC),
+    );
+    /**
+     * The longest blend the two separated windows can actually carry.
+     *
+     * Lifting the vocal ceiling is a promise that the gesture will run, and the gesture refuses any
+     * window its stems do not cover at both ends - falling back to the master crossfade, which is
+     * the ONE actuator that cannot hold a voice. So a lifted ceiling with no bound here buys a long
+     * blend by promising something, then breaks the promise and leaves the long blend behind: two
+     * vocals stacked for twenty seconds, which is worse than the short blend it replaced.
+     *
+     * The two ends bind for different reasons. Behind: the blend ends at `end` at the latest, so its
+     * whole length has to sit between there and the first separated sample - a track with ten
+     * seconds of trailing silence has ten fewer seconds of usable window than its length suggests.
+     * Ahead: the incoming window has to cover the entry as well as the blend, and the entry can be
+     * up to MAX_TRIMMED_TAIL_SEC in. A beat of slack for the alignment walk, which only ever moves
+     * the entry later and by less than one.
+     *
+     * Not a constant, and could not be: it is 30 minus two things measured off this particular pair.
+     */
+    const gestureRoom = from.separated && to.separated
+        ? Math.max(0, Math.min(
+            end - from.separated.from,
+            to.separated.to - entryFloor - (beat ?? 0),
+        ))
+        : Infinity;
 
     // One phrase of the outgoing track, then scaled by everything that was measured about the pair:
     // longer when the keys sit together, when the tempos are locked, when the tail wants riding, or
@@ -516,6 +580,8 @@ export const planTransition = (
         // Quarter-length cap so a very short track is not half crossfade.
         end / 4,
         singleVoiceRoom,
+        // Only binds on a separated pair, and only because that pair asked for the long blend.
+        gestureRoom,
         // Only ever binds when the planning itself was late - see `left`.
         left,
     );
@@ -609,10 +675,6 @@ export const planTransition = (
     // is skipped the entry can be walked forward to whichever of its beats lands on one of the
     // outgoing track's. That second half is the part a gain curve can never stand in for - two
     // tracks a third of a beat apart stay a third of a beat apart however the levels move.
-    const entryFloor = Math.min(
-        MAX_TRIMMED_TAIL_SEC,
-        Math.max(0, (to.profile?.leadIn ?? 0) - ENTRY_MARGIN_SEC),
-    );
     const inStart = alignEntry(
         entryFloor,
         // The SAME phase estimator as the outgoing side above, and that is the whole point.
@@ -670,13 +732,18 @@ export const planTransition = (
     // relaxed. It prints loudest because it is the line that would say so.
     const nextSings = intro !== null && inStart + overlap > intro;
     const outgoingSings = lastSung !== null && outStart < lastSung;
-    const sungOver = nextSings && outgoingSings
-        ? ', BOTH tracks sing inside this blend'
-        : nextSings
-            ? ', the next track sings over the outgoing instrumental'
-            : outgoingSings
-                ? ', the outgoing track sings over the next one\'s intro'
-                : '';
+    // On a separated pair both voices are held by the gesture, so "sings" here would be reporting
+    // what is in the FILES rather than what will be heard - and the two stopped being the same
+    // thing. The gesture's own log says when each voice actually moves.
+    const sungOver = voicesGated
+        ? ', both voices held by the gesture'
+        : nextSings && outgoingSings
+            ? ', BOTH tracks sing inside this blend'
+            : nextSings
+                ? ', the next track sings over the outgoing instrumental'
+                : outgoingSings
+                    ? ', the outgoing track sings over the next one\'s intro'
+                    : '';
 
     return {
         kind: 'fade',

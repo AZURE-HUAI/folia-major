@@ -509,3 +509,60 @@ describe('a join has to survive the step that performs it', () => {
         expect(shaped.overlap).toBe(BEAT_CUT_SEC);
     });
 });
+
+// The vocal windows exist because a master crossfade cannot hold a voice: the outgoing one is baked
+// into the outgoing master and arrives whenever it arrives. The stem gesture can - it holds the
+// incoming vocal at absolute zero until `vocalIn` - so on a separated pair those windows describe
+// where the voices merely HAPPEN to be, which is not a constraint on anything.
+describe('a separated pair is not bound by where the voices happen to be', () => {
+    // "I Will Always Love You" into "Past Lives", off a real log: a 25.7s blend capped to 3.6s by
+    // the 4.56s where the incoming track's first section begins - and the gesture would have held
+    // that voice back until well past it. The outgoing track's final sustained note was then given
+    // 2.5s to get out in.
+    const wholeTail = { from: 243.5, to: 273.5 };
+    const wholeHead = { from: 0, to: 30 };
+    const ballad = (separated: { from: number; to: number } | null): TransitionTrack => ({
+        duration: 273.5,
+        lines: [line(10, 269.36)],
+        profile: makeProfile({ duration: 273.5, leadOut: 5.02, bodyOut: 0, bpm: 65 }),
+        vocalEnd: 268.66,
+        separated,
+    });
+    const next = (separated: { from: number; to: number } | null): TransitionTrack => ({
+        duration: 200,
+        lines: null,
+        profile: makeProfile({ sectionStart: 4.56, bpm: 76 }),
+        separated,
+    });
+
+    it('lets the music set the length once both voices are held', () => {
+        const capped = planTransition(ballad(null), next(null), 65);
+        const freed = planTransition(ballad(wholeTail), next(wholeHead), 65);
+
+        expect(capped.overlap).toBeCloseTo(3.69, 2);
+        expect(capped.reason).toContain('room for (4.56s)');
+        // Four bars of the outgoing track, which is what `wanted` quantises to inside the 25s cap.
+        expect(freed.overlap).toBeCloseTo(14.77, 2);
+        expect(freed.reason).toContain('both voices held by the gesture');
+    });
+
+    it('still bounds the blend by what the two windows can actually carry', () => {
+        // The promise the lifted ceiling makes is that the gesture will run, and it refuses any
+        // window its stems do not cover - falling back to the master crossfade, the one actuator
+        // that cannot hold a voice. A lifted ceiling with no bound would buy a long blend by
+        // promising something and then break the promise, leaving two vocals stacked across it.
+        //
+        // Same pair, but separation began only ten seconds before the music stops.
+        const narrow = planTransition(ballad({ from: 258.48, to: 288.48 }), next(wholeHead), 65);
+
+        expect(narrow.overlap).toBeLessThanOrEqual(10);
+        expect(narrow.reason).toContain('both voices held by the gesture');
+    });
+
+    it('does not lift the ceiling when only one end was separated', () => {
+        // The gesture needs the pair before it will use either window, so one is not evidence of
+        // anything. Both of these have to plan exactly as an unseparated pair does.
+        expect(planTransition(ballad(wholeTail), next(null), 65).overlap).toBeCloseTo(3.69, 2);
+        expect(planTransition(ballad(null), next(wholeHead), 65).overlap).toBeCloseTo(3.69, 2);
+    });
+});

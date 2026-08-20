@@ -582,14 +582,33 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         // model has not finished. Both fall back to the lyric file, which is what every build
         // before this one used unconditionally.
         const outgoingStems = ports.getStems?.(request.fromKey, 'tail') ?? null;
-        const outgoing: TransitionTrack = outgoingStems?.vocalEnd == null ? request.from : {
+        // BOTH windows, and the `&&` is the point rather than a tidiness: `scheduleStemGesture`
+        // refuses unless it has the pair, so a plan that lifted the vocal ceiling on the strength
+        // of one window would hand a master crossfade a length only the gesture could carry. The
+        // two questions - "may this blend be long" and "will the gesture run" - have to be answered
+        // off the same evidence, in the same place, or they are two facts again.
+        const incomingStems = ports.getStems?.(request.nextKey, 'head') ?? null;
+        // Reported as an extent each, and only when BOTH ends have one - the `&&` is the point
+        // rather than a tidiness. `scheduleStemGesture` refuses unless it has the pair, so a plan
+        // that lifted the vocal ceiling on the strength of one window would hand a master crossfade
+        // a length only the gesture could carry. "May this blend be long" and "will the gesture
+        // run" have to be answered off the same evidence, in one place, or they are two facts.
+        const extent = (stems: TrackStems | null) => (
+            outgoingStems && incomingStems && stems
+                ? { from: stems.from, to: stems.from + stems.duration }
+                : null
+        );
+        const outgoing: TransitionTrack = {
             ...request.from,
-            vocalEnd: outgoingStems.from + outgoingStems.vocalEnd,
+            separated: extent(outgoingStems),
+            ...(outgoingStems?.vocalEnd == null
+                ? {}
+                : { vocalEnd: outgoingStems.from + outgoingStems.vocalEnd }),
         };
         const nextPlan = planForMode(
             request.settings,
             outgoing,
-            request.to,
+            { ...request.to, separated: extent(incomingStems) },
             // The offline profile measured the whole file; the live tap only heard the last few
             // seconds. Prefer the profile, fall back to the tap for anything never analysed.
             request.from.profile?.bpm ?? outgoingTempo?.bpm ?? null,
