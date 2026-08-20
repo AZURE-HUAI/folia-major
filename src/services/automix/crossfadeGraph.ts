@@ -322,6 +322,90 @@ export const scheduleEchoThrow = (
  */
 const SPLICE_SEC = 0.008;
 
+/**
+ * Where the soft limiter stops being a straight line, and how far past full scale it can see.
+ *
+ * 0.95 is -0.45 dBFS: a master that fits inside full scale passes through all but untouched,
+ * and the shaping is spent on what does not fit. 4 is +12 dB of visible range, which is well
+ * past anything two records have been measured to reach together; beyond it a WaveShaper
+ * clamps to the end of its curve, which is the hard clip this exists to avoid.
+ */
+const LIMIT_KNEE = 0.95;
+const LIMIT_RANGE = 4;
+
+/**
+ * The transfer curve the two stem chains are summed through. Straight line, then a soft knee.
+ *
+ * The gesture REPLACES the master crossfade, and the allowance that keeps a blend under full
+ * scale lived inside the crossfade it replaced. Two 0 dBFS masters handed over stem by stem
+ * were measured summing to +3.4 dBFS with 1445 samples hard-clipped at the destination; where
+ * either master had headroom the same gesture peaked at -0.75, which is why nothing constant
+ * is right either.
+ *
+ * This replaces a measured, time-varying attenuation over the whole pair, and the reason is
+ * arithmetic rather than taste. That correction was driven by the loudest SAMPLE in each 50ms
+ * cell and spread over 400ms either side, so on the pair above it pulled every sample of the
+ * blend down by about four decibels to keep 1445 of them legal - a tenth of a percent of the
+ * window, protected by moving all of it. Four decibels through the middle of a transition is
+ * audible, and was reported as the transition ducking. A memoryless curve touches only the
+ * samples that are actually over, leaves the level alone, and needs nothing measured, no
+ * threshold, and no pair refused.
+ *
+ * `tanh` above the knee because it is smooth where it joins the line (so the curve has no
+ * corner for a transient to find) and asymptotic to 1 (so no input, however far over, can
+ * reach full scale). Below the knee it is the identity, exactly - a WaveShaper interpolates
+ * linearly between curve points, so a straight segment comes back out straight, and the great
+ * majority of every window passes through unchanged.
+ */
+export const softLimit = (x: number): number => {
+    const level = x < 0 ? -x : x;
+    if (level <= LIMIT_KNEE) return x;
+    const room = 1 - LIMIT_KNEE;
+    const held = LIMIT_KNEE + room * Math.tanh((level - LIMIT_KNEE) / room);
+    return x < 0 ? -held : held;
+};
+
+/** The point both stem chains sum at, and the only thing between them and the mix. */
+export interface AutomixStemBus {
+    input: GainNode;
+    stop: () => void;
+}
+
+/**
+ * The shared bus, built per transition and thrown away with it.
+ *
+ * Per transition rather than permanently in the mix, because the sum of two decks is the only
+ * thing that overshoots: one master on its own is under full scale by definition, and a curve
+ * in its path for the other 99% of playback would be a nonlinearity nobody asked for.
+ *
+ * The pre-gain is what makes the shaper usable at all: its curve is indexed over an input of
+ * [-1, 1] and CLAMPS outside that, so a sum at +3.4 dBFS would hit the end of the table and be
+ * hard-clipped by the very node meant to prevent it. Scaling by 1/LIMIT_RANGE going in, with a
+ * curve written in the same units coming out, is the standard way round that.
+ */
+export const connectStemBus = (context: AudioContext, output: AudioNode): AutomixStemBus => {
+    const points = 8192;
+    const curve = new Float32Array(points);
+    for (let i = 0; i < points; i += 1) {
+        curve[i] = softLimit(((i / (points - 1)) * 2 - 1) * LIMIT_RANGE);
+    }
+    const shaper = context.createWaveShaper();
+    shaper.curve = curve;
+    // Memoryless on purpose. Oversampling resamples EVERYTHING passing through, including the
+    // straight-line region that is most of every window and has to stay exactly straight.
+    shaper.oversample = 'none';
+    const input = context.createGain();
+    input.gain.value = 1 / LIMIT_RANGE;
+    input.connect(shaper).connect(output);
+    return {
+        input,
+        stop: () => {
+            input.disconnect();
+            shaper.disconnect();
+        },
+    };
+};
+
 /** One deck's stems, wired and ready to be scheduled. Built per transition and thrown away. */
 export interface AutomixStemChain {
     sources: Record<StemName, AudioBufferSourceNode>;

@@ -1,4 +1,5 @@
 import {
+    connectStemBus,
     connectStemDeck,
     rampGain,
     rampGainDb,
@@ -9,11 +10,10 @@ import {
     scheduleEchoThrow,
     scheduleStemWindow,
     type AutomixDeckChain,
+    type AutomixStemBus,
     type AutomixStemChain,
 } from './crossfadeGraph';
 import {
-    CELL_SEC,
-    ceilingCurve,
     envelopeOf,
     incomingCurves,
     outgoingCurves,
@@ -96,28 +96,6 @@ const BALANCE_INTERVAL_MS = 100;
 const BALANCE_RAMP_SEC = 0.4;
 /** Nothing smaller than this is worth moving a gain for. */
 const BALANCE_STEP_DB = 0.75;
-/**
- * How hard `ceilingCurve` may work before the stem gesture is the wrong tool for this pair.
- *
- * A third answer to a question that had two, and both of them were bad. The pair that made the
- * ceiling necessary summed to +3.4 dBFS with 1445 samples hard-clipped; the ceiling saved it by
- * taking about four decibels out of the middle of the blend, and four decibels out of the middle
- * of a blend is audible - it was reported as the transition ducking, from a real session where
- * the two neighbouring blends asked for 0.6 and 1.0dB and sounded fine. So the choice as it stood
- * was distortion or ducking, and this declines to make it.
- *
- * What that much correction actually means: the four rows sum to the master EXACTLY by
- * construction, so a separation that put large cancelling parts in different rows is invisible
- * until the gesture gives those rows different envelopes, at which point the cancellation stops
- * and the sum runs away. The gesture's premise is that the four rows are the music. Where it
- * takes this much to make them legal, the premise has failed for this pair.
- *
- * The line is drawn from three measured blends plus that one, so it is a first placement rather
- * than a settled number - which is why `held` is printed on every stemmed blend and this refusal
- * prints the figure it refused on. Move it when the log says to, not before. The fallback is the
- * master crossfade: tested, with its own 1.5dB allowance folded in, and it does not care.
- */
-const CEILING_REFUSE = 10 ** (-3 / 20);
 /**
  * Longest the incoming deck may be held silent to land the handover where it was planned.
  *
@@ -337,6 +315,8 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
 
     /** Live for exactly one transition. Emptied by settle, which every ending goes through. */
     let stemChains: AutomixStemChain[] = [];
+    /** The soft limiter both of those sum through. Same lifetime, same reason. */
+    let stemBus: AutomixStemBus | null = null;
 
     /** One bar of a track, in seconds. Null unless both halves of the answer were measured. */
     const barSecOf = (profile: TrackProfile | null | undefined): number | null =>
@@ -455,63 +435,6 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             for (let i = 0; i < inCurves[name].length; i += 1) inCurves[name][i] *= inLevel;
         }
 
-        /**
-         * The loudest sample the two decks reach TOGETHER, cell by cell.
-         *
-         * Walked at sample resolution because clipping is a peak question and an envelope cannot
-         * answer it - the pair this was found from summed to +3.4 dBFS while its 50ms RMS trace
-         * stayed within a decibel of the music's own dynamics, which is why three passes at this
-         * looking for a level dip found nothing.
-         *
-         * The cost is the same order as the two `envelopeOf` calls above, which walk the same
-         * window: eight stems here against five there.
-         */
-        const cells = Math.floor(wall / CELL_SEC);
-        const cellLength = Math.max(1, Math.round(CELL_SEC * rate));
-        const peak = new Float32Array(cells);
-        // All sixteen curves were sampled over the same window, so one index serves them all.
-        const points = outCurves.vocals.length;
-        const lastSample = Math.max(1, length - 1);
-        for (let channel = 0; channel < fromStems.buffers.vocals.numberOfChannels; channel += 1) {
-            // Hoisted out of the sample loop, which is not tidying-up. `getChannelData` is a call
-            // across into the audio engine, and reading it once per sample per stem made this
-            // walk cost seconds on a long blend - seconds the gesture then spent STARTING LATE,
-            // because the moment it starts at was chosen before any of this ran. Same samples,
-            // same arithmetic, one lookup per channel instead of sixteen per sample.
-            const fromData = STEM_NAMES.map(name => fromStems.buffers[name].getChannelData(channel));
-            const toData = STEM_NAMES.map(name => toStems.buffers[name].getChannelData(channel));
-            const outCurve = STEM_NAMES.map(name => outCurves[name]);
-            const inCurve = STEM_NAMES.map(name => inCurves[name]);
-            for (let c = 0; c < cells; c += 1) {
-                let loudest = peak[c];
-                const until = Math.min(length, (c + 1) * cellLength);
-                for (let i = c * cellLength; i < until; i += 1) {
-                    const p = Math.min(points - 1, Math.round((i / lastSample) * (points - 1)));
-                    let sum = 0;
-                    for (let s = 0; s < STEM_NAMES.length; s += 1) {
-                        sum += fromData[s][offset + i] * outCurve[s][p]
-                            + toData[s][inOffset + i] * inCurve[s][p];
-                    }
-                    loudest = Math.max(loudest, Math.abs(sum));
-                }
-                peak[c] = loudest;
-            }
-        }
-        const ceiling = ceilingCurve(peak, outCurves.vocals.length);
-        const held = Math.min(...ceiling);
-        if (held < CEILING_REFUSE) {
-            console.log(
-                `[Automix] stems would need ${(-20 * Math.log10(held)).toFixed(1)}dB taken out of`
-                + ' the middle of this blend to stay under full scale, using the master crossfade',
-            );
-            return false;
-        }
-        for (const curves of [outCurves, inCurves]) {
-            for (const name of STEM_NAMES) {
-                for (let i = 0; i < curves[name].length; i += 1) curves[name][i] *= ceiling[i];
-            }
-        }
-
         // Everything above was measured against a start time chosen BEFORE it ran, and it does
         // not run for free. Whatever it overran by, both elements have already played - so
         // handing the buffers the planned media position would open the window by replaying
@@ -529,11 +452,16 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             (toStems.buffers.vocals.length - (inOffset + length)) / rate,
         );
 
+        // Both decks sum through one soft limiter rather than straight into the mix. The pair
+        // is the only thing here that can go past full scale - a master on its own cannot -
+        // and this is the whole of what keeps it under, in place of a pass that predicted the
+        // overshoot and pulled the entire blend down to cover it. See `softLimit`.
+        stemBus = connectStemBus(context, args.tailChain.output);
         const outgoing = connectStemDeck(
-            context, fromStems, args.tailChain.output, startMedia + late, at, true,
+            context, fromStems, stemBus.input, startMedia + late, at, true,
         );
         const incoming = connectStemDeck(
-            context, toStems, args.activeChain.output, args.inAt + late, at, false,
+            context, toStems, stemBus.input, args.inAt + late, at, false,
         );
         stemChains = [outgoing, incoming];
 
@@ -565,9 +493,6 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
             // Printed because it is the quantity that went wrong and nothing named it: a blend
             // reading 16.64s looks like a length decision, and it was a placement one.
             + `, ${(wall - Math.max(handover.bassAt, handover.vocalIn)).toFixed(2)}s of blend after that`
-            + (held < 0.999
-                ? `, held ${(-20 * Math.log10(held)).toFixed(1)}dB down so the pair stays under full scale`
-                : '')
             + (late > 0.01 ? `, wired ${late.toFixed(2)}s late and lined up on that` : ''),
         );
         return true;
@@ -589,6 +514,8 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         // left connected would keep its window playing under the next track.
         stemChains.forEach(chain => chain.stop());
         stemChains = [];
+        stemBus?.stop();
+        stemBus = null;
         // Before anything else: a transition that ends while still holding the autoplay would
         // leave the app with a loaded deck nothing is ever going to press play on.
         setAutoplayHold(false);

@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-    ceilingCurve,
     envelopeOf,
     fall,
     incomingCurves,
@@ -255,48 +254,5 @@ describe('the curves a window is scheduled from', () => {
         const cell = (at: number) => curves.drums[Math.round((at / 8) * (curves.drums.length - 1))];
         expect(cell(plan.swap - 0.05)).toBeGreaterThan(0.9);
         expect(cell(plan.swap + 0.05)).toBeLessThan(0.1);
-    });
-});
-
-describe('ceilingCurve', () => {
-    // The stem gesture replaces the master crossfade, and the allowance that keeps a blend under
-    // full scale lived inside the crossfade. Measured on the pair this was found from - two 0 dBFS
-    // masters - the sum peaked at +3.4 dBFS with 1445 samples hard-clipped; where either master had
-    // headroom the same gesture peaked at -0.75. So the correction has to be measured, not constant.
-    const cells = 160;                                        // eight seconds of 50ms cells
-
-    it('leaves a blend that never reaches full scale exactly alone', () => {
-        // The common case, and the one a constant allowance would have made quieter for nothing.
-        const curve = ceilingCurve(new Float32Array(cells).fill(0.5), 1536);
-        for (const gain of curve) expect(gain).toBe(1);
-    });
-
-    it('holds the sum under full scale where it would have clipped', () => {
-        const peak = new Float32Array(cells).fill(0.5);
-        for (let c = 60; c < 90; c += 1) peak[c] = 1.5;        // +3.5dB over, sustained
-        const curve = ceilingCurve(peak, 1536);
-        for (let c = 60; c < 90; c += 1) {
-            const gain = curve[Math.round((c / (cells - 1)) * (curve.length - 1))];
-            expect(peak[c] * gain).toBeLessThanOrEqual(10 ** (-1 / 20) + 1e-6);
-        }
-    });
-
-    it('is smoothed but never lets the peak it was computed from back through', () => {
-        // A moving average over the raw requirement WOULD let it through, which is why the running
-        // minimum comes first. One isolated loud cell is the case that catches the wrong order.
-        const peak = new Float32Array(cells).fill(0.5);
-        peak[80] = 2;
-        const curve = ceilingCurve(peak, 1536);
-        const gain = curve[Math.round((80 / (cells - 1)) * (curve.length - 1))];
-        expect(peak[80] * gain).toBeLessThanOrEqual(10 ** (-1 / 20) + 1e-6);
-    });
-
-    it('starts and ends at exactly unity', () => {
-        // THE changeover invariant outranks this one: the deck splices from its media element to
-        // the stem buffers over eight milliseconds at the top of the window and hands the track
-        // back at the bottom. A ceiling that did not return to 1 would put a step on both.
-        const curve = ceilingCurve(new Float32Array(cells).fill(4), 1536);
-        expect(curve[0]).toBe(1);
-        expect(curve[curve.length - 1]).toBe(1);
     });
 });

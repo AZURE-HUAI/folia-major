@@ -5,6 +5,7 @@ import {
     scheduleBandBlend,
     scheduleCrossfade,
     scheduleEchoThrow,
+    softLimit,
 } from '@/services/automix/crossfadeGraph';
 import { dbToGain, BLEND_HEADROOM_DB } from '@/services/automix/signalAnalysis';
 import {
@@ -335,5 +336,52 @@ describe('rampGain', () => {
         rampGainDb(context, asGain(node), -6, 0.4);
 
         expect(finalTarget(node)).toBeCloseTo(0.501, 3);
+    });
+});
+
+describe('softLimit', () => {
+    // What this replaced: a pass that measured the pair's summed peak and pulled the WHOLE blend
+    // down far enough to cover it. On the pair that made it necessary - two 0 dBFS masters, summing
+    // to +3.4 dBFS - that was about four decibels off every sample of the window to keep 1445 of
+    // them legal, and four decibels through the middle of a transition is audible as ducking.
+
+    it('leaves anything that already fits inside full scale exactly alone', () => {
+        // The great majority of every window, and the reason the curve is a straight line here
+        // rather than a gentle slope: the shaper interpolates linearly between points, so a
+        // straight segment comes back out straight and nothing below the knee is touched at all.
+        for (const x of [0, 0.1, -0.25, 0.5, -0.75, 0.9, 0.95, -0.95]) {
+            expect(softLimit(x)).toBe(x);
+        }
+    });
+
+    it('holds a sum that would have clipped under full scale', () => {
+        // +3.4 dBFS is the measured case. The curve is asymptotic to 1 rather than stopping short
+        // of it: a sample AT full scale is what an ordinary 0 dBFS master already sends through
+        // this player every day, and the thing being prevented is the sample past it.
+        for (const x of [1, 1.2, 1.5, 2, 4, 40, -1.5, -4]) {
+            expect(Math.abs(softLimit(x))).toBeLessThanOrEqual(1);
+        }
+        expect(Math.abs(softLimit(1.5))).toBeGreaterThan(0.98);
+    });
+
+    it('joins the straight line without a corner', () => {
+        // A step or a kink at the knee is a click, which is the failure this shape exists to avoid:
+        // the whole point of shaping instead of ducking is that it stays inaudible.
+        const below = softLimit(0.95 - 1e-4);
+        const above = softLimit(0.95 + 1e-4);
+        expect(above - below).toBeGreaterThan(0);
+        expect(above - below).toBeLessThan(3e-4);
+    });
+
+    it('is monotonic and odd, so it changes level and never shape', () => {
+        // Monotonic or a loud passage comes back out with its waveform folded; odd or the shaping
+        // is asymmetric, which is a DC offset rather than a limiter.
+        let previous = -Infinity;
+        for (let x = -4; x <= 4; x += 0.01) {
+            const y = softLimit(x);
+            expect(y).toBeGreaterThanOrEqual(previous);
+            expect(softLimit(-x)).toBeCloseTo(-y, 12);
+            previous = y;
+        }
     });
 });
