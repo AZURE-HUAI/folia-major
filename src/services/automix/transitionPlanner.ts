@@ -440,14 +440,21 @@ export const planTransition = (
     // Each side bounds the overlap on its own now, and the pair is still bounded by the smaller of
     // the two when both are known, which is all the single number was ever doing.
     //
-    // Infinity for a window too small to blend inside, which keeps the standing decision that a
-    // track singing to its very last second is overlapped anyway rather than refused: this is a
-    // ceiling on how much room there is, and "none" is not a reason to abandon the transition.
-    const roomBefore = (window: number | null) => (
-        window !== null && window >= AUTOMIX_MIN_OVERLAP_SEC ? window : Infinity
+    // How long a blend this side can GUARANTEE is free of its own voice, or null for "cannot say".
+    //
+    // Null covers two different situations on purpose, because they have the same consequence: a
+    // window that was never measured, and one too small to blend inside. The second keeps the
+    // standing decision that a track singing to its very last second is overlapped anyway rather
+    // than refused - it abstains instead of vouching for half a second nobody can use.
+    //
+    // Null rather than Infinity, which is what this returned while the two rooms were combined with
+    // `min`. Under a `min` the two read the same; under the `max` below they are opposites, and
+    // "unmeasured" quietly claiming to vouch for an unbounded blend is a 17-second error.
+    const vouchFor = (window: number | null): number | null => (
+        window !== null && window >= AUTOMIX_MIN_OVERLAP_SEC ? window : null
     );
-    const tailRoom = roomBefore(tail);
-    const introRoom = roomBefore(intro);
+    const tailRoom = vouchFor(tail);
+    const introRoom = vouchFor(intro);
     // The two windows are proxies for ONE requirement, and `anchor` states it below: two vocal
     // lines stacked on each other is the thing that makes an overlap sound wrong. Holding both as
     // ceilings asks for something stricter and different - no voice AT ALL inside the blend.
@@ -455,13 +462,39 @@ export const planTransition = (
     // When `tailRoom` binds, the overlap fits inside the outgoing track's instrumental outro, so
     // that side is silent for the blend's whole length by construction. An incoming vocal arriving
     // over a departing instrumental is then a single voice, and a single voice is not a collision -
-    // it is the move. So the incoming window only has to bind when the outgoing side cannot vouch
-    // for itself: never measured, or singing to within a second of its own end.
+    // it is the move.
     //
     // What it cost while both bound: a wanted 11.88s blend came out at 2.04s on a pair whose
     // outgoing track had a 34.42s instrumental outro, because the incoming one's first section
     // began 2.92s in. Half a minute of nobody singing, and the blend was refused all of it.
-    const introBinds = !Number.isFinite(tailRoom);
+    //
+    // That argument was accepted for one side and then not applied to the other, and the missing
+    // half is what a listener hears as the transition "waiting until the last track is over". The
+    // mirror is the same sentence with the tracks swapped: when the overlap fits inside the NEXT
+    // track's instrumental intro, that side is silent for the blend's whole length, so the outgoing
+    // track may still be singing across it and there is still only one voice in the room.
+    //
+    // So the requirement is not "both ends have room", it is "ONE end can vouch for the whole
+    // blend" - which is a max, not a min, and it is why this replaced a pair of conditionals rather
+    // than adding a third.
+    //
+    // What the asymmetry cost, and it is severe because AUTOMIX_MIN_OVERLAP_SEC is 0.8: a track
+    // whose last line ends two seconds before the file does had `tailRoom` = 2, so every blend out
+    // of it was two seconds long and flush against the end, however long the next track's intro
+    // was. The song finished, and then the next one arrived - which is not a mix, and is exactly
+    // the "it dodges the problem" the listener reports.
+    //
+    // Both small is still both small: two seconds of outro into two seconds of intro leaves a short
+    // blend, and that one is the music's fault rather than the rule's.
+    //
+    // And when NEITHER side can vouch there is no ceiling here at all - not a ceiling of zero. That
+    // is the cold start, where nothing has been analysed and a blend still has to happen, and it is
+    // the track that sings to its own last second. Both were the old Infinity; keeping them means
+    // this whole change touches exactly one case, the one where both sides are known and the answer
+    // used to be the smaller of the two.
+    const singleVoiceRoom = tailRoom === null && introRoom === null
+        ? Infinity
+        : Math.max(tailRoom ?? 0, introRoom ?? 0);
 
     // One phrase of the outgoing track, then scaled by everything that was measured about the pair:
     // longer when the keys sit together, when the tempos are locked, when the tail wants riding, or
@@ -482,8 +515,7 @@ export const planTransition = (
         AUTOMIX_MAX_OVERLAP_SEC,
         // Quarter-length cap so a very short track is not half crossfade.
         end / 4,
-        tailRoom,
-        introBinds ? introRoom : Infinity,
+        singleVoiceRoom,
         // Only ever binds when the planning itself was late - see `left`.
         left,
     );
@@ -497,16 +529,20 @@ export const planTransition = (
     // short to fade across (186.73s)", which reads as a fact about the track and was a fact about
     // three length penalties multiplying together.
     if (overlap < AUTOMIX_MIN_OVERLAP_SEC) {
-        const vocalRoom = Math.min(tailRoom, introRoom);
         // WHICH end ran out, because the two are fixed by opposite things: a short outro is the
         // outgoing song, a short intro is the incoming one, and naming the wrong one sends the
         // next person looking at the wrong track.
+        //
+        // The LARGER of the two, which reads backwards until you remember what the ceiling now is:
+        // only one side has to be silent, so the side that offered more room is the one the blend
+        // was actually measured against. Naming the smaller would point at a track that was never
+        // the constraint.
         const bound = ceiling === left
             ? `only ${round(left)}s of the outgoing track left`
-            : Number.isFinite(vocalRoom) && vocalRoom <= end / 4
-            ? tailRoom <= introRoom
-                ? `only ${round(tailRoom)}s after the outgoing track stops singing`
-                : `only ${round(introRoom)}s before the next track sings`
+            : Number.isFinite(singleVoiceRoom) && singleVoiceRoom <= end / 4
+            ? singleVoiceRoom === tailRoom
+                ? `only ${round(singleVoiceRoom)}s after the outgoing track stops singing`
+                : `only ${round(singleVoiceRoom)}s before the next track sings`
             : `a ${round(end)}s track leaves only ${round(end / 4)}s to fade across`;
         return hardCut(`no room to fade - ${bound}`);
     }
@@ -626,9 +662,21 @@ export const planTransition = (
     // The one place a blend is allowed past a measured window, so it says so. A listener who hears
     // the next vocal arrive while the last track is still audible should be able to find out from
     // the log whether that was intended, and this is the line that answers it.
-    const sungOver = !introBinds && intro !== null && inStart + overlap > intro
-        ? ', the next track sings over the outgoing instrumental'
-        : '';
+    // Which voice is actually inside the blend, now that the ceiling permits either one.
+    //
+    // The pair matters more than either half: `both` is the collision the whole rule exists to
+    // prevent, and it should be unreachable - the ceiling is the room ONE side can vouch for, so a
+    // blend containing two voices means a window was measured wrong rather than that a bound was
+    // relaxed. It prints loudest because it is the line that would say so.
+    const nextSings = intro !== null && inStart + overlap > intro;
+    const outgoingSings = lastSung !== null && outStart < lastSung;
+    const sungOver = nextSings && outgoingSings
+        ? ', BOTH tracks sing inside this blend'
+        : nextSings
+            ? ', the next track sings over the outgoing instrumental'
+            : outgoingSings
+                ? ', the outgoing track sings over the next one\'s intro'
+                : '';
 
     return {
         kind: 'fade',

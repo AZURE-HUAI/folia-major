@@ -373,16 +373,44 @@ describe('a blend aims at where the music stops', () => {
         expect(plan.reason).toContain('to ride the fade-out');
     });
 
-    it('never moves the blend back over the singing', () => {
-        // Moving the anchor earlier is precisely how two vocal lines end up stacked on each other,
-        // which is the one thing an overlap must not do. A long fade under a late vocal is where
-        // the two rules meet, and the vocal wins.
+    // The requirement is that two VOICES never stack, and for a long time the code enforced a
+    // proxy for it instead: the blend may not start before the outgoing track stops singing, full
+    // stop. That is strictly stronger, and the difference is audible - it is what makes a
+    // transition wait for the last song to finish and then hurry, because a track whose last line
+    // ends two seconds before the file does had a two-second blend and nothing could lengthen it.
+    //
+    // These two pin the requirement itself, from both sides.
+    it('blends back over the outgoing singing when the next track is provably silent', () => {
         const from: TransitionTrack = {
             duration: 100,
             lines: [line(10, 94)],
             profile: makeProfile({ duration: 100, leadOut: 0, bodyOut: 9 }),
         };
-        expect(planTransition(from, track(100, null, 10), 120).outStart).toBeCloseTo(94, 6);
+        // Six seconds of outro against a ten-second intro. The old rule took the smaller and gave
+        // a six-second blend flush against 94s; the intro is what can actually vouch here.
+        const plan = planTransition(from, track(100, null, 10), 120);
+
+        expect(plan.outStart).toBeCloseTo(92, 6);
+        // The assertion that matters, and the reason the one above is allowed to be 92: the whole
+        // blend is over before the incoming track sings a note, so the outgoing voice inside it is
+        // the ONLY voice inside it.
+        expect(plan.inStart + plan.overlap).toBeLessThanOrEqual(10);
+        expect(plan.reason).toContain('the outgoing track sings over');
+    });
+
+    it('never moves the blend back over the singing when neither track can vouch', () => {
+        // Same outgoing track, but now the next one opens singing almost immediately. Nothing can
+        // cover a longer blend, so the outgoing vocal is back to being the floor - which is the
+        // case the old rule was right about, and it still holds.
+        const from: TransitionTrack = {
+            duration: 100,
+            lines: [line(10, 94)],
+            profile: makeProfile({ duration: 100, leadOut: 0, bodyOut: 9 }),
+        };
+        const plan = planTransition(from, track(100, null, 1), 120);
+
+        expect(plan.outStart).toBeGreaterThanOrEqual(94);
+        expect(plan.reason).not.toContain('BOTH tracks sing');
     });
 
     it('leaves a decay too long to be an ending where it is', () => {
