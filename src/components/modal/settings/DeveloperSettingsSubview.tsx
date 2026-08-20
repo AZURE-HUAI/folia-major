@@ -35,7 +35,11 @@ const DeveloperSettingsSubview: React.FC<DeveloperSettingsSubviewProps> = ({
     // Subscribed rather than read once: the switch clears the buffer, and the count beside it has
     // to answer for that immediately or it reads as the switch having done nothing.
     const entries = useSyncExternalStore(subscribeToConsoleLog, getConsoleLogEntries);
-    const capturing = isConsoleCaptureEnabled();
+    // The SWITCH is subscribed too, and it has to be its own subscription. Read plainly, this line
+    // re-rendered only when `entries` changed identity - which switching OFF does, because it
+    // clears the buffer, and switching ON does not. So the toggle animated one way and froze the
+    // other, on a switch that had in fact flipped. A derived value is not a subscription.
+    const capturing = useSyncExternalStore(subscribeToConsoleLog, isConsoleCaptureEnabled);
 
     return (
         <div className="space-y-4">

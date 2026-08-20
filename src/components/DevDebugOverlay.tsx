@@ -605,12 +605,11 @@ const DevDebugOverlay: React.FC<DevDebugOverlayProps> = ({
 }) => {
     // Console first: on the desktop build this overlay is the only console there is, so reading it
     // is what the shortcut is pressed for.
-    const [chosenTab, setChosenTab] = useState<'console' | 'memory' | 'playback' | 'lyrics' | 'theme' | 'sonnet'>('console');
-    // Whether anything is being kept at all. Switched off in Settings > Developer, and off means
-    // off: the tab goes with it rather than opening on a panel that says there is nothing to show.
-    // A switch that leaves its own door standing is a switch nobody trusts the second time.
+    const [activeTab, setActiveTab] = useState<'console' | 'memory' | 'playback' | 'lyrics' | 'theme' | 'sonnet'>('console');
+    // The switch in Settings > Developer governs this whole overlay, not just its Console tab. It
+    // is the debug back room's switch: off means the chord opens nothing at all. Hiding one tab and
+    // leaving the other five was reading the switch as "the log" when it is named for the room.
     const capturing = useSyncExternalStore(subscribeToConsoleLog, isConsoleCaptureEnabled);
-    const activeTab = chosenTab === 'console' && !capturing ? 'memory' : chosenTab;
     const [liveCurrentTime, setLiveCurrentTime] = useState(() => currentTime.get());
     const [liveLyricCurrentTime, setLiveLyricCurrentTime] = useState(() => lyricCurrentTime?.get() ?? currentTime.get());
     const [memoryHistory, setMemoryHistory] = useState<MemorySample[]>([]);
@@ -738,6 +737,10 @@ const DevDebugOverlay: React.FC<DevDebugOverlayProps> = ({
         : 'rounded-xl border border-white/10 bg-black/15';
     const chartBarClass = isDaylight ? 'bg-emerald-600/75' : 'bg-emerald-400/80';
 
+    // Placed after the hooks rather than at the top, because the rule is unconditional hooks, not
+    // unconditional work. The chord still flips its boolean; there is simply nothing behind it.
+    if (!capturing) return null;
+
     return (
         <aside className="pointer-events-none fixed top-4 right-4 z-[55] w-[min(34rem,calc(100vw-2rem))]">
             <div
@@ -752,14 +755,12 @@ const DevDebugOverlay: React.FC<DevDebugOverlayProps> = ({
                 </div>
 
                 <div className="mt-3 flex flex-wrap gap-2">
-                    {capturing && (
-                        <TabButton label="Console" isActive={activeTab === 'console'} onClick={() => setChosenTab('console')} isDaylight={isDaylight} />
-                    )}
-                    <TabButton label="Memory" isActive={activeTab === 'memory'} onClick={() => setChosenTab('memory')} isDaylight={isDaylight} />
-                    <TabButton label="Playback" isActive={activeTab === 'playback'} onClick={() => setChosenTab('playback')} isDaylight={isDaylight} />
-                    <TabButton label="Lyrics" isActive={activeTab === 'lyrics'} onClick={() => setChosenTab('lyrics')} isDaylight={isDaylight} />
-                    <TabButton label="Theme" isActive={activeTab === 'theme'} onClick={() => setChosenTab('theme')} isDaylight={isDaylight} />
-                    <TabButton label="Sonnet" isActive={activeTab === 'sonnet'} onClick={() => setChosenTab('sonnet')} isDaylight={isDaylight} />
+                    <TabButton label="Console" isActive={activeTab === 'console'} onClick={() => setActiveTab('console')} isDaylight={isDaylight} />
+                    <TabButton label="Memory" isActive={activeTab === 'memory'} onClick={() => setActiveTab('memory')} isDaylight={isDaylight} />
+                    <TabButton label="Playback" isActive={activeTab === 'playback'} onClick={() => setActiveTab('playback')} isDaylight={isDaylight} />
+                    <TabButton label="Lyrics" isActive={activeTab === 'lyrics'} onClick={() => setActiveTab('lyrics')} isDaylight={isDaylight} />
+                    <TabButton label="Theme" isActive={activeTab === 'theme'} onClick={() => setActiveTab('theme')} isDaylight={isDaylight} />
+                    <TabButton label="Sonnet" isActive={activeTab === 'sonnet'} onClick={() => setActiveTab('sonnet')} isDaylight={isDaylight} />
                 </div>
 
                 {activeTab === 'console' && (

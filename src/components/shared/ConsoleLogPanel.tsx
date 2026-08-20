@@ -175,6 +175,9 @@ export const ConsoleLogPanel: React.FC<ConsoleLogPanelProps> = ({
     listMaxHeightClass = 'max-h-[26rem]',
 }) => {
     const entries = useSyncExternalStore(subscribeToConsoleLog, getConsoleLogEntries);
+    // Its own subscription, not a plain read: switching capture back ON changes nothing about
+    // `entries`, so a derived read left this panel showing the off state after the switch was on.
+    const capturing = useSyncExternalStore(subscribeToConsoleLog, isConsoleCaptureEnabled);
     const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
     const [query, setQuery] = useState('');
     const [hiddenScopes, setHiddenScopes] = useState<Set<string>>(
@@ -278,13 +281,10 @@ export const ConsoleLogPanel: React.FC<ConsoleLogPanelProps> = ({
         ? 'border-black/10 bg-black/[0.03] placeholder:text-black/35'
         : 'border-white/10 bg-white/[0.05] placeholder:text-white/35';
 
-    // Read on every render, and it re-renders because the switch notifies the same listeners the
-    // buffer does. The panel owning this rather than each host is the point: the debug chord and
-    // the settings page are two doors into ONE recorder, and a door that still opens after the
-    // recorder was switched off says the switch did nothing. The overlay hides its Console tab
-    // outright, so what is left here renders directly under the switch - which is why it does not
-    // say where the switch is.
-    if (!isConsoleCaptureEnabled()) {
+    // The debug overlay refuses to open at all when the switch is off, so the only place this
+    // renders is the settings page, directly under the switch - which is why it does not say
+    // where the switch is.
+    if (!capturing) {
         return (
             <section className={className}>
                 <div className="px-3 py-3 text-[11px] leading-relaxed opacity-60">

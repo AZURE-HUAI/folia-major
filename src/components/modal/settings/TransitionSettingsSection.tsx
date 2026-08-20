@@ -112,13 +112,8 @@ const TransitionSettingsSection: React.FC<TransitionSettingsSectionProps> = ({
             </h3>
             <div className={`rounded-xl border overflow-hidden ${settingsCardClass}`}>
                 <div className="p-4 flex items-start justify-between gap-4">
-                    <div className="space-y-1">
-                        <div className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
-                            {t('options.transitionEnable')}
-                        </div>
-                        <div className="text-[11px] opacity-50 max-w-[420px]" style={{ color: 'var(--text-secondary)' }}>
-                            {t('options.transitionEnableDesc')}
-                        </div>
+                    <div className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
+                        {t('options.transitionEnable')}
                     </div>
                     <button
                         type="button"
@@ -136,13 +131,8 @@ const TransitionSettingsSection: React.FC<TransitionSettingsSectionProps> = ({
                     className={`p-4 space-y-3 border-t transition-opacity ${automixEnabled ? 'opacity-100' : 'opacity-45 pointer-events-none'}`}
                     style={{ borderColor: 'var(--border-primary, rgba(255,255,255,0.06))' }}
                 >
-                    <div className="space-y-1">
-                        <div className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
-                            {t('options.transitionMode')}
-                        </div>
-                        <div className="text-[11px] opacity-50 max-w-[420px]" style={{ color: 'var(--text-secondary)' }}>
-                            {t('options.transitionModeDesc')}
-                        </div>
+                    <div className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
+                        {t('options.transitionMode')}
                     </div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                         {modes.map((mode) => {
@@ -207,9 +197,6 @@ const TransitionSettingsSection: React.FC<TransitionSettingsSectionProps> = ({
                         </div>
                     ) : (
                         <div className="space-y-2 pt-1">
-                            <div className="text-[11px] opacity-50 max-w-[420px]" style={{ color: 'var(--text-secondary)' }}>
-                                {t('options.transitionAutomixLength', { seconds: CROSSFADE_MAX_SEC })}
-                            </div>
                             {/* Which build this is. The desktop app separates the two tracks and
                                 hands them over stem by stem; the browser cannot run either model
                                 and gets the same planner over less evidence. Said out loud because
