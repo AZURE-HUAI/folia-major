@@ -63,24 +63,6 @@ const SUSTAIN_MIN_SEC = 1.2;
  */
 const SUSTAIN_FLAT_DB = 7;
 
-/**
- * Shortest a recede may be, in bars of the outgoing track.
- *
- * Two, and this is a SECOND constraint rather than a tuning of the first. `recedeFrom` derives the
- * start of the fade from `swap`, which answers "when does the outgoing voice stop being the one in
- * the room" - a question about collision. It says nothing about RATE, and the listener's report is
- * about rate: not that a voice was cut off, but that it left too quickly. Those are constraints on
- * different objects, so they get a knob each; deriving the rate from the collision deadline is what
- * made a 2.5s fall the only length available.
- *
- * In bars because it is the outgoing track's own voice leaving over the outgoing track's own
- * groove, so its bar is the unit. Two of them is a phrase's worth of falling - long enough to read
- * as a decision, short enough that the voice is gone before the next one arrives.
- *
- * `min` against `swap` below, so this only ever moves the start EARLIER: every window where the
- * fade was already at least this long is untouched by a sample.
- */
-const RECEDE_BARS = 2;
 
 /**
  * How long a run of cells has to stay up before it counts as singing.
@@ -132,7 +114,7 @@ export interface VocalExit {
     /** Seconds into the window where it is gone. */
     to: number;
     /** Which branch fired. Reported so the log can say WHY a transition sounded the way it did. */
-    kind: 'rest' | 'recede';
+    kind: 'rest' | 'recede' | 'release';
     /** How loud the quietest reachable half-second was, in dB below the window's median. */
     loudDb: number;
     /**
@@ -351,6 +333,44 @@ export const planVocalExit = (
     // what the listener hears, and the behaviour follows from that rather than from this comment.
     const held = findSustain(vocals, mix, cellSec);
 
+    /**
+     * A note still sounding at the deadline is ridden to its release instead of faded across.
+     *
+     * This branch outranks the other two, and it has to: both of them end the voice somewhere
+     * inside the note. The rest search would cut in a quiet moment BEFORE it and take the whole
+     * note away; the recede would fade down the middle of it, which is the one gesture an ear reads
+     * as a fader rather than as music - on a held note nothing else is changing, so the fader is
+     * the only thing moving and it is plainly audible.
+     *
+     * The release is where an exit costs nothing, so the exit goes there. What it buys is bounded
+     * and knowable: the note keeps sounding past `hardEnd`, over the incoming voice, until the
+     * singer lets go. That is a deliberate breach of the do-not-stack-two-voices rule, and it is
+     * narrower than it sounds - the rule exists because two voices DELIVERING WORDS turn to mud,
+     * and a held vowel is not delivering words. It is the case a DJ reaches for on purpose.
+     *
+     * Measured on the window this was built from: a 10.60s note released at 13.45s in a 14.4s
+     * blend, with the fade starting at 0.83s - two seconds before the note it was fading even
+     * began. The listener's report on that transition was that the voice left too early and would
+     * otherwise have met the incoming track's own held note exactly.
+     *
+     * Three conditions, and the third is the one that keeps this honest. The note has to be
+     * sounding at the deadline (`from <= hardEnd < to`), or it is not the note the exit collides
+     * with - `findSustain` reports the LAST hold in the window, which on some tracks is one the
+     * voice takes up again well after it was due to leave. And it has to RELEASE inside the window,
+     * with room for the cut: a note still going when the blend ends has no release to ride to, and
+     * riding it anyway would mean never letting go at all, just handing the decision to the moment
+     * the deck stops. That case keeps the ordinary branches, which is what the `still holding when
+     * the window ends` log line has always been reporting.
+     */
+    const windowSec = vocals.length * cellSec;
+    const ridable = held !== null
+        && held.from <= hardEnd
+        && held.to > hardEnd
+        && held.to + CUT_SEC <= windowSec - TAIL_GUARD_SEC;
+    if (ridable && held) {
+        return { from: held.to, to: held.to + CUT_SEC, kind: 'release', loudDb: best.value, held };
+    }
+
     return best.value <= REST_DB
         ? { from: at, to: Math.min(at + exitSec, hardEnd), kind: 'rest', loudDb: best.value, held }
         // Nowhere quiet to hide, so the voice recedes instead. A fade needs somewhere to hide;
@@ -461,17 +481,17 @@ export const planStemHandover = (
      * Floored so it stays a fade. Squeezed under a second this reads as a cut, in a place the
      * search has already rejected as too loud to cut in.
      *
-     * And floored a SECOND time, at RECEDE_BARS - because `swap` fixes when the fall may begin but
-     * nothing here fixed how fast it falls, and a deadline is not a rate. On an ordinary window
-     * `swap` left the voice about `inBar + CUT_SEC` to get out in, which at 120 BPM is two and a
-     * half seconds, and `fall` spends the last quarter of any span below -18 dB - so the audible
-     * part of it was under two. That is the "it leaves too fast" the listener reports, and it is
-     * not the same complaint as the swallowing this branch was written to avoid.
+     * And floored ONLY there. A second floor of two bars was tried, to answer a listener's report
+     * that the voice left too quickly - and it made the complaint worse on every window it touched,
+     * because a longer fade here is not a slower one. The END is pinned at `hardEnd`, and `fall`
+     * crosses audibility at 74.3% of whatever span it is given, so stretching the span backwards
+     * moves the moment the voice DISAPPEARS earlier. Measured on the three windows the report came
+     * from: the silence between the outgoing voice going inaudible and the incoming one arriving
+     * went 0.18 -> 1.40s, 0.14 -> 0.45s and 0.12 -> 0.53s. Rate and start are not independent while
+     * the deadline is fixed; making this fade genuinely slower means moving `hardEnd`, which is a
+     * different constraint and belongs to the branch below.
      */
-    const recedeFrom = Math.max(
-        EXIT_FLOOR_SEC,
-        Math.min(swap, hardEnd - Math.max(MIN_RECEDE_SEC, RECEDE_BARS * bar)),
-    );
+    const recedeFrom = Math.max(EXIT_FLOOR_SEC, Math.min(swap, hardEnd - MIN_RECEDE_SEC));
 
     return { swap, bassAt, vocalIn, exit: planVocalExit(vocals, mix, hardEnd, recedeFrom, cellSec) };
 };

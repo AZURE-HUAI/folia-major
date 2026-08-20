@@ -111,6 +111,39 @@ describe('planVocalExit', () => {
         expect(exit.from).toBeGreaterThanOrEqual(16.65);
     });
 
+    /** Silence, one note held at a constant level, silence. */
+    const heldTail = (seconds: number, from: number, to: number) => {
+        const out = flat(seconds, 1e-6);
+        for (let c = Math.round(from / CELL_SEC); c < Math.round(to / CELL_SEC); c += 1) out[c] = 1;
+        return out;
+    };
+
+    it('rides a note that is still sounding at the deadline out to its release', () => {
+        // The 14.4s blend the listener reported: a 10.60s note released at 13.45s, and a fade that
+        // began at 0.83s - two seconds before the note it was fading had even started. Both other
+        // branches end the voice inside the note; only its release is free.
+        const exit = planVocalExit(heldTail(14.4, 2.85, 13.45), flat(14.4, 1), 8.03, 5.37);
+        expect(exit.kind).toBe('release');
+        expect(exit.from).toBeCloseTo(13.45, 2);
+        expect(exit.to - exit.from).toBeCloseTo(0.5, 6);
+    });
+
+    it('does not ride a note that never lets go inside the window', () => {
+        // No release means nothing to ride to, and riding anyway would hand the decision to the
+        // moment the deck stops rather than to the music. The ordinary deadline stands.
+        const exit = planVocalExit(heldTail(14.4, 2.85, 14.4), flat(14.4, 1), 8.03, 5.37);
+        expect(exit.kind).not.toBe('release');
+        expect(exit.to).toBeCloseTo(8.03, 6);
+    });
+
+    it('does not ride a note the voice only takes up after it was due to leave', () => {
+        // `findSustain` reports the LAST hold in the window, which is not always the one the exit
+        // collides with. This note starts after the deadline: the voice is already gone, and
+        // bringing it back to sing over the incoming one is the defect, not the fix.
+        const exit = planVocalExit(heldTail(8.64, 5.5, 7.0), flat(8.64, 1), 5.11, 2.61);
+        expect(exit.kind).not.toBe('release');
+    });
+
     it('still finds the rest when the singer does not come back', () => {
         // The other half of the same bound: a voice that genuinely finishes early leaves every
         // later half-second at least as quiet, so nothing is given up by starting the search late.
@@ -334,13 +367,16 @@ describe('planStemHandover recede length', () => {
     // under test.
     const loud = (seconds: number) => flat(seconds, 0.5);
 
-    it('starts the fade early enough to last two bars, not just to clear the incoming voice', () => {
+    it('keeps the voice audible until the incoming one arrives', () => {
+        // The property a two-bar floor on the fade was added to buy, and took away instead.
+        // `fall` crosses -18dB - under the mix it sits in, gone - at 74.3% of whatever span it is
+        // given, and the span's END is pinned at `hardEnd`. So stretching the start backwards moves
+        // the moment the voice DISAPPEARS earlier, which is the complaint, not the cure.
         const plan = planStemHandover(12, 2, 2, [], loud(12), loud(12));
         expect(plan.exit.kind).toBe('recede');
-        // The deadline is unchanged - it is still the incoming voice that ends the fade.
-        expect(plan.exit.to).toBeCloseTo(Math.min(plan.vocalIn + 0.5, 11.6), 6);
-        // What changed is where it begins. Anchored on `swap` alone this was 2.5s.
-        expect(plan.exit.to - plan.exit.from).toBeGreaterThanOrEqual(4 - 1e-6);
+
+        const audibleUntil = plan.exit.from + 0.743 * (plan.exit.to - plan.exit.from);
+        expect(audibleUntil).toBeGreaterThanOrEqual(plan.vocalIn - 0.25);
     });
 
     it('never moves the start later than the swap, so windows that were long enough are untouched', () => {

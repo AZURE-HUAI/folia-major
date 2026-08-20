@@ -496,7 +496,7 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
          */
         const vocalGap = handover.vocalIn - handover.exit.to;
         console.log(
-            `[Automix] stems: voice ${handover.exit.kind === 'rest' ? 'cut in a rest' : 'receding'}`
+            `[Automix] stems: voice ${{ rest: 'cut in a rest', recede: 'receding', release: 'riding a held note out' }[handover.exit.kind]}`
             + ` ${handover.exit.from.toFixed(2)}-${handover.exit.to.toFixed(2)}s`
             + ` (quietest half-second ${handover.exit.loudDb.toFixed(0)}dB under the mix),`
             + ` drums at ${handover.swap.toFixed(2)}s${bars.length ? ' on a bar line' : ''},`
