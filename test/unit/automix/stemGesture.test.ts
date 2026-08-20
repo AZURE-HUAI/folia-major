@@ -473,9 +473,11 @@ describe('planStemHandover incoming voice', () => {
         // singer out from the handover to make room for nobody, which is the 压音 report.
         const plan = planStemHandover(12, 2, 2, [], loud(12), loud(12), { sings: false });
         expect(plan.exit.kind).toBe('recede');
-        // A one-second fade landing on the window's own edge, not a four-second one from the swap.
-        expect(plan.exit.to).toBeCloseTo(11.6, 6);
-        expect(plan.exit.from).toBeCloseTo(10.6, 6);
+        // The shortest honest release, landing on the window's own last sample - not a
+        // four-second fade from the swap, and not stopping 0.4s short of the end either. Both of
+        // those bounds are statements about a handover, and there is no handover here.
+        expect(plan.exit.to).toBeCloseTo(12, 6);
+        expect(plan.exit.from).toBeCloseTo(11.5, 6);
         expect(plan.exit.from).toBeGreaterThan(plan.swap);
     });
 

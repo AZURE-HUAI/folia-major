@@ -593,10 +593,17 @@ export const planStemHandover = (
     // faded from 1.99s to 4.41s and her last held note, which begins at 5.32s, pushed to silence
     // under a fader with nothing else moving. The listener's word for that is 压音, and the whole
     // of it was spent making room for nobody.
-    const entry = incoming.sings === false
-        ? windowSec
-        : Math.min(windowSec - 0.6, swap + inBar);
-    const hardEnd = Math.min(entry + CUT_SEC, windowSec - 0.4);
+    const noOneWaiting = incoming.sings === false;
+    const entry = noOneWaiting ? windowSec : Math.min(windowSec - 0.6, swap + inBar);
+    // `windowSec - 0.4` says nothing should still be moving as the window closes, and it is a
+    // statement about a HANDOVER - the incoming track has the floor by then, so a fader still
+    // travelling on the outgoing one is an edit heard on top of it. Where nothing is waiting there
+    // is no handover to be late for, and the window's end is the outgoing track's own end: a song
+    // that finishes while its singer is still on a note is the song. Measured on the same 6.62s
+    // window as above - the guard plus the floor below ended her voice at 6.22s and left the last
+    // 0.40s of the record with no vocal in it, on a note the log reports as still held when the
+    // window ran out.
+    const hardEnd = noOneWaiting ? windowSec : Math.min(entry + CUT_SEC, windowSec - 0.4);
 
     /**
      * Where a recede starts, derived rather than pinned to the floor.
@@ -636,8 +643,16 @@ export const planStemHandover = (
     // is waiting that constraint never begins at all. Written as a `min` so the ordinary case is
     // untouched and the empty one degenerates to a one-second fade at the window's own edge - the
     // same shape as a cut, on a note the window was going to close on anyway.
-    const holdUntil = incoming.sings === false ? hardEnd - MIN_RECEDE_SEC : swap;
-    const recedeFrom = Math.max(EXIT_FLOOR_SEC, Math.min(holdUntil, hardEnd - MIN_RECEDE_SEC));
+    //
+    // And so does the floor's own length. MIN_RECEDE_SEC is justified by what happens after the
+    // fade - under a second the voice does not recede, it disappears, which is a cut placed
+    // somewhere the rest search already ruled out as too loud to cut in. That reasoning needs a
+    // record still playing on the far side of the fade. Against the end of the window nothing is
+    // on the far side, so the shortest honest shape is the right one: CUT_SEC, which by the 74.3%
+    // rule goes inaudible 0.37s in and reads as a release rather than as a fader.
+    const recedeFloor = noOneWaiting ? CUT_SEC : MIN_RECEDE_SEC;
+    const holdUntil = noOneWaiting ? hardEnd - recedeFloor : swap;
+    const recedeFrom = Math.max(EXIT_FLOOR_SEC, Math.min(holdUntil, hardEnd - recedeFloor));
     const exit = planVocalExit(vocals, mix, hardEnd, recedeFrom, cellSec, !incoming.keysClash);
 
     /**
