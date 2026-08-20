@@ -312,7 +312,12 @@ describe('automix session', () => {
 
         harness.session.handleActiveDeckPlaying('local:next-song');
 
+        // Three asks, two moments. The first is the PLANNER's: where the outgoing track stops
+        // singing is read off its vocal stem now, so the tail is looked up while the plan is being
+        // made as well as when the gesture is scheduled. Same key both times, which is the property
+        // under test - a second identity resolved at a second moment is exactly the bug above.
         expect(harness.stemAsks).toEqual([
+            { key: 'local:this-song', role: 'tail' },
             { key: 'local:this-song', role: 'tail' },
             { key: 'local:next-song', role: 'head' },
         ]);

@@ -34,6 +34,14 @@ export interface TransitionTrack {
     lines: Line[] | null;
     /** Offline measurement of the file, when it has been analysed. */
     profile?: TrackProfile | null;
+    /**
+     * Media time of the last moment this track is still singing, measured off its separated vocal.
+     *
+     * Outgoing side only, and null whenever it could not be measured: no separation in this build,
+     * the window not ready yet, or a tail with no singing in it. `lastSungMoment` is the fallback
+     * and the two are not equivalent - see there.
+     */
+    vocalEnd?: number | null;
 }
 
 export type TransitionKind = 'hardCut' | 'fade';
@@ -252,6 +260,18 @@ const nearestWithin = (
  * prepends a '......' line at 0.5s to every track whose singing starts after 0:03. Blank lines go
  * for the same reason - some sources use those as the placeholder instead.
  */
+/**
+ * Where the outgoing track stops singing, off the lyric file. The FALLBACK, not the answer.
+ *
+ * Worth knowing exactly how weak this is, because everything below treats it as a floor. Plain LRC
+ * carries no end times - the format has only line starts - so `endTime` on the last line is
+ * invented by the parser as `startTime + 5`, flat, with no reference to the audio at all. A singer
+ * who holds the last line for nine seconds is recorded as having stopped after five, and the
+ * handover is then placed four seconds inside her.
+ *
+ * Still used, because a wrong number is better than none on the web build and on tracks whose tail
+ * was never separated - but only when nothing measured the actual voice. See `vocalEnd`.
+ */
 const lastSungMoment = (lines: Line[] | null | undefined): number | null => {
     const sung = lines?.filter(line => line.fullText.trim().length > 0 && !isInterludeLine(line));
     return sung?.length ? sung[sung.length - 1].endTime : null;
@@ -379,7 +399,20 @@ export const planTransition = (
     }
 
     const beat = beatSec(bpm);
-    const lastSung = lastSungMoment(from.lines);
+    // The measurement outright when there is one, not the later of the two. Taking the max would
+    // read like caution and is not: the lyric figure is a five-second constant, so `max` would let
+    // an invented number push the floor past a measured one roughly half the time, in whichever
+    // direction the invention happened to fall. A guess does not get a vote against a measurement.
+    const sungFrom = from.vocalEnd != null ? 'the vocal stem' : 'the lyric file';
+    const lyricSung = lastSungMoment(from.lines);
+    const lastSung = from.vocalEnd ?? lyricSung;
+    // Printed only when both exist and they disagree by more than the margin the measurement was
+    // rounded up by. This is the line that says whether replacing the lyric floor was worth doing:
+    // if the two always agree, it was not, and nothing else in the log would ever reveal that.
+    const sungGap = from.vocalEnd != null && lyricSung !== null
+        && Math.abs(from.vocalEnd - lyricSung) > 0.5
+        ? `, the lyric file said ${round(lyricSung)}s`
+        : '';
     // Against the last sounding moment for the same reason: a lyric timeline that stops eight
     // seconds before a file that carries five seconds of silence has a three-second instrumental
     // outro, not an eight-second one, and only one of those two numbers is somewhere to put a blend.
@@ -583,6 +616,13 @@ export const planTransition = (
         : choice.tempo.relation === 'drifting' ? `, tempos ${apart}% apart, left to drift`
             : choice.tempo.relation === 'far' ? `, tempos ${apart}% apart, too far to overlap` : '';
     const entry = inStart > 0.05 ? `, entering the next track at ${round(inStart)}s` : '';
+    // The floor under every placement above, and WHERE IT CAME FROM. Named because the two sources
+    // are not the same kind of thing - one is measured off the voice, the other is a constant the
+    // lyric parser made up - and a log that prints the number without its provenance reads as
+    // though the placement were evidence-based on every track, which it was not.
+    const sung = lastSung === null
+        ? ', nothing says where the singing stops'
+        : `, sung to ${round(lastSung)}s off ${sungFrom}${sungGap}`;
     // The one place a blend is allowed past a measured window, so it says so. A listener who hears
     // the next vocal arrive while the last track is still audible should be able to find out from
     // the log whether that was intended, and this is the line that answers it.
@@ -606,7 +646,7 @@ export const planTransition = (
         // only - so the log said how long a blend was and never why that length. The scales live in
         // the choice, so without it a 1.95s blend and a 5.85s one read as the same decision.
         reason: `${choice.style} ${round(overlap)}s ${length} - ${choice.reason}`
-            + ` (${window}${sungOver}${key}${outgoingTail}${silence}${clipped}${fadeOut}${placed}${bend}${entry})`,
+            + ` (${window}${sungOver}${key}${outgoingTail}${sung}${silence}${clipped}${fadeOut}${placed}${bend}${entry})`,
     };
 };
 

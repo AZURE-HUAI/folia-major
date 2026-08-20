@@ -571,9 +571,24 @@ export const createAutomixSession = (ports: AutomixSessionPorts) => {
         // The deck still playing is the one whose tempo sets the length: at this point it is the
         // active one, and the only track with any audio behind it to measure.
         const outgoingTempo = ports.getChain(activeDeck)?.analyser.tempo() ?? null;
+        // Where the outgoing track actually stops singing, if its tail has been separated by now.
+        //
+        // Read through `request.fromKey` for the same reason the gesture does: it is the identity
+        // the session PINS, and the ref tracking "the current song" is already the incoming track
+        // by the time anything downstream runs. Asked here rather than inside the planner because
+        // transitionStrategy importing stems would close a real cycle - see the note in stems.ts.
+        //
+        // Absent on the web build, and absent on the first transition after a cold start when the
+        // model has not finished. Both fall back to the lyric file, which is what every build
+        // before this one used unconditionally.
+        const outgoingStems = ports.getStems?.(request.fromKey, 'tail') ?? null;
+        const outgoing: TransitionTrack = outgoingStems?.vocalEnd == null ? request.from : {
+            ...request.from,
+            vocalEnd: outgoingStems.from + outgoingStems.vocalEnd,
+        };
         const nextPlan = planForMode(
             request.settings,
-            request.from,
+            outgoing,
             request.to,
             // The offline profile measured the whole file; the live tap only heard the last few
             // seconds. Prefer the profile, fall back to the tap for anything never analysed.

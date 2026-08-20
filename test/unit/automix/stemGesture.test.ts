@@ -5,6 +5,7 @@ import {
     incomingCurves,
     outgoingCurves,
     planStemHandover,
+    lastVocalMoment,
     planVocalExit,
     rise,
     CELL_SEC,
@@ -146,16 +147,19 @@ describe('planStemHandover', () => {
     });
 
     // `flat` has no rest anywhere, so the exit is always a recede - which is the arm under test.
-    it('starts a recede where the beat changes hands, not at the top of the window', () => {
+    it('starts a recede near the beat change, never at the top of the window', () => {
         const plan = planStemHandover(8, 2, 2, bars, flat(8, 1), flat(8, 1));
 
         expect(plan.exit.kind).toBe('recede');
-        // The whole point: the outgoing voice keeps its full level over the incoming track's rise
-        // until the drums move. Beginning at the floor faded it out against nothing - measured on a
-        // real window, it reached -38 dB before the incoming voice had even entered, so the two
-        // songs never overlapped at all.
-        expect(plan.exit.from).toBe(plan.swap);
+        // The original property, and it still holds: beginning at the FLOOR faded the voice out
+        // against nothing - measured on a real window, it reached -38 dB before the incoming voice
+        // had even entered, so the two songs never overlapped at all.
+        expect(plan.exit.from).toBeGreaterThan(0.05);
         expect(plan.exit.to).toBeGreaterThan(plan.vocalIn);
+        // `swap` is now a ceiling on the start rather than the start itself. It answers when the
+        // fall may BEGIN; it never answered how fast the fall is, and on this window anchoring to
+        // it alone left the voice 2.5s to get out in - see RECEDE_BARS.
+        expect(plan.exit.from).toBeLessThanOrEqual(plan.swap + 1e-6);
     });
 
     it('never squeezes a recede down into a cut', () => {
@@ -254,5 +258,58 @@ describe('the curves a window is scheduled from', () => {
         const cell = (at: number) => curves.drums[Math.round((at / 8) * (curves.drums.length - 1))];
         expect(cell(plan.swap - 0.05)).toBeGreaterThan(0.9);
         expect(cell(plan.swap + 0.05)).toBeLessThan(0.1);
+    });
+});
+
+describe('lastVocalMoment', () => {
+    // Everything here is measured against the mix's median, so the mix is held flat and the vocal
+    // moves: a level is only "singing" relative to what it is sitting in.
+    const mix = flat(10, 0.5);
+
+    it('reports where the singing stopped, rounded up rather than down', () => {
+        const vocals = withRest(10, 0.3, 5, 10, 0.0001);
+        // 5.0s where the voice was last above the floor, plus the tail the note decays over. The
+        // direction is the assertion: a value under 5 would be a handover placed inside a singer.
+        expect(lastVocalMoment(vocals, mix)).toBeCloseTo(5.3, 6);
+    });
+
+    it('returns null when nothing sings in the window', () => {
+        expect(lastVocalMoment(flat(10, 0.0001), mix)).toBeNull();
+    });
+
+    it('ignores a leaked transient after the singing has stopped', () => {
+        // Two cells of a cymbal that htdemucs put in the vocal row. Loud, and not a syllable.
+        const vocals = withRest(10, 0.3, 5, 10, 0.0001);
+        vocals[Math.round(8 / CELL_SEC)] = 0.9;
+        vocals[Math.round(8 / CELL_SEC) + 1] = 0.9;
+        expect(lastVocalMoment(vocals, mix)).toBeCloseTo(5.3, 6);
+    });
+
+    it('runs past the end of the window when the track sings to its last second', () => {
+        // Deliberately past `10`: the caller clamps against the track, and a value that stopped at
+        // the window edge would be indistinguishable from one that ended exactly there.
+        expect(lastVocalMoment(flat(10, 0.3), mix)).toBeCloseTo(10.3, 6);
+    });
+});
+
+describe('planStemHandover recede length', () => {
+    // Loud throughout, so the exit search finds nowhere to cut and the recede branch is the one
+    // under test.
+    const loud = (seconds: number) => flat(seconds, 0.5);
+
+    it('starts the fade early enough to last two bars, not just to clear the incoming voice', () => {
+        const plan = planStemHandover(12, 2, 2, [], loud(12), loud(12));
+        expect(plan.exit.kind).toBe('recede');
+        // The deadline is unchanged - it is still the incoming voice that ends the fade.
+        expect(plan.exit.to).toBeCloseTo(Math.min(plan.vocalIn + 0.5, 11.6), 6);
+        // What changed is where it begins. Anchored on `swap` alone this was 2.5s.
+        expect(plan.exit.to - plan.exit.from).toBeGreaterThanOrEqual(4 - 1e-6);
+    });
+
+    it('never moves the start later than the swap, so windows that were long enough are untouched', () => {
+        // A slow incoming bar already leaves the recede more than two of the outgoing track's, so
+        // the floor must not fire: this is the `min` that keeps every blend that already worked.
+        const plan = planStemHandover(20, 1, 3, [], loud(20), loud(20));
+        expect(plan.exit.from).toBeCloseTo(plan.swap, 6);
     });
 });

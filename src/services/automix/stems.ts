@@ -3,6 +3,8 @@ import { getPlaybackSongKey, getPlaybackSourceRef } from '../../utils/appPlaybac
 import { getCachedSongAudioBlob } from '../onlineMusic/resourceCache';
 import { canRunBeatThis } from './beatThis';
 import { profilesSettled } from './profileService';
+// The one edge back the other way is `import type`, so it is erased and this is not a cycle.
+import { envelopeOf, lastVocalMoment } from './stemGesture';
 
 // src/services/automix/stems.ts
 // Separated audio for the two ends of a transition: the outgoing track's tail and the incoming
@@ -60,6 +62,14 @@ export interface TrackStems {
     duration: number;
     role: StemRole;
     /**
+     * Seconds from `from` to the last moment this track is still singing, or null.
+     *
+     * Only ever measured on a `tail` window, which is the only end anyone asks the question about.
+     * Null means either the wrong role or a window with no singing anywhere in it - both of which
+     * say "not from here", and the caller falls back to the lyric file.
+     */
+    vocalEnd: number | null;
+    /**
      * One stereo buffer per stem. They sum back to the mix - see `other` below.
      *
      * Built on first read, not on arrival. A window can sit in the cache for the length of a track
@@ -81,6 +91,8 @@ interface StemWindow {
     from: number;
     duration: number;
     role: StemRole;
+    /** See TrackStems. Measured once on arrival, off the floats, before anything is quantised. */
+    vocalEnd: number | null;
     /** Samples per channel. */
     length: number;
     /** One array per stem, the two channels laid end to end: [L..., R...]. */
@@ -151,6 +163,7 @@ const view = (window: StemWindow): TrackStems => {
         from: window.from,
         duration: window.duration,
         role: window.role,
+        vocalEnd: window.vocalEnd,
         get buffers(): Record<StemName, AudioBuffer> {
             if (!buffers) {
                 const built = {} as Record<StemName, AudioBuffer>;
@@ -468,10 +481,24 @@ export const ensureStems = async (request: StemRequest): Promise<void> => {
         }
         store('other', otherL, otherR);
 
+        // Measured here rather than at plan time, off the floats that are already in hand. Reading
+        // it later would mean building the playback copy of a window that may never be played, to
+        // answer a question worth one number - and the answer cannot change once the window has
+        // been separated, so the natural place for it is the one moment it is free.
+        //
+        // `left`/`right` are the mix rather than a sum of the four rows, which matters for the same
+        // reason `other` is subtracted above: the rows do not reconstruct exactly, and the
+        // reference this threshold is taken against should be what was actually playing.
+        const vocalEnd = request.role !== 'tail' ? null : lastVocalMoment(
+            envelopeOf([parts.vocals.left, parts.vocals.right], STEM_SAMPLE_RATE),
+            envelopeOf([left, right], STEM_SAMPLE_RATE),
+        );
+
         remember(key, {
             from: start / STEM_SAMPLE_RATE,
             duration: windowLength / STEM_SAMPLE_RATE,
             role: request.role,
+            vocalEnd,
             length: windowLength,
             pcm,
             gain,
@@ -485,9 +512,16 @@ export const ensureStems = async (request: StemRequest): Promise<void> => {
         // measure. A log that carries it turns any user's paste into a measurement.
         const modelSec = (performance.now() - modelStarted) / 1000;
         const totalSec = (performance.now() - started) / 1000;
+        // In MEDIA time, not window time, because that is the clock every other automix log and
+        // the planner's own floor are written in - a window-relative number here would have to be
+        // added to a figure from a different line before it meant anything.
+        const sung = request.role !== 'tail' ? ''
+            : vocalEnd === null
+                ? ', no singing anywhere in it'
+                : `, still singing at ${(start / STEM_SAMPLE_RATE + vocalEnd).toFixed(2)}s`;
         console.log(`[Automix] separated the ${request.role} of "${request.song.name}"`
             + ` (${(windowLength / STEM_SAMPLE_RATE).toFixed(1)}s from ${(start / STEM_SAMPLE_RATE).toFixed(1)}s)`
-            + ` - ${modelSec.toFixed(1)}s in the model, ${totalSec.toFixed(1)}s with the decode`);
+            + ` - ${modelSec.toFixed(1)}s in the model, ${totalSec.toFixed(1)}s with the decode${sung}`);
     } catch (error) {
         console.warn('[Automix] separation failed', error);
     } finally {

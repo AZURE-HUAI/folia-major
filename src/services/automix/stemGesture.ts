@@ -47,6 +47,44 @@ const DEEP_REST_DB = -45;
 const SOFT_EXIT_SEC = 1.2;
 
 /**
+ * Shortest a recede may be, in bars of the outgoing track.
+ *
+ * Two, and this is a SECOND constraint rather than a tuning of the first. `recedeFrom` derives the
+ * start of the fade from `swap`, which answers "when does the outgoing voice stop being the one in
+ * the room" - a question about collision. It says nothing about RATE, and the listener's report is
+ * about rate: not that a voice was cut off, but that it left too quickly. Those are constraints on
+ * different objects, so they get a knob each; deriving the rate from the collision deadline is what
+ * made a 2.5s fall the only length available.
+ *
+ * In bars because it is the outgoing track's own voice leaving over the outgoing track's own
+ * groove, so its bar is the unit. Two of them is a phrase's worth of falling - long enough to read
+ * as a decision, short enough that the voice is gone before the next one arrives.
+ *
+ * `min` against `swap` below, so this only ever moves the start EARLIER: every window where the
+ * fade was already at least this long is untouched by a sample.
+ */
+const RECEDE_BARS = 2;
+
+/**
+ * How long a run of cells has to stay up before it counts as singing.
+ *
+ * A quarter second. Separation leaks - a snare tail or a cymbal lands in the vocal stem as a
+ * transient a cell or two long - and one loud cell is exactly what that looks like. A sung syllable
+ * is longer than this; a leaked hit is not.
+ */
+const SUSTAIN_CELLS = 5;
+
+/**
+ * How much past the last sounding cell the voice is called finished.
+ *
+ * A held note falls under the threshold while it is still decaying, so the cell that fails the test
+ * is not the end of the note. Three tenths, and the DIRECTION is the whole point: every error this
+ * function can make has to land late. A vocal end reported late puts a handover in the instrumental
+ * outro, which is dull; one reported early puts it on top of a singer, which is the defect.
+ */
+const VOCAL_TAIL_SEC = 0.3;
+
+/**
  * Where the drums change hands, as a fraction of the window.
  *
  * Snapped to a real bar line when one is in reach; this is only the target it reaches towards.
@@ -204,6 +242,48 @@ export const planVocalExit = (
 };
 
 /**
+ * The last moment the outgoing track is still singing, in seconds from the window's start.
+ *
+ * Null when it never sings inside the window at all, which is the honest answer rather than zero:
+ * "the singing stopped before this window began" is a bound, not a time, and the caller has a
+ * better one.
+ *
+ * This exists because the planner has been asking a LYRIC FILE where a track stops singing. Plain
+ * LRC has no end times at all, so the parser invents one - the last line's start plus a flat five
+ * seconds - and that number is then the floor under every handover placement. It is not a
+ * measurement of anything; a singer who holds past it gets a transition opened on top of her.
+ *
+ * Same threshold as the exit search, against the same reference, for the same reason: quiet only
+ * means anything measured against what else is playing, and a voice thirty dB under the mix it sits
+ * in has stopped being one of the things in the room whether or not it is still technically
+ * sounding.
+ */
+export const lastVocalMoment = (
+    /** The vocal stem's envelope over the window. */
+    vocals: Float32Array,
+    /** The mix's envelope over the same window. */
+    mix: Float32Array,
+    cellSec = CELL_SEC,
+): number | null => {
+    const floor = median(mix) * 10 ** (REST_DB / 20);
+    // Walked backwards, so the first qualifying run found is the LAST one in the window. `edge` is
+    // its right-hand end - the cell the run was entered on - because that is the moment being
+    // reported, not the point a quarter second earlier where the evidence became sufficient.
+    let run = 0;
+    let edge = -1;
+    for (let cell = vocals.length - 1; cell >= 0; cell -= 1) {
+        if (vocals[cell] <= floor) {
+            run = 0;
+            continue;
+        }
+        if (run === 0) edge = cell;
+        run += 1;
+        if (run >= SUSTAIN_CELLS) return (edge + 1) * cellSec + VOCAL_TAIL_SEC;
+    }
+    return null;
+};
+
+/**
  * When each stem changes hands across one window.
  *
  * Drums swap first and near-instantly, bass follows a bar later, and the incoming voice arrives a
@@ -263,8 +343,18 @@ export const planStemHandover = (
      *
      * Floored so it stays a fade. Squeezed under a second this reads as a cut, in a place the
      * search has already rejected as too loud to cut in.
+     *
+     * And floored a SECOND time, at RECEDE_BARS - because `swap` fixes when the fall may begin but
+     * nothing here fixed how fast it falls, and a deadline is not a rate. On an ordinary window
+     * `swap` left the voice about `inBar + CUT_SEC` to get out in, which at 120 BPM is two and a
+     * half seconds, and `fall` spends the last quarter of any span below -18 dB - so the audible
+     * part of it was under two. That is the "it leaves too fast" the listener reports, and it is
+     * not the same complaint as the swallowing this branch was written to avoid.
      */
-    const recedeFrom = Math.max(EXIT_FLOOR_SEC, Math.min(swap, hardEnd - MIN_RECEDE_SEC));
+    const recedeFrom = Math.max(
+        EXIT_FLOOR_SEC,
+        Math.min(swap, hardEnd - Math.max(MIN_RECEDE_SEC, RECEDE_BARS * bar)),
+    );
 
     return { swap, bassAt, vocalIn, exit: planVocalExit(vocals, mix, hardEnd, recedeFrom, cellSec) };
 };
